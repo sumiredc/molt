@@ -13,10 +13,10 @@
 ## 始め方
 
 ```sh
-cargo run
+cargo run -- --help
 ```
 
-`Hello, world!` が出ればビルドは動いている。この手順で確かめられるのは toolchain が揃っていることだけ。
+`cargo run -- --help` でサブコマンドの一覧が出ればビルドは動いている。この手順で確かめられるのは toolchain が揃っていることだけ。
 
 ## 次に読むもの
 
