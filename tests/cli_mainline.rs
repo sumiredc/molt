@@ -150,28 +150,99 @@ fn without_the_api_key_molt_reports_its_variable_and_does_not_open_the_main_line
     assert_eq!(stdout(&output), "", "the main line must not open");
 }
 
-#[test]
-fn the_main_line_refuses_fake_until_it_can_read_the_script() {
-    let setup = Setup::new();
-    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
-    let output = cargo_bin_cmd!("molt")
+/// Runs `molt --profile <profile> --ui-script <script>` with `fake` (`--fake` and what follows it)
+/// in the project of `setup`. `config.toml` names an API key variable that is unset, so only a
+/// fake client can open the main line.
+fn molt_with_fake(setup: &Setup, script: &Path, fake: &[&std::ffi::OsStr]) -> Output {
+    cargo_bin_cmd!("molt")
         .current_dir(setup.project())
         .env("MOLT_HOME", setup.home())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("MOLT_LOG")
+        .env_remove("MOLT_TEST_FAKE_SCRIPT_API_KEY")
         .arg("--profile")
         .arg(setup.profile())
         .arg("--ui-script")
-        .arg(&script)
-        .arg("--fake")
-        .arg(&script)
+        .arg(script)
+        .args(fake)
         .output()
-        .unwrap();
+        .unwrap()
+}
+
+/// A setup whose `config.toml` needs an API key from a variable that is never set.
+fn setup_without_a_key() -> Setup {
+    Setup::with_api(&format!(
+        "base_url = \"http://127.0.0.1:{}/v1\"\napi_key_env = \"MOLT_TEST_FAKE_SCRIPT_API_KEY\"\n",
+        closed_port()
+    ))
+}
+
+#[test]
+fn a_fake_script_runs_a_turn_offline_with_its_responses() {
+    let setup = setup_without_a_key();
+    let fake = setup.dir.path().join("fake.toml");
+    fs::write(
+        &fake,
+        r#"
+[[responses]]
+tool_calls = [
+  { name = "write_file", arguments = { path = "src/lib.rs", content = "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n" } },
+]
+
+[[responses]]
+tool_calls = [{ name = "finish", arguments = { summary = "Added `add` to src/lib.rs." } }]
+"#,
+    )
+    .unwrap();
+    let script = setup.script(r#"steps = [{ input = "add two numbers" }, { input = "/quit" }]"#);
+    let output = molt_with_fake(&setup, &script, &["--fake".as_ref(), fake.as_os_str()]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    assert_eq!(
+        fs::read_to_string(setup.project().join("src/lib.rs")).unwrap(),
+        "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n"
+    );
+    let stdout = stdout(&output);
+    assert!(
+        stdout.starts_with("molt> add two numbers\nAdded `add` to src/lib.rs.\n"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("+pub fn add(a: i32, b: i32) -> i32 {"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("cargo check passed."), "{stdout}");
+    assert!(stdout.ends_with("molt> /quit\n"), "{stdout}");
+}
+
+#[test]
+fn a_fake_script_that_runs_out_stops_the_turn_and_the_prompt_comes_back() {
+    let setup = setup_without_a_key();
+    let fake = setup.dir.path().join("fake.toml");
+    fs::write(&fake, "responses = []\n").unwrap();
+    let script = setup.script(r#"steps = [{ input = "hello" }, { input = "/quit" }]"#);
+    let output = molt_with_fake(&setup, &script, &["--fake".as_ref(), fake.as_os_str()]);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "molt> hello\nStopped: the fake chat client has no more queued responses\nmolt> /quit\n"
+    );
+}
+
+#[test]
+fn an_unreadable_fake_script_is_reported_before_the_main_line_opens() {
+    let setup = setup_without_a_key();
+    let missing = setup.dir.path().join("missing.toml");
+    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
+    let output = molt_with_fake(&setup, &script, &["--fake".as_ref(), missing.as_os_str()]);
     assert_eq!(output.status.code(), Some(1));
     assert!(
-        stderr(&output).contains("does not support --fake yet"),
+        stderr(&output).contains("cannot read the fake script"),
         "{}",
         stderr(&output)
     );
-    assert_eq!(stdout(&output), "");
+    assert_eq!(stdout(&output), "", "the main line must not open");
 }
 
 #[test]

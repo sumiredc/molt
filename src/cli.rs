@@ -72,18 +72,16 @@ pub fn run() -> ExitCode {
     match &cli.command {
         Some(Command::Profile(command)) => profile::run(cli.common.profile.as_deref(), command),
         Some(Command::Check { paths }) => check::run(cli.common.profile.as_deref(), paths),
-        // --fake の台本はまだ読めない。黙って実際の接続先に送らないよう、受けずに止める
+        // --fake の台本は chat の応答の列で、doctor が確かめるモデルの一覧を書けない。
+        // 黙って実際の接続先に送らないよう、受けずに止める
         Some(Command::Doctor) if cli.common.fake.is_some() => {
             eprintln!("doctor does not support --fake yet");
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),
-        None if cli.common.fake.is_some() => {
-            eprintln!("the main line does not support --fake yet");
-            ExitCode::FAILURE
-        }
         None => mainline::run(
             cli.common.profile.as_deref(),
+            cli.common.fake.as_deref(),
             cli.common.ui_script.as_deref(),
         ),
         _ => {

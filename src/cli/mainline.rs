@@ -14,7 +14,7 @@ use crate::agent::mainline::{
 };
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
-use crate::llm::{OpenAiClient, Router};
+use crate::llm::{ChatClient, OpenAiClient, Router, fake_script};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::{self, SessionLog};
@@ -30,9 +30,13 @@ const SESSIONS_DIR: &str = "sessions";
 /// The exit code after Ctrl-C at the prompt (128 + SIGINT, as a shell reports it).
 const INTERRUPTED: u8 = 130;
 
-pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> ExitCode {
+pub(super) fn run(
+    profile_flag: Option<&Path>,
+    fake: Option<&Path>,
+    ui_script: Option<&Path>,
+) -> ExitCode {
     let opened = preconditions(profile_flag).and_then(|(root, profile)| {
-        let (home, config, client) = connect()?;
+        let (home, config, client) = connect(fake)?;
         let ui = open_ui(ui_script)?;
         let log = open_log(&home)?;
         Ok((root, profile, config, client, ui, log))
@@ -46,7 +50,8 @@ pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> Exit
     };
     let cargo = Cargo::new(root.clone());
     let tools = Tools::new(root, &cargo);
-    let mut agent = MainLine::new(&client, Router::new(&config), tools, profile).with_log(log);
+    let mut agent =
+        MainLine::new(client.as_ref(), Router::new(&config), tools, profile).with_log(log);
     main_line(ui.as_mut(), &mut agent)
 }
 
@@ -67,13 +72,19 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile), String>
     Ok((root, loaded))
 }
 
-/// Reads `config.toml` and creates the client for its endpoint. The main line does not open
-/// when the client cannot be created, e.g. the API key's environment variable is unset.
-fn connect() -> Result<(PathBuf, Config, OpenAiClient), String> {
+/// Reads `config.toml` and creates the client: the responses of the `--fake` script at `fake`,
+/// otherwise the configured endpoint. The main line does not open when the client cannot be
+/// created, e.g. the script cannot be read or the API key's environment variable is unset.
+fn connect(fake: Option<&Path>) -> Result<(PathBuf, Config, Box<dyn ChatClient>), String> {
     let home = config::molt_home(|name| std::env::var_os(name)).map_err(|e| e.to_string())?;
     let config = Config::load(&config::config_path(&home)).map_err(|e| e.to_string())?;
-    let client = OpenAiClient::new(&config.api, |name| std::env::var(name).ok())
-        .map_err(|e| e.to_string())?;
+    let client: Box<dyn ChatClient> = match fake {
+        Some(path) => Box::new(fake_script::load(path).map_err(|e| e.to_string())?),
+        None => Box::new(
+            OpenAiClient::new(&config.api, |name| std::env::var(name).ok())
+                .map_err(|e| e.to_string())?,
+        ),
+    };
     Ok((home, config, client))
 }
 
