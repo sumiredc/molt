@@ -271,7 +271,7 @@ const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side 
 fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Option<ExitCode> {
     let mut side = agent.side_line(boundary);
     loop {
-        match subline::run(ui, &mut side) {
+        match subline::run(ui, &mut side, agent.log()) {
             Left::Aborted => {
                 withdraw(ui, agent);
                 return None;

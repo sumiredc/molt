@@ -10,6 +10,7 @@ use super::mainline::Boundary;
 use super::prompts;
 use super::tools::Tools;
 use crate::llm::{ChatClient, ChatError, Message, Role, Router};
+use crate::session::SessionLog;
 
 /// The side line opened at one boundary.
 pub struct SubLine<'a> {
@@ -65,12 +66,13 @@ impl<'a> SubLine<'a> {
     }
 
     /// Asks the `reason` model to explain the idea of the items, and returns the explanation. When
-    /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]).
-    pub fn explain(&mut self) -> Result<String, ChatError> {
+    /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]). The
+    /// request body goes to `log` (PRD §8.8).
+    pub fn explain(&mut self, log: &SessionLog) -> Result<String, ChatError> {
         let user = Message::User {
             content: self.context.clone(),
         };
-        let answer = self.send(user.clone())?;
+        let answer = self.send(user.clone(), log)?;
         self.messages.push(user);
         self.messages.push(Message::Assistant {
             content: Some(answer.clone()),
@@ -81,8 +83,9 @@ impl<'a> SubLine<'a> {
 
     /// Asks the `reason` model `question` and returns the answer. The question and the answer join
     /// the side line's message list only when the request succeeds. Before the explanation has
-    /// come, the question goes with what the model is told about the boundary.
-    pub fn ask(&mut self, question: &str) -> Result<String, ChatError> {
+    /// come, the question goes with what the model is told about the boundary. The request body
+    /// goes to `log` (PRD §8.8).
+    pub fn ask(&mut self, question: &str, log: &SessionLog) -> Result<String, ChatError> {
         let content = if self.explained() {
             question.to_owned()
         } else {
@@ -92,7 +95,7 @@ impl<'a> SubLine<'a> {
             )
         };
         let user = Message::User { content };
-        let answer = self.send(user.clone())?;
+        let answer = self.send(user.clone(), log)?;
         self.messages.push(user);
         self.messages.push(Message::Assistant {
             content: Some(answer.clone()),
@@ -102,12 +105,12 @@ impl<'a> SubLine<'a> {
     }
 
     /// Sends the message list with `user` after it, and returns the text of the reply.
-    fn send(&self, user: Message) -> Result<String, ChatError> {
+    fn send(&self, user: Message, log: &SessionLog) -> Result<String, ChatError> {
         let mut messages = self.messages.clone();
         messages.push(user);
-        let response = self
-            .client
-            .chat(&self.router.request(Role::Reason, messages))?;
+        let request = self.router.request(Role::Reason, messages);
+        log.record_request(&request);
+        let response = self.client.chat(&request)?;
         Ok(response.content.unwrap_or_default())
     }
 }
@@ -219,8 +222,9 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Ok(reply("EXPLANATION: dbg! prints a value.")));
         client.push_chat(Ok(reply("ANSWER: to stderr.")));
-        side.explain().unwrap();
-        side.ask("QUESTION: where does it print?").unwrap();
+        side.explain(&SessionLog::disabled()).unwrap();
+        side.ask("QUESTION: where does it print?", &SessionLog::disabled())
+            .unwrap();
         main_line.withdraw();
         client.push_chat(Ok(reply("done")));
 
@@ -253,7 +257,10 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Ok(reply("dbg! prints a value.")));
 
-        assert_eq!(side.explain().unwrap(), "dbg! prints a value.");
+        assert_eq!(
+            side.explain(&SessionLog::disabled()).unwrap(),
+            "dbg! prints a value."
+        );
 
         let request = client.requests().pop().unwrap();
         assert_eq!(request.model, Config::default().models.reason);
@@ -292,10 +299,10 @@ mod open {
         for text in ["explanation", "answer 1", "answer 2", "answer 3"] {
             client.push_chat(Ok(reply(text)));
         }
-        side.explain().unwrap();
+        side.explain(&SessionLog::disabled()).unwrap();
 
         for (question, answer) in [("q1", "answer 1"), ("q2", "answer 2"), ("q3", "answer 3")] {
-            assert_eq!(side.ask(question).unwrap(), answer);
+            assert_eq!(side.ask(question, &SessionLog::disabled()).unwrap(), answer);
         }
 
         let texts = texts(&client.requests().pop().unwrap());
@@ -316,9 +323,9 @@ mod open {
         client.push_chat(Err(ChatError::FakeExhausted));
         client.push_chat(Ok(reply("answer")));
 
-        assert!(side.explain().is_err());
+        assert!(side.explain(&SessionLog::disabled()).is_err());
         assert!(!side.explained());
-        side.ask("what is it?").unwrap();
+        side.ask("what is it?", &SessionLog::disabled()).unwrap();
 
         let request = client.requests().pop().unwrap();
         let [Message::System { .. }, Message::User { content }] = &request.messages[..] else {
@@ -332,6 +339,30 @@ mod open {
     }
 
     #[test]
+    fn the_request_bodies_of_the_side_line_go_to_the_log_when_molt_log_enables_them() {
+        let dir = project();
+        let logs = tempfile::tempdir().unwrap();
+        let log = SessionLog::create(logs.path(), true).unwrap();
+        let client = FakeChatClient::new();
+        let cargo = FakeCargo::new();
+        let mut main_line = main_line(&client, &cargo, &dir);
+        let boundary = stop_at_a_boundary(&client, &mut main_line);
+        let mut side = main_line.side_line(boundary);
+        client.push_chat(Ok(reply("explanation")));
+        client.push_chat(Ok(reply("answer")));
+
+        side.explain(&log).unwrap();
+        side.ask("where does it print?", &log).unwrap();
+
+        let bodies = fs::read_to_string(log.requests_path().unwrap()).unwrap();
+        let lines: Vec<&str> = bodies.lines().collect();
+        assert_eq!(lines.len(), 2, "{bodies}");
+        let reason = Config::default().models.reason;
+        assert!(lines.iter().all(|line| line.contains(&reason)), "{bodies}");
+        assert!(lines[1].contains("where does it print?"), "{bodies}");
+    }
+
+    #[test]
     fn a_failed_question_is_not_kept() {
         let dir = project();
         let client = FakeChatClient::new();
@@ -342,10 +373,10 @@ mod open {
         client.push_chat(Ok(reply("explanation")));
         client.push_chat(Err(ChatError::FakeExhausted));
         client.push_chat(Ok(reply("answer")));
-        side.explain().unwrap();
+        side.explain(&SessionLog::disabled()).unwrap();
 
-        assert!(side.ask("lost").is_err());
-        side.ask("again").unwrap();
+        assert!(side.ask("lost", &SessionLog::disabled()).is_err());
+        side.ask("again", &SessionLog::disabled()).unwrap();
 
         let texts = texts(&client.requests().pop().unwrap());
         assert_eq!(texts[2..], ["explanation", "again"]);

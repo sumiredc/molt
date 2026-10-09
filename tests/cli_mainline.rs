@@ -535,8 +535,8 @@ fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout()
     assert!(events.contains(r#""event":"rejected""#), "{events}");
     // What the model wrote back is in the log, with the key hidden.
     assert!(events.contains(r#"dbg!(\"<redacted>\")"#), "{events}");
-    // The side line's request is not the main line's, and is not recorded with them.
-    assert_eq!(requests.lines().count(), 3, "{requests}");
+    // The two writes, the side line's explanation and the next request.
+    assert_eq!(requests.lines().count(), 4, "{requests}");
     for (name, content) in &files {
         assert!(!content.contains(KEY), "{name}: {content}");
     }

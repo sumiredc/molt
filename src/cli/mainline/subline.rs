@@ -4,6 +4,7 @@
 use crate::agent::subline::SubLine;
 use crate::cli::ui::{Input, Ui};
 use crate::profile::status::ItemKey;
+use crate::session::SessionLog;
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
@@ -27,13 +28,13 @@ pub(super) enum Left {
 
 /// Runs the side line until the user leaves it. The explanation is asked for the first time only;
 /// when the side line is opened again, the questions go on where they were.
-pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine) -> Left {
+pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left {
     ui.show(&banner(&format!(
         "side line: {}",
         names(&side.boundary().items)
     )));
     if !side.explained() {
-        match side.explain() {
+        match side.explain(log) {
             Ok(explanation) => ui.show(&indent(&explanation)),
             Err(error) => ui.show(&indent(&format!("Could not get the explanation: {error}"))),
         }
@@ -50,7 +51,7 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine) -> Left {
                 } else if line.starts_with('/') {
                     ui.show(&indent(&format!("Unknown command {line}. {HINT}")));
                 } else {
-                    match side.ask(line) {
+                    match side.ask(line, log) {
                         Ok(answer) => ui.show(&indent(&answer)),
                         Err(error) => {
                             ui.show(&indent(&format!("Could not get an answer: {error}")))
