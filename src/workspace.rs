@@ -1,4 +1,5 @@
 pub mod cargo;
+pub mod git;
 pub mod path;
 
 /// The user's approval of one operation that needs it: `cargo add` or a git commit (PRD §3, §8.4).
