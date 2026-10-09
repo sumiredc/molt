@@ -112,8 +112,8 @@ As the basis for judging over-building, the following are not handled.
 
 | Kind | Premise |
 |---|---|
-| Technical | The LLM is called through Nebius Token Factory's OpenAI-compatible API (Bearer auth, `/v1/chat/completions`). The API spec has function calling, `response_format` (json_object / json_schema), and `reasoning_effort`. Whether each model actually accepts them is confirmed by `molt doctor` (8.7) |
-| Technical | The models are NVIDIA Nemotron. The catalogue lists 4 of them, Lightning / Nano / Super / Ultra, all marked as supporting function calling. The default IDs are in 8.7 |
+| Technical | The LLM is called through an OpenAI-compatible chat API (`/v1/chat/completions`, Bearer auth when the endpoint requires it). The default, and the target for submission, is Nebius Token Factory. The API spec has function calling, `response_format` (json_object / json_schema), and `reasoning_effort`. Whether each endpoint and model actually accepts them is confirmed by `molt doctor` (8.7) |
+| Technical | The default models, and the ones for submission, are NVIDIA Nemotron. The catalogue lists 4 of them, Lightning / Nano / Super / Ultra, all marked as supporting function calling. The default IDs are in 8.7. Any other model is only a verification target that has passed `doctor` (8.7) |
 | Technical | The implementation is Rust (1.99.0, edition 2024). CI runs fmt / clippy (`-D warnings`) / test |
 | Technical | The user's target project is a cargo project (`cargo check` runs) |
 | Business | Deadline 2026-10-30 10:00 PDT (2026-10-31 02:00 JST). Target submission 10/29. Built by one person |
@@ -129,7 +129,7 @@ The user self-reports per category, and only for the categories answered "have w
 
 ```mermaid
 flowchart TB
-  S["molt init"] --> K{"Is there an<br/>API key?"}
+  S["molt init"] --> K{"Is there an API key?<br/>(when the endpoint requires one)"}
   K -- "No" --> X1["Report and exit<br/>no profile is created"]:::bad
   K -- "Yes" --> D["Self-report per category<br/>have written / can read / don't know"]
   D --> R{"Is a reference<br/>repository shared?"}
@@ -143,7 +143,7 @@ flowchart TB
 
 What to read from the figure: questions are asked only for the categories reported as "have written", so the number of reports determines the time it takes.
 
-- Precondition: no profile exists yet (or the user chose to recreate it). `NEBIUS_API_KEY` is set
+- Precondition: no profile exists yet (or the user chose to recreate it). If the endpoint requires an API key, its environment variable (default `NEBIUS_API_KEY`) is set
 - Main flow: report → (reference repository) → questions and judgement → confirmation → save. Reports map as follows: "have written" → the Q&A result (`known` / `unknown` per element), "can read" → the elements of that category become `seen`, "don't know" → `unknown`
 - Main flow: external crates are not asked about in init. If a reference repository is shared, the dependencies in its `Cargo.toml` become `known` (provenance: reference repository). Any other crate becomes a boundary the first time molt tries to use it (UC3)
 - Alternative flow: everything is "don't know" → skip the questions and save a profile with base elements only
@@ -312,7 +312,7 @@ flowchart TB
   cli --> onboarding["onboarding<br/>questionnaire, probe, repo_scan"]
   agent --> workspace["workspace<br/>path confinement, cargo, git"]
   agent --> checker["checker<br/>visitor, diff, crates, finding"]
-  agent --> llm["llm<br/>ChatClient, nebius, router, fake"]
+  agent --> llm["llm<br/>ChatClient, openai, router, fake"]
   agent --> profile["profile<br/>element, status, baseline, store"]
   agent --> session["session<br/>jsonl log"]
   onboarding --> checker
@@ -388,7 +388,7 @@ molt                      Open the main line in the cargo project at cwd (prompt
 molt init [--repo PATH]   Create the profile through Q&A. --repo takes stock of a reference repository
 molt profile show|set <key> <status>|path
 molt check [PATHS..]      Run the checker alone and print findings (exit 1 if any)
-molt doctor               Check Token Factory support
+molt doctor               Check what the configured endpoint and models support
 ```
 
 Common flags: `--profile PATH`, `--fake` (offline run with `FakeChatClient` and a script).
@@ -404,8 +404,16 @@ The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex
 | reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | Boundary judgement, alternatives within the profile, explanations, side-line Q&A, question generation |
 
 `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` is an alternative candidate for light. The source of truth for the defaults is the code that reads `config.toml`.
-Configuration is `config.toml` (`[api]` `[models]` `[reasoning_effort]` `[capabilities]`). `[capabilities]` is written by `molt doctor`.
+Configuration is `config.toml` (`[api]` `[models]` `[reasoning_effort]` `[capabilities]`). `[api]` points at the endpoint; whether it needs an API key differs per endpoint, and the key is read from an environment variable (section 3). `[capabilities]` is written by `molt doctor`.
 `molt doctor` checks, for the model of each role, that the ID exists, plain chat, a tool call with `tool_choice: required`, adherence to `response_format: json_schema`, and the behaviour of `reasoning_effort`, and prints a table. For a model that cannot use `json_schema`, it switches to `json_object` + the schema in the prompt + serde validation + 1 repair attempt.
+
+Three things verify the agent against a model, and none replaces another.
+
+| Layer | Endpoint | What it verifies | Where it runs |
+|---|---|---|---|
+| `--fake` | `FakeChatClient` with a script | The control flow and the guarantees in section 3, deterministically | CI and local tests |
+| Local model | A local OpenAI-compatible endpoint, with any model that passes `doctor` | That the prompts actually elicit tool calls, rewrites, boundary judgements, and explanations, without spending credits | By hand and the `#[ignore]` tests, during development |
+| Nemotron | Nebius Token Factory | That the configuration for submission passes `doctor` and the one pass in section 10 | By hand, before submission |
 
 ### 8.8 Persistence
 
@@ -429,7 +437,7 @@ The guarantees in section 3 are verified without a network.
 |---|---|
 | checker | Exact match between the leading `// expect: …` in `tests/fixtures/elements/*.rs` and the detected set. `fixtures/negative/*.rs` yields 0 findings other than base elements. A test enforces that every `Element` has a fixture. The changed-line filter (old↔new) does not report existing elements |
 | profile | toml round trip, a transition grows the history, no entry = unknown, allow / deny, rejection of non-existent element names and invalid statuses |
-| llm | `FakeChatClient` (a response queue + a record of sent requests). The wire format is compared with JSON fixtures. The real API is `#[ignore]` |
+| llm | `FakeChatClient` (a response queue + a record of sent requests). The wire format is compared with JSON fixtures. The real API is `#[ignore]` and runs against whatever endpoint `[api]` points at (8.7) |
 | agent (main line) | `FakeCargo` + tempdir. Clean → written to disk. Rejected → disk unchanged, and the rewrite passes. 2 rejections → boundary. `request_boundary` → boundary. Stops when the budget is exceeded |
 | agent (side line) | ① → known, ② → seen, ③ → the elements in the user's lines are known. If `cargo check` fails in ③, the profile is unchanged. After ①, the same element is not a boundary again. The main line's request history has no side-line messages. `/abort` changes nothing |
 | agent (git) | In a tempdir git repository: without approval → no new commit. With approval → only the files molt changed are committed, and push is not called |
@@ -465,7 +473,7 @@ flowchart TB
   classDef ok fill:#ecfdf5,stroke:#059669,color:#065f46
 ```
 
-What to read from the figure: the checker, the LLM client, and the Workspace do not depend on each other, so before the main-line loop they can be built in any order. The point where one pass runs from the main line through to a git commit is the measure of whether the product stands.
+What to read from the figure: the checker, the LLM client, and the Workspace do not depend on each other, so before the main-line loop they can be built in any order. The point where one pass runs from the main line through to a git commit is the measure of whether the product stands. The same pass is then tried by hand against a real model (8.7); that does not replace the `--fake` pass, which is what CI runs.
 
 ---
 
