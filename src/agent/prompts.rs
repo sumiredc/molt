@@ -17,6 +17,7 @@ Use only the tools you are given, with arguments that are one JSON object matchi
 Every `write_file` and `edit_file` is checked against the user's comprehension profile before it reaches the disk: content using a syntax element or crate outside the profile is rejected and not written.
 After a rejection, rewrite the content with only what the profile allows. If the request cannot be done well without those items, call `request_boundary` instead.
 When the request is done, or you cannot go further, call `finish` with a short summary for the user.
+If files were written, molt runs `cargo check` after you finish and gives you its errors to fix.
 Answer in the language of the user's latest input.";
 
 pub const LIST_FILES: &str = "List the files under a directory of the project, recursively, \
@@ -162,5 +163,69 @@ fn finding_lines(findings: &[Finding]) -> String {
 pub fn resend_arguments(error: impl Display) -> String {
     format!(
         "error: {error}\nSend this tool call again, with arguments that are one valid JSON object."
+    )
+}
+
+/// The result of `write_file` or `edit_file` whose content does not parse, when the model has
+/// already been asked for `budget` compile fixes in this turn. The file was not written, and the
+/// turn stops (PRD §8.4).
+pub fn parse_error_over_budget(path: &str, error: &ParseError, budget: usize) -> String {
+    format!(
+        "parse error: {path} was not written, because the content does not parse at line {}, column {}: {}\n\
+         This turn has used all {budget} compile fixes, so it stops here.",
+        error.line, error.column, error.message
+    )
+}
+
+/// The lines of cargo's output the model gets back after a failed `cargo check` at the end of a
+/// turn. Local models have small contexts; the user is shown all of it.
+pub const CHECK_OUTPUT_LINES: usize = 80;
+
+/// The result of the `cargo check` molt runs at the end of a turn that wrote, when it fails
+/// (PRD §8.4): that the turn goes on, what cargo printed (at most [`CHECK_OUTPUT_LINES`] lines),
+/// `notes` on the crates molt could not add, and what to do.
+pub fn check_failed(stdout: &str, stderr: &str, notes: &[String]) -> String {
+    let mut result = String::from(
+        "failed: the turn is not over. molt ran cargo check because files were written in this \
+         turn, and it failed.",
+    );
+    let printed: Vec<&str> = [stdout, stderr]
+        .into_iter()
+        .flat_map(str::lines)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    for line in printed.iter().take(CHECK_OUTPUT_LINES) {
+        result.push('\n');
+        result.push_str(line);
+    }
+    if printed.len() > CHECK_OUTPUT_LINES {
+        let more = printed.len() - CHECK_OUTPUT_LINES;
+        result.push_str(&format!("\n... {more} more lines"));
+    }
+    for note in notes {
+        result.push('\n');
+        result.push_str(note);
+    }
+    result.push_str(
+        "\nFix the errors, then call `finish` again. If they cannot be fixed within the user's \
+         profile, call `finish` and say why.",
+    );
+    result
+}
+
+/// A note for the model that the user did not approve adding `name`.
+pub fn crate_not_approved(name: &str) -> String {
+    format!(
+        "note: the user did not approve `cargo add {name}`, so it is not a dependency. \
+         Do not call `run_cargo add` for it: write the code without it, or call `finish` and \
+         tell the user."
+    )
+}
+
+/// A note for the model that `cargo add name` failed.
+pub fn crate_not_added(name: &str, why: &str) -> String {
+    format!(
+        "note: `cargo add {name}` failed: {why}\nDo not call `run_cargo add` for it: write the \
+         code without it, or call `finish` and tell the user."
     )
 }

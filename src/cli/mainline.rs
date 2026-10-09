@@ -6,7 +6,9 @@ use std::process::ExitCode;
 
 use super::profile;
 use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
-use crate::agent::mainline::{Boundary, BoundaryCause, MainLine, TOOL_CALL_BUDGET, Turn, TurnEnd};
+use crate::agent::mainline::{
+    Boundary, BoundaryCause, COMPILE_FIX_BUDGET, MainLine, TOOL_CALL_BUDGET, Turn, TurnEnd,
+};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{OpenAiClient, Router};
@@ -121,6 +123,9 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
         ),
         TurnEnd::ApiFailed(error) => format!("Stopped: {error}"),
         TurnEnd::Boundary(boundary) => boundary_text(boundary),
+        TurnEnd::CompileFixesExhausted => format!(
+            "Stopped: the code still does not build after {COMPILE_FIX_BUDGET} compile fixes in this turn."
+        ),
     };
     ui.show(&stopped);
     if !turn.tool_calls.is_empty() {

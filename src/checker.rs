@@ -73,6 +73,32 @@ pub fn check_file(path: &Path, old: &str, new: &str, ctx: &CheckContext) -> Chec
     }
 }
 
+/// The crates `source` uses that `ctx.profile` allows but `manifest` (a `Cargo.toml`) does not
+/// declare: what `cargo add` would add for `source` to build (PRD UC2). Each crate once, in the
+/// order first used, named as `source` spells it. A crate counts as declared under any key of a
+/// dependency table, `-` and `_` being the same; a manifest that is not TOML declares nothing.
+/// Content that does not parse uses no crate here.
+pub(crate) fn undeclared_known_crates(
+    source: &str,
+    manifest: &str,
+    ctx: &CheckContext,
+) -> Vec<String> {
+    let declared = crates::declared(manifest);
+    let mut names: Vec<String> = Vec::new();
+    for finding in crates::in_source(source, ctx.own_modules) {
+        if declared.contains(&finding.key) || !is_allowed(&finding, ctx) {
+            continue;
+        }
+        if !names
+            .iter()
+            .any(|name| crates::crate_key(name) == finding.key)
+        {
+            names.push(finding.text);
+        }
+    }
+    names
+}
+
 /// Whether the content may use the item: a base element, or `known`. A crate
 /// is looked up under every spelling `crates::crate_key` takes to its key
 /// (`crate:serde-json` for `serde_json`), and is `known` when one of them is
@@ -191,5 +217,76 @@ mod tests {
             CheckReport::ParseError(error) => assert_eq!(error.line, 3),
             other => panic!("expected ParseError, got {other:?}"),
         }
+    }
+
+    fn with_crate(name: &str, status: Status) -> Profile {
+        let mut profile = Profile::new();
+        profile
+            .transition(
+                ItemKey::Crate(name.to_owned()),
+                status,
+                Provenance::Manual,
+                Timestamp::from_unix_seconds(0),
+                None,
+            )
+            .unwrap();
+        profile
+    }
+
+    fn undeclared(profile: &Profile, source: &str, manifest: &str) -> Vec<String> {
+        let own_modules = BTreeSet::from(["util".to_owned()]);
+        let ctx = CheckContext {
+            profile,
+            own_modules: &own_modules,
+        };
+        undeclared_known_crates(source, manifest, &ctx)
+    }
+
+    const MANIFEST: &str = "[package]\nname = \"demo\"\n\n[dependencies]\n";
+    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::to_string(&1);\n}\n";
+
+    #[test]
+    fn a_known_crate_the_manifest_does_not_declare_is_to_be_added() {
+        let profile = with_crate("serde_json", Status::Known);
+        assert_eq!(
+            undeclared(&profile, USES_SERDE_JSON, MANIFEST),
+            ["serde_json"]
+        );
+    }
+
+    #[test]
+    fn a_crate_the_manifest_declares_is_not_to_be_added_whichever_its_spelling() {
+        let profile = with_crate("serde_json", Status::Known);
+        for manifest in [
+            format!("{MANIFEST}serde_json = \"1\"\n"),
+            format!("{MANIFEST}serde-json = \"1\"\n"),
+            "[package]\nname = \"demo\"\n\n[dev-dependencies]\nserde_json = \"1\"\n".to_owned(),
+        ] {
+            assert!(
+                undeclared(&profile, USES_SERDE_JSON, &manifest).is_empty(),
+                "{manifest}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_crate_that_is_not_known_is_not_to_be_added() {
+        for profile in [Profile::new(), with_crate("serde_json", Status::Seen)] {
+            assert!(undeclared(&profile, USES_SERDE_JSON, MANIFEST).is_empty());
+        }
+    }
+
+    #[test]
+    fn std_and_the_own_modules_are_not_crates_to_be_added() {
+        let source = "use std::fmt;\nfn main() {\n    util::f();\n}\n";
+        assert!(undeclared(&Profile::new(), source, MANIFEST).is_empty());
+    }
+
+    #[test]
+    fn a_crate_used_twice_is_to_be_added_once() {
+        let profile = with_crate("serde_json", Status::Known);
+        let source =
+            format!("{USES_SERDE_JSON}fn g() {{\n    let _ = serde_json::to_string(&2);\n}}\n");
+        assert_eq!(undeclared(&profile, &source, MANIFEST), ["serde_json"]);
     }
 }

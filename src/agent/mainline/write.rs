@@ -6,7 +6,9 @@
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
-use super::{Boundary, BoundaryCause, MainLine, Next, Progress, Turn, TurnEnd};
+use super::{
+    Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, MainLine, Next, Progress, Turn, TurnEnd,
+};
 use crate::agent::prompts;
 use crate::agent::tools::{EditFileArgs, FileChange, ToolError, WriteFileArgs, WriteOutcome};
 use crate::profile::status::{ItemKey, Status};
@@ -26,6 +28,10 @@ impl MainLine<'_> {
             Err(error) => return (prompts::tool_error(error), Next::Continue),
         };
         let path = change.path().to_owned();
+        let (before, after) = (
+            change.old_content().map(str::to_owned),
+            change.new_content().to_owned(),
+        );
         let outcome = match self.tools.write(change, &self.profile) {
             Ok(outcome) => outcome,
             Err(error) => return (prompts::tool_error(error), Next::Continue),
@@ -35,6 +41,20 @@ impl MainLine<'_> {
                 if !turn.written.contains(&path) {
                     turn.written.push(path.clone());
                 }
+                let tools = &self.tools;
+                match turn
+                    .changes
+                    .iter_mut()
+                    .find(|c| tools.same_file(&c.path, &path))
+                {
+                    Some(change) => change.after = after,
+                    None => turn.changes.push(Change {
+                        path: path.clone(),
+                        before,
+                        after,
+                    }),
+                }
+                progress.unchecked = true;
                 (prompts::written(&path), Next::Continue)
             }
             WriteOutcome::OutOfProfile { findings, change } => {
@@ -63,6 +83,10 @@ impl MainLine<'_> {
                 };
                 (result, Next::Stop(TurnEnd::Boundary(boundary)))
             }
+            WriteOutcome::ParseError(error) if turn.compile_fixes == COMPILE_FIX_BUDGET => (
+                prompts::parse_error_over_budget(&path, &error, COMPILE_FIX_BUDGET),
+                Next::Stop(TurnEnd::CompileFixesExhausted),
+            ),
             WriteOutcome::ParseError(error) => {
                 turn.compile_fixes += 1;
                 (prompts::parse_error(&path, &error), Next::Continue)
