@@ -1,8 +1,12 @@
 //! Parses content with syn and finds the syntax elements in it.
 //!
-//! Detected so far: the `macros` category, plus the elements whose syntax is
-//! a macro invocation or a `derive` (`panic`, `inline_asm`, `derive`), since
-//! telling them apart from `macro_call` and `custom_derive` happens here.
+//! Detected so far: the `macros` and `borrowing` categories, plus the
+//! elements whose syntax is a macro invocation or a `derive` (`panic`,
+//! `inline_asm`, `derive`), since telling them apart from `macro_call` and
+//! `custom_derive` happens here.
+//!
+//! An element built from other elements is reported together with them, one
+//! finding per element (PRD §11): `&[u8]` is both `shared_ref` and `slice`.
 
 use std::mem;
 
@@ -11,7 +15,11 @@ use syn::parse::ParseStream;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Attribute, ItemEnum, ItemMacro, ItemStruct, ItemUnion, Macro, Meta, Path, Token};
+use syn::{
+    Attribute, Expr, ExprIndex, ExprReference, ExprUnary, ItemEnum, ItemMacro, ItemStruct,
+    ItemUnion, Macro, Meta, PatIdent, PatReference, Path, Receiver, ReceiverKind, Token,
+    TypeReference, TypeSlice, UnOp,
+};
 
 use crate::checker::finding::{Finding, ParseError};
 use crate::profile::element::Element;
@@ -23,7 +31,10 @@ use crate::profile::status::ItemKey;
 /// arguments are not a list of paths, is a `ParseError`.
 pub fn detect(source: &str) -> Result<Vec<Finding>, ParseError> {
     let file = syn::parse_file(source).map_err(|error| to_parse_error(source, &error))?;
-    let mut detector = Detector::default();
+    let mut detector = Detector {
+        source,
+        ..Detector::default()
+    };
     detector.visit_file(&file);
     if let Some(error) = detector.error {
         return Err(to_parse_error(source, &error));
@@ -56,7 +67,8 @@ fn to_parse_error(source: &str, error: &syn::Error) -> ParseError {
 }
 
 #[derive(Default)]
-struct Detector {
+struct Detector<'s> {
+    source: &'s str,
     findings: Vec<Finding>,
     /// The first error met while visiting; the whole content is then a
     /// `ParseError`.
@@ -67,7 +79,22 @@ struct Detector {
     helpers_allowed: bool,
 }
 
-impl Detector {
+impl Detector<'_> {
+    /// Reports `element` at `span`, with the source `span` covers as the text.
+    fn mark(&mut self, span: Span, element: Element) {
+        let text = self.snippet(span);
+        self.push(span, element, text);
+    }
+
+    /// The source `span` covers, cut after its first line.
+    fn snippet(&self, span: Span) -> String {
+        let text = self.source.get(span.byte_range()).unwrap_or("").trim();
+        match text.split_once('\n') {
+            Some((first, _)) => format!("{} ..", first.trim_end()),
+            None => text.to_owned(),
+        }
+    }
+
     fn push(&mut self, span: Span, element: Element, text: String) {
         self.findings.push(Finding {
             line: span.start().line,
@@ -137,7 +164,7 @@ impl Detector {
     }
 }
 
-impl<'ast> Visit<'ast> for Detector {
+impl<'ast> Visit<'ast> for Detector<'_> {
     fn visit_macro(&mut self, mac: &'ast Macro) {
         let element = std_name(&mac.path)
             .and_then(|name| std_macro(&name))
@@ -195,6 +222,65 @@ impl<'ast> Visit<'ast> for Detector {
 
     fn visit_variant(&mut self, variant: &'ast syn::Variant) {
         self.with_helpers_allowed(true, |v| visit::visit_variant(v, variant));
+    }
+
+    // borrowing
+
+    fn visit_type_reference(&mut self, ty: &'ast TypeReference) {
+        self.mark(ty.span(), reference(ty.mutability.is_some()));
+        visit::visit_type_reference(self, ty);
+    }
+
+    fn visit_expr_reference(&mut self, expr: &'ast ExprReference) {
+        self.mark(expr.span(), reference(expr.mutability.is_some()));
+        visit::visit_expr_reference(self, expr);
+    }
+
+    fn visit_pat_reference(&mut self, pat: &'ast PatReference) {
+        self.mark(pat.span(), reference(pat.mutability.is_some()));
+        visit::visit_pat_reference(self, pat);
+    }
+
+    fn visit_receiver(&mut self, receiver: &'ast Receiver) {
+        if let ReceiverKind::Reference(_, _, mutability) = &receiver.kind {
+            self.mark(receiver.span(), reference(mutability.is_some()));
+        }
+        visit::visit_receiver(self, receiver);
+    }
+
+    fn visit_expr_unary(&mut self, expr: &'ast ExprUnary) {
+        if let UnOp::Deref(_) = expr.op {
+            self.mark(expr.span(), Element::Deref);
+        }
+        visit::visit_expr_unary(self, expr);
+    }
+
+    fn visit_pat_ident(&mut self, pat: &'ast PatIdent) {
+        if pat.by_ref.is_some() {
+            self.mark(pat.span(), Element::RefPattern);
+        }
+        visit::visit_pat_ident(self, pat);
+    }
+
+    fn visit_type_slice(&mut self, ty: &'ast TypeSlice) {
+        self.mark(ty.span(), Element::Slice);
+        visit::visit_type_slice(self, ty);
+    }
+
+    fn visit_expr_index(&mut self, expr: &'ast ExprIndex) {
+        if let Expr::Range(_) = &*expr.index {
+            self.mark(expr.span(), Element::Slice);
+        }
+        visit::visit_expr_index(self, expr);
+    }
+}
+
+/// `&` or `&mut`, in a type, an expression, a pattern or a receiver.
+fn reference(mutable: bool) -> Element {
+    if mutable {
+        Element::MutRef
+    } else {
+        Element::SharedRef
     }
 }
 
@@ -428,7 +514,7 @@ mod tests {
     #[test]
     fn a_std_macro_without_an_element_of_its_own_is_macro_call() {
         assert_eq!(
-            elements("const S: &str = concat!(\"a\", \"b\");\n"),
+            elements("fn f() { concat!(\"a\", \"b\"); }\n"),
             [(1, Element::MacroCall, "concat!".to_owned())]
         );
     }
@@ -717,6 +803,42 @@ pub fn c(attr: TokenStream, item: TokenStream) -> TokenStream { item }
                 (5, Element::ProcMacroDef, "proc_macro_attribute".to_owned()),
             ]
         );
+    }
+
+    // borrowing
+
+    #[test]
+    fn references_are_shared_ref_or_mut_ref_in_types_expressions_patterns_and_receivers() {
+        let source = "\
+impl S {
+    fn f(&mut self, a: &u8) {
+        let &b = a;
+        g(&mut 1);
+    }
+}
+";
+        assert_eq!(
+            elements(source),
+            [
+                (2, Element::MutRef, "&mut self".to_owned()),
+                (2, Element::SharedRef, "&u8".to_owned()),
+                (3, Element::SharedRef, "&b".to_owned()),
+                (4, Element::MutRef, "&mut 1".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_index_by_a_range_is_slice_and_an_index_by_a_number_is_not() {
+        let found = only("fn f(v: Vec<u8>) -> u8 {\n    v[1..3][0]\n}\n");
+        let slices = found.iter().filter(|&&e| e == Element::Slice).count();
+        assert_eq!(slices, 1);
+    }
+
+    #[test]
+    fn a_finding_on_several_lines_has_its_first_line_as_the_text() {
+        let found = elements("fn f(v: Vec<u8>) -> u8 {\n    *v\n        .first()\n}\n");
+        assert_eq!(found, [(2, Element::Deref, "*v ..".to_owned())]);
     }
 
     #[test]
