@@ -333,7 +333,7 @@ What to read from the figure: `checker` and `profile` do no I/O and can be unit-
 - `Profile`: `{ status, provenance, at, evidence }` per element, the report per category, additions to and removals from the base elements (`allow` / `deny`), and the history (append-only)
 - The default base elements live in the code. `clone()` is not among them (it is the core of the ownership category). The user can remove a base element with `deny`
 - `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`. ParseError is treated as a compile-type failure, not a boundary
-- The inside of a macro invocation is invisible to syn → any invocation other than a base macro is itself a finding
+- The inside of a macro invocation is invisible to syn. The arguments of the std macros that take Rust expressions (the `print!`, `format!` / `write!`, `vec!`, `assert!`, `dbg!`, `matches!` and `panic!` families; not `asm!`) are parsed as expressions and patterns and checked like the code around them, each finding on the line of its own token. Inline arguments of a format string (`{x}`) are not read, since they can only be names. Arguments that do not parse in the macro's shape are not seen, and the invocation is then also a `macro_call` finding. The inside of any other macro stays invisible → its invocation is itself a finding unless it is a base element or `known`
 - New crates are detected from both the diff of dependency keys in `Cargo.toml` and the first segment of paths in the source (anything other than std / core / crate / self / super / the project's own modules)
 
 ### 8.4 The write path
@@ -492,7 +492,7 @@ What to read from the figure: the checker, the LLM client, and the Workspace do 
 | `json_schema` unsupported | Detect with `doctor` and apply the switch in 8.7 |
 | `reasoning_effort` rejected | Confirm with `doctor` and send it only when `[capabilities]` is true |
 | syn cannot parse the generated code | Return it as a compile-type failure with line and column. Not a boundary |
-| The inside of a macro body is invisible | Any invocation other than a base macro is itself a finding. Documented as a limitation in the README |
+| The inside of a macro body is invisible | The arguments of the std macros that take Rust expressions are parsed and checked (8.3). Any other invocation is itself a finding unless it is a base element or `known`, and so is a std macro whose arguments do not parse. Documented as a limitation in the README |
 | Elements spanning categories (`Box<dyn Error>` etc.) | Report one finding per element, and in the explanation group by category and remove duplicates. Unlocking is per element, so there is no contradiction |
 | Approvals slow the pace of development | Approvals are only for commits and `cargo add` (section 4). Writes that passed the check and cargo check / test / clippy need no approval |
 | Path escape and destructive operations | Confine to canonicalised paths under the root, and forbid writes to `.git/` and `target/`. `run_cargo` subcommands are only those enumerated. No shell strings; fixed argv |
