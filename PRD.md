@@ -234,7 +234,7 @@ What to read from the figure: an element becomes `known` only through ① and �
 - Alternative flow: `cargo check` fails in ③ → show the result; the user fixes it and sends `/done` again, or switches to ① or ②. The profile is not changed until `/done` passes
 - Alternative flow: `/done` without writing anything in ③ → report that there is no change and let the user choose again
 - Alternative flow: the request is withdrawn (`/abort`) → neither files nor the profile change; the main line waits for the next request
-- Exception flow: interrupted on the side line (Ctrl-C) → change nothing and return the main line to the "paused at a boundary" state. The user chooses again or withdraws
+- Exception flow: interrupted on the side line (Ctrl-C) → change nothing and return the main line to the "paused at a boundary" state. The user chooses again or withdraws: `/side` goes back to the same side line (the explanation is not repeated, and the questions go on), and `/abort` withdraws the request
 - Exception flow: several elements become a boundary at once → handle them one at a time (they may be bundled if the category is the same). The main line does not advance until every one has a choice
 - Exception flow: after ②, the same boundary recurs in the same turn → stop at the second time, explain that the construct is needed, and recommend ① or ③
 - Postcondition: the element is `known` after ① or ③, and `seen` after ②. No other element has changed. The main line's transcript has no side-line questions or explanations
@@ -400,7 +400,7 @@ Common flags:
 | `--fake PATH` | The model's responses, with a script file and `FakeChatClient` | Run offline, without a model |
 | `--ui-script PATH` | The user's inputs, choices, approvals, and interrupts, with a script file and `ScriptedUi`; output goes to stdout | Let a coding agent (not a person) drive one pass against a real model without a terminal |
 
-The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces.
+The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces. While the main line is paused at a boundary, it takes only `/side` and `/abort` (UC3).
 "Language" in section 3 is met by holding fixed UI strings in English and instructing the model to "answer in the language of the user's latest input" (there is no language-detection code).
 
 ### 8.7 Model roles and configuration
