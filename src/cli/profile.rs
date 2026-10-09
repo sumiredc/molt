@@ -40,7 +40,7 @@ fn print(text: &str) -> Result<(), String> {
 
 /// Where the profile is read from and written to: `--profile` if given,
 /// otherwise `profile.toml` in the molt directory (PRD §8.1).
-fn profile_path(profile_flag: Option<&Path>) -> Result<PathBuf, String> {
+pub(super) fn profile_path(profile_flag: Option<&Path>) -> Result<PathBuf, String> {
     match profile_flag {
         Some(path) => Ok(path.to_owned()),
         None => config::molt_home(|name| std::env::var_os(name))

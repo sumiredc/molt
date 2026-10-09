@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod check;
 mod doctor;
 mod profile;
 
@@ -42,7 +43,7 @@ pub(crate) enum Command {
     Profile(ProfileCommand),
     /// Run the checker alone and print findings (exit 1 if any)
     Check {
-        /// Files to check
+        /// Files or directories to check (default: .)
         #[arg(value_name = "PATHS")]
         paths: Vec<PathBuf>,
     },
@@ -64,6 +65,7 @@ pub fn run() -> ExitCode {
     let cli = Cli::parse();
     match &cli.command {
         Some(Command::Profile(command)) => profile::run(cli.common.profile.as_deref(), command),
+        Some(Command::Check { paths }) => check::run(cli.common.profile.as_deref(), paths),
         // --fake の台本はまだ読めない。黙って実際の接続先に送らないよう、受けずに止める
         Some(Command::Doctor) if cli.common.fake.is_some() => {
             eprintln!("doctor does not support --fake yet");
