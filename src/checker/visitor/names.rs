@@ -26,6 +26,8 @@ pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
         (Some("mem"), "replace") => found.push(Element::MemReplace),
         (Some("mem"), "swap") => found.push(Element::MemSwap),
         (Some("mem"), "drop") | (None, "drop") => found.push(Element::Drop),
+        (Some("thread"), "spawn") => found.push(Element::ThreadSpawn),
+        (Some("thread"), "scope") => found.push(Element::ThreadScope),
         _ => {}
     }
     // `Clone::clone(&x)`, `Rc::clone(&x)`, `str::to_owned(s)`: the method
@@ -45,6 +47,22 @@ fn type_name(segment: &str) -> Option<Element> {
     let element = match segment {
         "From" | "Into" => Element::FromInto,
         "PhantomData" => Element::PhantomData,
+        "Box" => Element::Box,
+        "Rc" => Element::Rc,
+        "Arc" => Element::Arc,
+        "Weak" => Element::Weak,
+        "Cell" => Element::Cell,
+        "RefCell" => Element::RefCell,
+        "Mutex" | "MutexGuard" => Element::Mutex,
+        "RwLock" | "RwLockReadGuard" | "RwLockWriteGuard" => Element::RwLock,
+        // `std::sync::atomic::Ordering` too: it is only used with atomics.
+        "atomic" => Element::Atomic,
+        name if name.len() > "Atomic".len() && name.starts_with("Atomic") => Element::Atomic,
+        "OnceCell" | "OnceLock" => Element::OnceCell,
+        "LazyCell" | "LazyLock" => Element::LazyLock,
+        "Cow" => Element::Cow,
+        "mpsc" => Element::Channel,
+        "Send" | "Sync" => Element::SendSync,
         _ => return None,
     };
     Some(element)

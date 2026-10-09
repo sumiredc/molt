@@ -1070,7 +1070,7 @@ fn g() {
             &Profile::new(),
             "src/main.rs",
             "",
-            "use tokio::sync::Mutex;\n",
+            "use tokio::sync::Notify;\n",
         );
         assert_eq!(reported(&report), [(1, krate("tokio"))]);
     }
@@ -1078,14 +1078,14 @@ fn g() {
     #[test]
     fn check_file_does_not_report_a_known_crate() {
         let profile = with_crate("tokio", Status::Known);
-        let report = check(&profile, "src/main.rs", "", "use tokio::sync::Mutex;\n");
+        let report = check(&profile, "src/main.rs", "", "use tokio::sync::Notify;\n");
         assert_eq!(report, CheckReport::Clean);
     }
 
     #[test]
     fn check_file_reports_a_seen_crate() {
         let profile = with_crate("tokio", Status::Seen);
-        let report = check(&profile, "src/main.rs", "", "use tokio::sync::Mutex;\n");
+        let report = check(&profile, "src/main.rs", "", "use tokio::sync::Notify;\n");
         assert_eq!(reported(&report), [(1, krate("tokio"))]);
     }
 

@@ -373,8 +373,12 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     }
 
     fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
-        if item.trait_.is_some() {
+        if let Some((path, _)) = &item.trait_ {
             self.mark_from(item.impl_token.span(), item.span(), Element::TraitImpl);
+            let name = path.segments.last().map(|s| s.ident.to_string());
+            if let Some(element) = name.as_deref().and_then(implemented_trait) {
+                self.mark_from(item.impl_token.span(), item.span(), element);
+            }
         }
         visit::visit_item_impl(self, item);
     }
@@ -619,6 +623,17 @@ fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
             }
         }
     }
+}
+
+/// The element of implementing a trait, by the trait's last name, besides
+/// `trait_impl`.
+fn implemented_trait(name: &str) -> Option<Element> {
+    let element = match name {
+        "Deref" | "DerefMut" => Element::ImplDeref,
+        "Drop" => Element::ImplDrop,
+        _ => return None,
+    };
+    Some(element)
 }
 
 /// `&` or `&mut`, in a type, an expression, a pattern or a receiver.
@@ -1375,6 +1390,40 @@ impl S { fn h() -> Self::Output {} }
                 Element::AnonymousLifetime,
             ]
         );
+    }
+
+    // smart_pointers
+
+    #[test]
+    fn a_smart_pointer_named_anywhere_in_a_path_or_an_import_is_that_element() {
+        let source = "\
+use std::sync::{Arc, Mutex};
+fn f(g: MutexGuard<u8>, a: AtomicUsize) -> Arc<u8> {
+    std::rc::Rc::new(1);
+}
+";
+        assert_eq!(
+            only(source),
+            [
+                Element::Arc,
+                Element::Mutex,
+                Element::Mutex,
+                Element::Atomic,
+                Element::Arc,
+                Element::Rc,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_a_smart_pointer_is_not_one() {
+        assert_eq!(only("fn f(a: Boxed, b: Atomic, c: Arcade) {}\n"), []);
+    }
+
+    #[test]
+    fn spawn_and_scope_are_thread_elements_only_through_thread() {
+        let source = "fn f() {\n    thread::spawn(g);\n    std::thread::scope(g);\n    tokio::spawn(g);\n    spawn(g);\n}\n";
+        assert_eq!(only(source), [Element::ThreadSpawn, Element::ThreadScope]);
     }
 
     #[test]
