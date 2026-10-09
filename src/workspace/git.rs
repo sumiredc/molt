@@ -151,12 +151,14 @@ impl Error for GitError {
     }
 }
 
+/// Runs a real `git` in a tempdir for the tests here and in `agent::tools`.
 #[cfg(test)]
-mod tests {
-    use std::fs;
+pub(crate) mod testing {
+    use std::path::Path;
+    use std::process::Command;
 
-    use super::*;
-    use crate::workspace::approve;
+    use super::Git;
+    use crate::workspace::path::Root;
 
     /// Keeps the developer's own git config out of the tests, and gives commits an author by
     /// environment instead of by config, so `Git` itself never sets one. Removes the variables
@@ -176,7 +178,7 @@ mod tests {
     ];
 
     /// `git <args>` in `dir`, with [`TEST_ENV`].
-    fn git_in(dir: &Path, args: &[&str]) -> Command {
+    pub(crate) fn git_in(dir: &Path, args: &[&str]) -> Command {
         let mut command = Command::new("git");
         for (key, value) in TEST_ENV {
             match value {
@@ -188,13 +190,28 @@ mod tests {
         command
     }
 
+    /// Runs `git init` in `dir` and returns a `Git` on it that runs with [`TEST_ENV`].
+    pub(crate) fn init(dir: &Path) -> Git {
+        let status = git_in(dir, &["init", "--quiet"]).status().unwrap();
+        assert!(status.success());
+        let mut git = Git::new(Root::new(dir).unwrap());
+        git.envs = TEST_ENV.to_vec();
+        git
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::testing::{git_in, init};
+    use super::*;
+    use crate::workspace::approve;
+
     /// An empty git repository in a tempdir, and a `Git` on it.
     fn repository() -> (tempfile::TempDir, Git) {
         let dir = tempfile::tempdir().unwrap();
-        let status = git_in(dir.path(), &["init", "--quiet"]).status().unwrap();
-        assert!(status.success());
-        let mut git = Git::new(Root::new(dir.path()).unwrap());
-        git.envs = TEST_ENV.to_vec();
+        let git = init(dir.path());
         (dir, git)
     }
 
