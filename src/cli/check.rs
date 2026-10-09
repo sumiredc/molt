@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use crate::checker::{self, CheckContext, CheckReport, Finding};
 use crate::profile::store::{Profile, StoreError};
+use crate::workspace::modules::ModuleScope;
 
 /// The exit code when a path, the profile or a file could not be checked.
 const CANNOT_CHECK: u8 = 2;
@@ -37,7 +38,8 @@ pub(super) fn run(profile_flag: Option<&Path>, paths: &[PathBuf]) -> ExitCode {
         failed |= !collect(path, &mut files);
     }
 
-    let mut own_modules = OwnModules::default();
+    // Read once per scope: every file of a directory shares one.
+    let mut own_modules: BTreeMap<ModuleScope, BTreeSet<String>> = BTreeMap::new();
     let mut found = false;
     let mut out = io::stdout().lock();
     for file in &files {
@@ -51,7 +53,9 @@ pub(super) fn run(profile_flag: Option<&Path>, paths: &[PathBuf]) -> ExitCode {
         };
         let ctx = CheckContext {
             profile: &profile,
-            own_modules: own_modules.of(file),
+            own_modules: own_modules
+                .entry(ModuleScope::of(file))
+                .or_insert_with_key(ModuleScope::own_modules),
         };
         match checker::check_file(file, "", &content, &ctx) {
             CheckReport::Clean => {}
@@ -171,104 +175,4 @@ fn collect(path: &Path, files: &mut Vec<PathBuf>) -> bool {
         }
     }
     ok
-}
-
-/// The own modules of each cargo project, read once per project.
-#[derive(Default)]
-struct OwnModules {
-    by_root: BTreeMap<(PathBuf, bool), BTreeSet<String>>,
-}
-
-impl OwnModules {
-    /// The own modules of the project `file` is in: the nearest directory
-    /// above it with a `Cargo.toml`. Outside a project there are none. A file
-    /// outside `src/` (`tests/`, `examples/`, `benches/`) or under `src/bin/`
-    /// is a crate of its own that reaches the library only through its name,
-    /// so it gets the library's names and not the modules under `src/`.
-    fn of(&mut self, file: &Path) -> &BTreeSet<String> {
-        let file = std::path::absolute(file).unwrap_or_default();
-        let root = file
-            .ancestors()
-            .skip(1)
-            .find(|dir| dir.join("Cargo.toml").is_file())
-            .map(Path::to_owned)
-            .unwrap_or_default();
-        let in_src = !root.as_os_str().is_empty()
-            && file.starts_with(root.join("src"))
-            && !file.starts_with(root.join("src/bin"));
-        self.by_root
-            .entry((root, in_src))
-            .or_insert_with_key(|(root, in_src)| {
-                if *in_src {
-                    own_modules(root)
-                } else if root.as_os_str().is_empty() {
-                    BTreeSet::new()
-                } else {
-                    own_crate_names(root).into_iter().collect()
-                }
-            })
-    }
-}
-
-/// The project's top-level modules: the files (`util.rs`) and module
-/// directories (`util/mod.rs`) directly under `src/`, and the `mod`
-/// declarations in `src/lib.rs` and `src/main.rs`, which also name modules
-/// kept elsewhere with `#[path]`. Also the project's own library crate, by
-/// its `[lib] name` and its `[package] name` with `-` as `_`, which a binary
-/// or test of the same package names like a crate (`molt::cli::run()`), but
-/// which is not an external crate. Nothing for an empty `root` (no project).
-fn own_modules(root: &Path) -> BTreeSet<String> {
-    let mut modules = BTreeSet::new();
-    if root.as_os_str().is_empty() {
-        return modules;
-    }
-    let src = root.join("src");
-    for entry in fs::read_dir(&src).into_iter().flatten().flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            if path.join("mod.rs").is_file() {
-                modules.extend(
-                    path.file_name()
-                        .map(|name| name.to_string_lossy().into_owned()),
-                );
-            }
-        } else if path.extension().is_some_and(|ext| ext == "rs") {
-            modules.extend(
-                path.file_stem()
-                    .map(|stem| stem.to_string_lossy().into_owned())
-                    .filter(|stem| stem != "lib" && stem != "main"),
-            );
-        }
-    }
-    for crate_root in ["lib.rs", "main.rs"] {
-        let Ok(content) = fs::read_to_string(src.join(crate_root)) else {
-            continue;
-        };
-        let Ok(file) = syn::parse_file(&content) else {
-            continue;
-        };
-        for item in file.items {
-            if let syn::Item::Mod(item) = item {
-                modules.insert(item.ident.to_string());
-            }
-        }
-    }
-    modules.extend(own_crate_names(root));
-    modules
-}
-
-/// `[lib] name` and `[package] name` (with `-` as `_`) of `root/Cargo.toml`.
-/// None when it has no `[package]` (a workspace root) or does not parse.
-fn own_crate_names(root: &Path) -> Vec<String> {
-    let Ok(content) = fs::read_to_string(root.join("Cargo.toml")) else {
-        return Vec::new();
-    };
-    let Ok(manifest) = content.parse::<toml::Table>() else {
-        return Vec::new();
-    };
-    ["lib", "package"]
-        .into_iter()
-        .filter_map(|table| manifest.get(table)?.get("name")?.as_str())
-        .map(|name| name.replace('-', "_"))
-        .collect()
 }
