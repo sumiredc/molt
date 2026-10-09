@@ -244,7 +244,7 @@ What to read from the figure: an element becomes `known` only through ① and �
 A commit contains only what the user approved after seeing the diff and the proposed message.
 
 - Precondition: molt has written, and `cargo check` passes. The current directory is a git repository
-- Main flow: the user asks (or molt proposes) → molt shows the diff of the files it changed (including `Cargo.toml` and `Cargo.lock` changed by `cargo add`) and a proposed message → approval → stage only that content and commit
+- Main flow: the user asks (or molt proposes) → molt shows the diff of the files it changed (including `Cargo.toml` and `Cargo.lock` changed by `cargo add`) and a proposed message → approval → stage only that content and commit. The files molt changed also include the files the user wrote in ③ on the side line (UC3); their lines go into the diff and the commit as part of one change
 - Alternative flow: other unstaged changes are mixed in → report it and confirm with the user whether to stage only the files molt changed
 - Exception flow: not approved → do nothing. The diff stays in the working tree
 - Exception flow: nothing to commit → report it and do nothing
