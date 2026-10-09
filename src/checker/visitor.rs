@@ -19,13 +19,14 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
-    Expr, ExprBreak, ExprContinue, ExprIndex, ExprMethodCall, ExprReference, ExprTry, ExprUnary,
-    GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl,
-    ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime,
-    LifetimeParam, Macro, Meta, PatIdent, PatReference, Path, PathArguments, PredicateLifetime,
-    PredicateType, QSelf, Receiver, ReceiverKind, Token, TraitItem, TraitItemConst, TraitItemType,
-    Type, TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypeReference, TypeSlice,
-    TypeTraitObject, UnOp, UseTree, WhereClause,
+    Expr, ExprBreak, ExprClosure, ExprContinue, ExprForLoop, ExprIndex, ExprMethodCall, ExprRange,
+    ExprReference, ExprTry, ExprUnary, GenericArgument, Generics, ImplItem, ImplItemConst,
+    ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias,
+    ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta, PatIdent, PatReference, Path,
+    PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver, ReceiverKind, Token,
+    TraitItem, TraitItemConst, TraitItemType, Type, TypeFnPtr, TypeImplTrait, TypeParam,
+    TypeParamBound, TypePath, TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree,
+    WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -579,6 +580,39 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         }
     }
 
+    // iterators_closures
+
+    fn visit_expr_for_loop(&mut self, expr: &'ast ExprForLoop) {
+        self.mark_from(expr.for_token.span(), expr.span(), Element::ForLoop);
+        visit::visit_expr_for_loop(self, expr);
+    }
+
+    fn visit_expr_range(&mut self, expr: &'ast ExprRange) {
+        // On the line of `..`: in a pattern or an expression the start may be
+        // lines above.
+        let text = self.snippet(expr.span());
+        self.push(expr.limits.span(), Element::Range, text);
+        visit::visit_expr_range(self, expr);
+    }
+
+    fn visit_expr_closure(&mut self, expr: &'ast ExprClosure) {
+        let head = expr
+            .asyncness
+            .map(|t| t.span())
+            .or(expr.capture.map(|t| t.span()))
+            .unwrap_or(expr.inputs_begin.span());
+        self.mark_from(head, expr.span(), Element::Closure);
+        if let Some(capture) = &expr.capture {
+            self.mark_from(capture.span(), expr.span(), Element::MoveClosure);
+        }
+        visit::visit_expr_closure(self, expr);
+    }
+
+    fn visit_type_fn_ptr(&mut self, ty: &'ast TypeFnPtr) {
+        self.mark_from(ty.fn_token.span(), ty.span(), Element::FnPointer);
+        visit::visit_type_fn_ptr(self, ty);
+    }
+
     // Names: paths, imports and method calls
 
     fn visit_path(&mut self, path: &'ast Path) {
@@ -609,7 +643,8 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         } else {
             format!(".{name}(..)")
         };
-        for element in names::method_elements(&name, call.args.len()) {
+        let receiver = names::receiver_kind(&call.receiver);
+        for element in names::method_elements(&name, call.args.len(), receiver) {
             self.push(call.method.span(), element, text.clone());
         }
         visit::visit_expr_method_call(self, call);
@@ -672,6 +707,7 @@ fn implemented_trait(name: &str) -> Option<Element> {
         "Deref" | "DerefMut" => Element::ImplDeref,
         "Drop" => Element::ImplDrop,
         "Error" => Element::ImplError,
+        "Iterator" | "IntoIterator" => Element::ImplIterator,
         _ => return None,
     };
     Some(element)
@@ -1502,6 +1538,66 @@ fn f(g: MutexGuard<u8>, a: AtomicUsize) -> Arc<u8> {
         assert!(found.contains(&Element::BoxDynError), "{found:?}");
         let other = only("fn f() -> Box<dyn Display> {}\n");
         assert!(!other.contains(&Element::BoxDynError), "{other:?}");
+    }
+
+    // iterators_closures
+
+    fn adapters_and_combinators(source: &str) -> Vec<Element> {
+        only(source)
+            .into_iter()
+            .filter(|e| matches!(e, Element::IteratorAdapter | Element::ResultCombinator))
+            .collect()
+    }
+
+    #[test]
+    fn map_after_an_iterator_is_an_adapter_even_after_other_ambiguous_methods() {
+        let source = "fn f(v: V) {\n    v.iter().filter(p).map(g);\n    (0..3).map(g);\n}\n";
+        assert_eq!(
+            adapters_and_combinators(source),
+            [Element::IteratorAdapter; 3]
+        );
+    }
+
+    #[test]
+    fn map_after_an_option_or_a_result_is_a_combinator() {
+        let source =
+            "fn f(v: V) {\n    v.first().map(g);\n    Some(1).map(g);\n    s.parse().map(g);\n}\n";
+        assert_eq!(
+            adapters_and_combinators(source),
+            [Element::ResultCombinator; 3]
+        );
+    }
+
+    #[test]
+    fn map_on_a_receiver_the_chain_does_not_tell_is_both_adapter_and_combinator() {
+        assert_eq!(
+            adapters_and_combinators("fn f(x: X) {\n    x.map(g);\n}\n"),
+            [Element::IteratorAdapter, Element::ResultCombinator]
+        );
+    }
+
+    #[test]
+    fn take_with_a_count_is_an_adapter_and_max_with_an_argument_is_not_a_consumer() {
+        let source =
+            "fn f(x: X, a: u8) {\n    x.take(2);\n    x.take();\n    a.max(3);\n    x.max();\n}\n";
+        assert_eq!(
+            only(source),
+            [Element::IteratorAdapter, Element::IteratorConsumer]
+        );
+    }
+
+    #[test]
+    fn a_range_is_on_the_line_of_its_dots() {
+        let found = elements("fn f() {\n    let r = start\n        ..end;\n}\n");
+        assert_eq!(found, [(3, Element::Range, "start ..".to_owned())]);
+    }
+
+    #[test]
+    fn a_move_closure_is_both_closure_and_move_closure() {
+        assert_eq!(
+            only("fn f() {\n    let g = move || 1;\n}\n"),
+            [Element::Closure, Element::MoveClosure]
+        );
     }
 
     #[test]

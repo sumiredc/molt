@@ -1,6 +1,8 @@
 //! Elements told apart by name alone: the segments of a path and the name of
 //! a called method. syn has no types, so a name is all there is to go on.
 
+use syn::Expr;
+
 use crate::profile::element::Element;
 
 /// The elements a path names, from its segments (`["std", "mem", "take"]`).
@@ -65,15 +67,73 @@ fn type_name(segment: &str) -> Option<Element> {
         "Send" | "Sync" => Element::SendSync,
         "Result" | "Ok" | "Err" => Element::Result,
         "Option" | "Some" | "None" => Element::Option,
+        "Fn" | "FnMut" | "FnOnce" => Element::FnTrait,
         _ => return None,
     };
     Some(element)
 }
 
-/// The elements a method call names, from the method's name and its number
-/// of arguments.
-pub(super) fn method_elements(name: &str, args: usize) -> Vec<Element> {
+/// What the receiver of a method call is, as far as the calls before it tell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Receiver {
+    Iterator,
+    OptionOrResult,
+}
+
+/// What `expr` evaluates to, judged from the method chain it ends: `None`
+/// when the chain does not tell.
+pub(super) fn receiver_kind(expr: &Expr) -> Option<Receiver> {
+    match expr {
+        Expr::MethodCall(call) => {
+            let name = call.method.to_string();
+            let args = call.args.len();
+            if ITER_SOURCES.contains(&name.as_str()) || is_iterator_adapter(&name, args) {
+                Some(Receiver::Iterator)
+            } else if AMBIGUOUS_ADAPTERS.contains(&name.as_str()) {
+                // `map` and the like keep what their receiver is.
+                receiver_kind(&call.receiver)
+            } else if OPTION_OR_RESULT_SOURCES.contains(&name.as_str()) {
+                Some(Receiver::OptionOrResult)
+            } else {
+                None
+            }
+        }
+        Expr::Call(call) => match &*call.func {
+            Expr::Path(path)
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|s| ["Some", "Ok", "Err"].iter().any(|n| s.ident == n)) =>
+            {
+                Some(Receiver::OptionOrResult)
+            }
+            _ => None,
+        },
+        Expr::Path(path) if path.path.is_ident("None") => Some(Receiver::OptionOrResult),
+        Expr::Range(_) => Some(Receiver::Iterator),
+        Expr::Paren(inner) => receiver_kind(&inner.expr),
+        _ => None,
+    }
+}
+
+/// The elements a method call names, from the method's name, its number of
+/// arguments and what its receiver is.
+pub(super) fn method_elements(name: &str, args: usize, receiver: Option<Receiver>) -> Vec<Element> {
+    if AMBIGUOUS_ADAPTERS.contains(&name) {
+        // Without types, `x.map(f)` is an iterator adapter or a combinator
+        // depending on `x`. When the chain does not tell, both are reported,
+        // so that neither is let through unknown.
+        return match receiver {
+            Some(Receiver::Iterator) => vec![Element::IteratorAdapter],
+            Some(Receiver::OptionOrResult) => vec![Element::ResultCombinator],
+            None => vec![Element::IteratorAdapter, Element::ResultCombinator],
+        };
+    }
     let element = match name {
+        "iter" | "iter_mut" | "into_iter" => Element::IterMethod,
+        name if is_iterator_adapter(name, args) => Element::IteratorAdapter,
+        name if is_iterator_consumer(name, args) => Element::IteratorConsumer,
         "clone" => Element::Clone,
         "to_owned" => Element::ToOwned,
         "into" => Element::FromInto,
@@ -84,6 +144,122 @@ pub(super) fn method_elements(name: &str, args: usize) -> Vec<Element> {
     };
     vec![element]
 }
+
+fn is_iterator_adapter(name: &str, args: usize) -> bool {
+    // `Option::take()` has no argument; `Iterator::take(n)` has one.
+    ITERATOR_ADAPTERS.contains(&name) || (name == "take" && args == 1)
+}
+
+fn is_iterator_consumer(name: &str, args: usize) -> bool {
+    // `a.max(b)` is `Ord::max`; the iterator's `max()` has no argument.
+    ITERATOR_CONSUMERS.contains(&name) || (["max", "min"].contains(&name) && args == 0)
+}
+
+/// Methods that give an iterator, besides `iter_method`. They are no element
+/// of their own; they tell what a `map` after them is.
+const ITER_SOURCES: &[&str] = &[
+    "iter",
+    "iter_mut",
+    "into_iter",
+    "chars",
+    "char_indices",
+    "bytes",
+    "lines",
+    "split_whitespace",
+    "keys",
+    "values",
+    "values_mut",
+    "drain",
+    "windows",
+    "chunks",
+];
+
+/// Iterator adapters that `Option` and `Result` do not have.
+const ITERATOR_ADAPTERS: &[&str] = &[
+    "enumerate",
+    "skip",
+    "skip_while",
+    "take_while",
+    "step_by",
+    "chain",
+    "rev",
+    "peekable",
+    "flat_map",
+    "filter_map",
+    "map_while",
+    "scan",
+    "fuse",
+    "cycle",
+];
+
+/// Adapters that both iterators and `Option` / `Result` have.
+const AMBIGUOUS_ADAPTERS: &[&str] = &[
+    "map", "filter", "flatten", "zip", "inspect", "copied", "cloned",
+];
+
+/// Iterator consumers. Some names are shared with other types (`last` of a
+/// slice, `find` of a `str`); those are reported as consumers too.
+const ITERATOR_CONSUMERS: &[&str] = &[
+    "collect",
+    "sum",
+    "product",
+    "fold",
+    "count",
+    "for_each",
+    "reduce",
+    "all",
+    "any",
+    "find",
+    "find_map",
+    "position",
+    "rposition",
+    "max_by",
+    "min_by",
+    "max_by_key",
+    "min_by_key",
+    "last",
+    "nth",
+    "next",
+    "partition",
+    "unzip",
+    "try_fold",
+    "try_for_each",
+];
+
+/// Methods that give an `Option` or a `Result`, so that a `map` after them is
+/// a combinator.
+const OPTION_OR_RESULT_SOURCES: &[&str] = &[
+    "ok",
+    "err",
+    "ok_or",
+    "ok_or_else",
+    "and_then",
+    "or_else",
+    "map_err",
+    "and",
+    "or",
+    "xor",
+    "as_deref",
+    "as_deref_mut",
+    "transpose",
+    "inspect_err",
+    "next",
+    "find",
+    "find_map",
+    "position",
+    "max_by",
+    "min_by",
+    "max_by_key",
+    "min_by_key",
+    "last",
+    "nth",
+    "reduce",
+    "get",
+    "get_mut",
+    "first",
+    "pop",
+    "parse",
+];
 
 /// Methods of `Result` / `Option` that no iterator has. The ones an iterator
 /// also has (`map`, `filter`, ..) are told apart by the receiver.
