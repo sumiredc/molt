@@ -11,6 +11,16 @@ pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
     let before_last = segments.len().checked_sub(2).map(|i| segments[i]);
     let qualified = segments.len() > 1;
 
+    // A type or trait anywhere in the path: `PhantomData<T>`,
+    // `std::marker::PhantomData`, `From::from`.
+    for &segment in segments {
+        if let Some(element) = type_name(segment)
+            && !found.contains(&element)
+        {
+            found.push(element);
+        }
+    }
+
     match (before_last, last) {
         (Some("mem"), "take") => found.push(Element::MemTake),
         (Some("mem"), "replace") => found.push(Element::MemReplace),
@@ -23,9 +33,21 @@ pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
     match last {
         "clone" if qualified => found.push(Element::Clone),
         "to_owned" if qualified => found.push(Element::ToOwned),
+        // `String::from(s)`, `u64::from(n)`: a conversion through `From`.
+        "from" if qualified && !found.contains(&Element::FromInto) => found.push(Element::FromInto),
         _ => {}
     }
     found
+}
+
+/// The element a type or trait name stands for, wherever it is in a path.
+fn type_name(segment: &str) -> Option<Element> {
+    let element = match segment {
+        "From" | "Into" => Element::FromInto,
+        "PhantomData" => Element::PhantomData,
+        _ => return None,
+    };
+    Some(element)
 }
 
 /// The elements a method call names, from the method's name and its number
@@ -34,6 +56,7 @@ pub(super) fn method_elements(name: &str, _args: usize) -> Vec<Element> {
     let element = match name {
         "clone" => Element::Clone,
         "to_owned" => Element::ToOwned,
+        "into" => Element::FromInto,
         _ => return Vec::new(),
     };
     vec![element]

@@ -18,9 +18,12 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprIndex, ExprMethodCall, ExprReference, ExprUnary, ItemEnum, ItemMacro,
-    ItemStruct, ItemUnion, ItemUse, Macro, Meta, PatIdent, PatReference, Path, Receiver,
-    ReceiverKind, Token, TypeReference, TypeSlice, UnOp, UseTree,
+    AngleBracketedGenericArguments, AssocType, Attribute, ConstParam, Constraint, Expr, ExprIndex,
+    ExprMethodCall, ExprReference, ExprUnary, Generics, ImplItem, ImplItemConst, ImplItemType,
+    Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias, ItemUnion, ItemUse,
+    Macro, Meta, PatIdent, PatReference, Path, PredicateType, QSelf, Receiver, ReceiverKind, Token,
+    TraitItem, TraitItemConst, TraitItemType, TypeImplTrait, TypeParam, TypeParamBound, TypePath,
+    TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -79,6 +82,22 @@ struct Detector<'s> {
     /// (`#[serde(..)]`) rather than an attribute macro: on fields and variants,
     /// where attribute macros cannot go, and on a type with a custom derive.
     helpers_allowed: bool,
+    /// The type parameters in scope, so that `T::Item` reads as an associated
+    /// type rather than a path into a module `T`.
+    type_params: Vec<String>,
+    /// What a trait in the bound list being visited is.
+    bound_role: BoundRole,
+}
+
+/// What a trait in a list of bounds stands for: a bound (`T: Trait`), a
+/// supertrait (`trait A: B`), or a part of `impl Trait` / `dyn Trait`, which
+/// are elements of their own.
+#[derive(Default, Clone, Copy)]
+enum BoundRole {
+    #[default]
+    Bound,
+    Supertrait,
+    Plain,
 }
 
 impl Detector<'_> {
@@ -90,7 +109,11 @@ impl Detector<'_> {
 
     /// The source `span` covers, cut after its first line.
     fn snippet(&self, span: Span) -> String {
-        let text = self.source.get(span.byte_range()).unwrap_or("").trim();
+        self.text(span.byte_range())
+    }
+
+    fn text(&self, range: std::ops::Range<usize>) -> String {
+        let text = self.source.get(range).unwrap_or("").trim();
         match text.split_once('\n') {
             Some((first, _)) => format!("{} ..", first.trim_end()),
             None => text.to_owned(),
@@ -162,6 +185,38 @@ impl Detector<'_> {
             return;
         }
         self.push(meta.span(), Element::AttributeMacro, path_text(path));
+    }
+
+    /// Reports `element` on the line of `token`, with the source from `token`
+    /// to the end of `node` as the text, so that attributes before an item are
+    /// left out.
+    fn mark_from(&mut self, token: Span, node: Span, element: Element) {
+        let start = token.byte_range().start;
+        let end = node.byte_range().end.max(token.byte_range().end);
+        let text = self.text(start..end);
+        self.push(token, element, text);
+    }
+
+    /// `type Item = ..;` in an impl or `type Item;` in a trait. With
+    /// parameters of its own (`type Item<'a>`) it is also generic.
+    fn associated_type(&mut self, token: Span, node: Span, generics: &Generics) {
+        self.mark_from(token, node, Element::AssociatedType);
+        if !generics.params.is_empty() {
+            self.mark_from(token, node, Element::GenericAssociatedType);
+        }
+    }
+
+    fn with_bound_role(&mut self, role: BoundRole, visit: impl FnOnce(&mut Self)) {
+        let outer = mem::replace(&mut self.bound_role, role);
+        visit(self);
+        self.bound_role = outer;
+    }
+
+    /// Visits an item, and forgets the type parameters it declared after it.
+    fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
+        let outer = self.type_params.len();
+        visit(self);
+        self.type_params.truncate(outer);
     }
 
     fn with_helpers_allowed(&mut self, allowed: bool, visit: impl FnOnce(&mut Self)) {
@@ -281,6 +336,155 @@ impl<'ast> Visit<'ast> for Detector<'_> {
             self.push(expr.bracket_token.span.open(), Element::Slice, text);
         }
         visit::visit_expr_index(self, expr);
+    }
+
+    // traits_generics
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        self.scoped(|v| visit::visit_item(v, item));
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        self.scoped(|v| visit::visit_impl_item(v, item));
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
+        self.scoped(|v| visit::visit_trait_item(v, item));
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
+        self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        self.with_bound_role(BoundRole::Supertrait, |v| visit::visit_item_trait(v, item));
+    }
+
+    fn visit_item_trait_alias(&mut self, item: &'ast ItemTraitAlias) {
+        self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_item_trait_alias(v, item));
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        if item.trait_.is_some() {
+            self.mark_from(item.impl_token.span(), item.span(), Element::TraitImpl);
+        }
+        visit::visit_item_impl(self, item);
+    }
+
+    fn visit_type_param(&mut self, param: &'ast TypeParam) {
+        self.type_params.push(param.ident.to_string());
+        self.mark(param.span(), Element::GenericParam);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_type_param(v, param));
+    }
+
+    fn visit_const_param(&mut self, param: &'ast ConstParam) {
+        self.mark_from(
+            param.const_token.span(),
+            param.span(),
+            Element::ConstGeneric,
+        );
+        visit::visit_const_param(self, param);
+    }
+
+    fn visit_where_clause(&mut self, clause: &'ast WhereClause) {
+        if !clause.predicates.is_empty() {
+            self.mark_from(
+                clause.where_token.span(),
+                clause.span(),
+                Element::WhereClause,
+            );
+        }
+        visit::visit_where_clause(self, clause);
+    }
+
+    fn visit_predicate_type(&mut self, predicate: &'ast PredicateType) {
+        self.with_bound_role(BoundRole::Bound, |v| {
+            visit::visit_predicate_type(v, predicate)
+        });
+    }
+
+    fn visit_type_param_bound(&mut self, bound: &'ast TypeParamBound) {
+        if let TypeParamBound::Trait(trait_bound) = bound {
+            match self.bound_role {
+                BoundRole::Bound => self.mark(trait_bound.span(), Element::TraitBound),
+                BoundRole::Supertrait => self.mark(trait_bound.span(), Element::Supertrait),
+                BoundRole::Plain => {}
+            }
+        }
+        visit::visit_type_param_bound(self, bound);
+    }
+
+    fn visit_type_impl_trait(&mut self, ty: &'ast TypeImplTrait) {
+        self.mark(ty.span(), Element::ImplTrait);
+        self.with_bound_role(BoundRole::Plain, |v| visit::visit_type_impl_trait(v, ty));
+    }
+
+    fn visit_type_trait_object(&mut self, ty: &'ast TypeTraitObject) {
+        self.mark(ty.span(), Element::DynTrait);
+        self.with_bound_role(BoundRole::Plain, |v| visit::visit_type_trait_object(v, ty));
+    }
+
+    fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
+        self.associated_type(item.type_token.span(), item.span(), &item.generics);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_trait_item_type(v, item));
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
+        self.associated_type(item.type_token.span(), item.span(), &item.generics);
+        visit::visit_impl_item_type(self, item);
+    }
+
+    fn visit_assoc_type(&mut self, assoc: &'ast AssocType) {
+        self.mark(assoc.span(), Element::AssociatedType);
+        visit::visit_assoc_type(self, assoc);
+    }
+
+    fn visit_constraint(&mut self, constraint: &'ast Constraint) {
+        self.mark(constraint.span(), Element::AssociatedType);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_constraint(v, constraint));
+    }
+
+    fn visit_type_path(&mut self, ty: &'ast TypePath) {
+        // `Self::Item`, `T::Item` and `<T as Trait>::Item` in a type are
+        // associated types. A path into a module (`io::Error`) is not.
+        let first = ty.path.segments.first().map(|s| s.ident.to_string());
+        let from_param = ty.path.segments.len() > 1
+            && first.is_some_and(|first| first == "Self" || self.type_params.contains(&first));
+        if ty.qself.is_some() || from_param {
+            self.mark(ty.span(), Element::AssociatedType);
+        }
+        visit::visit_type_path(self, ty);
+    }
+
+    fn visit_qself(&mut self, qself: &'ast QSelf) {
+        self.mark(qself.span(), Element::QualifiedPath);
+        visit::visit_qself(self, qself);
+    }
+
+    fn visit_angle_bracketed_generic_arguments(
+        &mut self,
+        args: &'ast AngleBracketedGenericArguments,
+    ) {
+        if let Some(colon2) = &args.colon2_token {
+            self.mark_from(colon2.span(), args.span(), Element::Turbofish);
+        }
+        visit::visit_angle_bracketed_generic_arguments(self, args);
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
+        self.mark_from(
+            item.const_token.span(),
+            item.span(),
+            Element::AssociatedConst,
+        );
+        visit::visit_impl_item_const(self, item);
+    }
+
+    fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
+        self.mark_from(
+            item.const_token.span(),
+            item.span(),
+            Element::AssociatedConst,
+        );
+        visit::visit_trait_item_const(self, item);
     }
 
     // Names: paths, imports and method calls
@@ -667,8 +871,11 @@ trait T {
 #[doc = my_attr_value!()]
 fn g() {}
 ";
+        // `impl S` and `trait T` are only there to hold the macros; the
+        // `trait_def` it yields is not what this test is about.
         let found: Vec<(usize, String)> = elements(source)
             .into_iter()
+            .filter(|(_, element, _)| *element != Element::TraitDef)
             .map(|(line, element, text)| {
                 assert_eq!(element, Element::MacroCall, "{text}");
                 (line, text)
@@ -719,10 +926,11 @@ fn g() {}
     #[test]
     fn findings_are_in_line_order_even_where_syn_visits_out_of_order() {
         // syn visits a signature's generics, `where` clause included, before
-        // its return type.
+        // its return type: `where_clause` (3) and `trait_bound` and `bound!`
+        // (4) are visited before `ret!` (2).
         let source = "fn f()\n-> ret!()\nwhere\n    bound!(): Copy,\n{}\n";
         let lines: Vec<usize> = elements(source).into_iter().map(|(l, _, _)| l).collect();
-        assert_eq!(lines, [2, 4]);
+        assert_eq!(lines, [2, 3, 4, 4]);
     }
 
     // Attributes
@@ -975,6 +1183,87 @@ impl S {
             only("fn f(r: R) {\n    io::take(r);\n    take(r);\n}\n"),
             []
         );
+    }
+
+    // traits_generics
+
+    #[test]
+    fn a_trait_in_a_bound_is_trait_bound_but_in_impl_trait_dyn_trait_or_supertraits_is_not() {
+        let source = "\
+fn f<T: Copy>(a: impl Copy, b: &dyn Copy) where T: Clone {}
+trait A: Copy {}
+";
+        let found = only(source);
+        let bounds = found.iter().filter(|&&e| e == Element::TraitBound).count();
+        assert_eq!(bounds, 2, "{found:?}");
+        assert!(found.contains(&Element::Supertrait));
+    }
+
+    #[test]
+    fn a_trait_bound_inside_a_dyn_trait_inside_a_bound_is_a_bound_again() {
+        let found = only(
+            "fn f<T: Into<Box<dyn Fn() + Send>>>() {}\nfn g<U>() where U: Iterator<Item: Copy> {}\n",
+        );
+        let bounds = found.iter().filter(|&&e| e == Element::TraitBound).count();
+        // `T: Into<..>`, `U: Iterator<..>` and `Item: Copy`; not `Fn` or `Send`.
+        assert_eq!(bounds, 3, "{found:?}");
+    }
+
+    #[test]
+    fn a_path_from_a_type_parameter_or_self_in_a_type_is_associated_type() {
+        let source = "\
+fn f<T>(x: T::Item) {}
+fn g(x: T::Item, e: io::Error) {}
+impl S { fn h() -> Self::Output {} }
+";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::AssociatedType)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [1, 3]);
+    }
+
+    #[test]
+    fn a_qualified_path_in_a_type_is_also_associated_type_and_in_an_expression_is_not() {
+        assert_eq!(
+            only("fn f(x: <T as Iterator>::Item) {}\n"),
+            [Element::AssociatedType, Element::QualifiedPath]
+        );
+        assert_eq!(
+            only("fn f() {\n    <u8 as Default>::default();\n}\n"),
+            [Element::QualifiedPath]
+        );
+    }
+
+    #[test]
+    fn generic_arguments_after_double_colon_are_turbofish_and_in_a_type_are_not() {
+        let source =
+            "fn f(v: Vec<u8>) {\n    v.iter()\n        .sum::<u8>();\n    Vec::<u8>::new();\n}\n";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::Turbofish)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [3, 4]);
+    }
+
+    #[test]
+    fn an_item_is_on_the_line_of_its_keyword_after_its_attributes() {
+        let source = "#[doc = \"x\"]\nimpl Copy for S {}\n#[doc = \"y\"]\ntrait T {}\n";
+        assert_eq!(
+            elements(source),
+            [
+                (2, Element::TraitImpl, "impl Copy for S {}".to_owned()),
+                (4, Element::TraitDef, "trait T {}".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conversion_through_from_or_into_is_from_into() {
+        let found = only("fn f(n: u8) -> u64 {\n    let a = u64::from(n);\n    n.into()\n}\n");
+        assert_eq!(found, [Element::FromInto, Element::FromInto]);
     }
 
     #[test]
