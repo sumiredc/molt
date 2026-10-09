@@ -31,6 +31,7 @@ macro_rules! serde_by_name {
         }
     };
 }
+pub(super) use serde_by_name;
 
 /// Declares a field-less enum, its `ALL` and its `name()` from one table, so a
 /// variant cannot lack a name or be missing from `ALL`.
@@ -64,6 +65,7 @@ macro_rules! named_enum {
         }
     };
 }
+pub(super) use named_enum;
 
 named_enum! {
     /// How well the user knows an item. Only `Known` lets generation use it.
