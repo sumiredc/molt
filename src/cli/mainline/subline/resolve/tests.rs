@@ -272,3 +272,72 @@ fn choosing_1_after_a_recurrence_makes_the_item_known() {
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(saved_status(&dir), Status::Known);
 }
+
+/// A [`Ui`] that records the items of each selection and chooses the first.
+#[derive(Default)]
+struct Recording {
+    items: Vec<Vec<String>>,
+}
+
+impl Ui for Recording {
+    fn read_line(&mut self, _prompt: &str) -> Result<crate::cli::ui::Input, UiError> {
+        unreachable!("only selections are asked")
+    }
+
+    fn show(&mut self, _text: &str) {}
+
+    fn select(&mut self, _prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
+        self.items
+            .push(items.iter().map(|item| (*item).to_owned()).collect());
+        Ok(Some(0))
+    }
+
+    fn confirm(&mut self, _prompt: &str) -> Result<Option<bool>, UiError> {
+        unreachable!("only selections are asked")
+    }
+}
+
+/// The items `choose` offers on a side line at a `dbg_macro` boundary, recurred or not.
+fn offered(recurred: bool) -> Vec<String> {
+    let dir = project_with_a_profile();
+    let client = FakeChatClient::new();
+    let cargo = FakeCargo::new();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let boundary = crate::agent::mainline::Boundary {
+        items: vec!["dbg_macro".parse().unwrap()],
+        cause: crate::agent::mainline::BoundaryCause::Requested {
+            reason: "it prints".to_owned(),
+            proposed_code: None,
+        },
+    };
+    let side = SubLine::open(
+        &client,
+        Router::new(&Config::default()),
+        &tools,
+        boundary,
+        None,
+    )
+    .recurred(recurred);
+    let mut ui = Recording::default();
+    assert_eq!(choose(&mut ui, &side).unwrap(), Some(Choice::Unlock));
+    ui.items.pop().unwrap()
+}
+
+#[test]
+fn choose_offers_1_and_2_by_number_in_that_order() {
+    assert_eq!(
+        offered(false),
+        [
+            "Understand, then delegate: molt may use dbg_macro from now on",
+            "Use a construct I know: molt rewrites without dbg_macro",
+        ]
+    );
+}
+
+#[test]
+fn choose_offers_1_only_at_a_boundary_recurring_after_2() {
+    assert_eq!(
+        offered(true),
+        ["Understand, then delegate: molt may use dbg_macro from now on"]
+    );
+}

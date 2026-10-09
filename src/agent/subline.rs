@@ -103,7 +103,7 @@ impl<'a> SubLine<'a> {
 
     /// The same side line, opened at a boundary that recurred after ② in the same turn when
     /// `recurred` is true.
-    pub fn recurred(mut self, recurred: bool) -> Self {
+    pub(crate) fn recurred(mut self, recurred: bool) -> Self {
         self.recurred = recurred;
         self
     }

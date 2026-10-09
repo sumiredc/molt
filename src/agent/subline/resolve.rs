@@ -489,3 +489,98 @@ fn nothing_is_resolved_when_no_turn_is_held_at_a_boundary() {
     assert!(main_line.resolve(&resolution, &mut Refuse).is_none());
     assert_eq!(main_line.profile().status(&dbg_macro()), Status::Unknown);
 }
+
+#[test]
+fn a_boundary_after_rewrite_that_names_a_rewritten_item_with_a_new_one_is_a_recurrence() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line = main_line(&client, &cargo, &dir);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("policy")));
+    let resolution = side
+        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "both".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["arc", "dbg_macro"], "reason": "shared and printed" })
+                .to_string(),
+        }],
+    }));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    let TurnEnd::Boundary(again) = resumed.turn.end else {
+        panic!("the turn did not stop again: {:?}", resumed.turn.end);
+    };
+    assert_eq!(again.items.len(), 2);
+    assert_eq!(main_line.side_line(again).choices(), [Choice::Unlock]);
+}
+
+#[test]
+fn rewrite_leaves_an_item_already_seen_as_it_is_and_adds_no_history() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            dbg_macro(),
+            Status::Seen,
+            Provenance::SelfReport,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("policy")));
+    let resolution = side
+        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    let entry = main_line.profile().entry(&dbg_macro()).unwrap();
+    assert_eq!(entry.status(), Status::Seen);
+    assert_eq!(entry.provenance(), Provenance::SelfReport);
+    assert_eq!(main_line.profile().history().len(), 1);
+}
+
+#[test]
+fn unlock_makes_an_item_already_seen_known() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            dbg_macro(),
+            Status::Seen,
+            Provenance::SelfReport,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    let resolution = side
+        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    let entry = main_line.profile().entry(&dbg_macro()).unwrap();
+    assert_eq!(entry.status(), Status::Known);
+    assert_eq!(entry.provenance(), Provenance::SideLine);
+}

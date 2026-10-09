@@ -298,7 +298,8 @@ impl<'a> MainLine<'a> {
     }
 
     /// The profile the main line checks what the model writes against.
-    pub fn profile(&self) -> &Profile {
+    #[cfg(test)]
+    pub(crate) fn profile(&self) -> &Profile {
         &self.profile
     }
 
@@ -318,9 +319,13 @@ impl<'a> MainLine<'a> {
         };
         let at = Timestamp::now();
         for item in resolution.items() {
-            // ② leaves an item that is `seen` already as it is. Every other change from a status a
-            // boundary item can have is a transition of PRD §7, so none is refused.
-            if self.profile.status(item) == Status::Unknown || to == Status::Known {
+            // Only these are changes, and PRD §7 allows each with `side_line`, so none is refused.
+            // ② leaves a `seen` item as it is. A `known` item is never at a boundary: its writes
+            // pass the check, and `request_boundary` does not stop on it.
+            if matches!(
+                (self.profile.status(item), to),
+                (Status::Unknown, _) | (Status::Seen, Status::Known)
+            ) {
                 let _ = self
                     .profile
                     .transition(item.clone(), to, Provenance::SideLine, at, None);
