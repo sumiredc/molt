@@ -1178,26 +1178,54 @@ reasoning_effort = false
     }
 
     #[test]
-    fn doctor_does_not_write_when_models_or_api_changed_while_checking() {
-        let env = env_with(Some(CONFIG));
-        // 確かめたときの light のモデルと、書き戻すときのファイルの [models] が違う
-        let mut checked = Config::load(&env.path).unwrap();
-        checked.models.light = "another-model".to_owned();
-        let fake = FakeChatClient::new();
-        fake.push_models(Ok(vec![
-            "another-model".to_owned(),
-            "generate-model".to_owned(),
-            "reason-model".to_owned(),
-        ]));
-        for _ in 0..3 {
-            push(&fake, passing());
+    fn doctor_does_not_write_when_api_models_or_reasoning_effort_changed_while_checking() {
+        let edits: [fn(&mut Config); 3] = [
+            |c| c.api.base_url = "http://another-endpoint/v1".to_owned(),
+            |c| c.models.reason = "another-model".to_owned(),
+            |c| c.reasoning_effort.light = "medium".to_owned(),
+        ];
+        for edit in edits {
+            let env = env_with(Some(CONFIG));
+            // 確かめたときの設定と、書き戻すときのファイルの設定が違う
+            let mut checked = Config::load(&env.path).unwrap();
+            edit(&mut checked);
+            let fake = FakeChatClient::new();
+            fake.push_models(Ok(vec![
+                checked.models.light.clone(),
+                checked.models.generate.clone(),
+                checked.models.reason.clone(),
+            ]));
+            for _ in 0..3 {
+                push(&fake, passing());
+            }
+            let mut out = Vec::new();
+
+            let result = run(&env.path, &checked, &fake, &mut out);
+
+            assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
+            assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_stops_at_a_symlinked_config_toml_whose_target_is_missing() {
+        let env = env_with(None);
+        let missing = env.path.with_file_name("missing.toml");
+        std::os::unix::fs::symlink(&missing, &env.path).unwrap();
+        let fake = fake_with([passing(), passing(), passing()]);
         let mut out = Vec::new();
 
-        let result = run(&env.path, &checked, &fake, &mut out);
+        let result = run(&env.path, &Config::default(), &fake, &mut out);
 
         assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
-        assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
+        assert!(
+            fs::symlink_metadata(&env.path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(!missing.exists());
     }
 
     #[cfg(unix)]
