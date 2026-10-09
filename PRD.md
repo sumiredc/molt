@@ -396,7 +396,7 @@ Common flags:
 | Flag | What it replaces | Why |
 |---|---|---|
 | `--profile PATH` | Where the profile is read from and written to | Try a different profile without touching the one in the config directory |
-| `--fake` | The model's responses, with a script and `FakeChatClient` | Run offline, without a model |
+| `--fake PATH` | The model's responses, with a script file and `FakeChatClient` | Run offline, without a model |
 | `--ui-script PATH` | The user's inputs, choices, approvals, and interrupts, with a script file and `ScriptedUi`; output goes to stdout | Let a coding agent (not a person) drive one pass against a real model without a terminal |
 
 The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces.
