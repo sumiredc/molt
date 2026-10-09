@@ -112,8 +112,8 @@ molt が書く行に `known` でない要素が入らないこと、境界では
 
 | 種類 | 前提 |
 |---|---|
-| 技術 | LLM は Nebius Token Factory の OpenAI 互換 API（Bearer 認証、`/v1/chat/completions`）で呼ぶ。API 仕様に function calling・`response_format`（json_object / json_schema）・`reasoning_effort` がある。各モデルが実際に受理するかは `molt doctor`（8.7）で確かめる |
-| 技術 | 使うモデルは NVIDIA Nemotron。カタログで確認したところ Lightning / Nano / Super / Ultra の 4 つがあり、いずれも function calling 対応と記載。既定の ID は 8.7 |
+| 技術 | LLM は OpenAI 互換の chat API（`/v1/chat/completions`。エンドポイントが要求する場合は Bearer 認証）で呼ぶ。既定と提出時の対象は Nebius Token Factory。API 仕様に function calling・`response_format`（json_object / json_schema）・`reasoning_effort` がある。各エンドポイントとモデルが実際に受理するかは `molt doctor`（8.7）で確かめる |
+| 技術 | 既定と提出時のモデルは NVIDIA Nemotron。カタログで確認したところ Lightning / Nano / Super / Ultra の 4 つがあり、いずれも function calling 対応と記載。既定の ID は 8.7。それ以外のモデルは、`doctor` を通った検証の相手に限る（8.7） |
 | 技術 | 実装は Rust（1.99.0、edition 2024）。CI は fmt / clippy（`-D warnings`）/ test |
 | 技術 | 利用者の対象プロジェクトは cargo プロジェクト（`cargo check` が動く） |
 | 業務 | 締切 2026-10-30 10:00 PDT（2026-10-31 02:00 JST）。提出目標 10/29。1 人で作る |
@@ -129,7 +129,7 @@ molt が書く行に `known` でない要素が入らないこと、境界では
 
 ```mermaid
 flowchart TB
-  S["molt init"] --> K{"API キー<br/>があるか"}
+  S["molt init"] --> K{"API キーがあるか<br/>（エンドポイントが要求する場合）"}
   K -- "無い" --> X1["伝えて終了<br/>プロファイルは作らない"]:::bad
   K -- "ある" --> D["分類ごとに申告<br/>書いた / 読める / 知らない"]
   D --> R{"参考リポジトリの<br/>共有があるか"}
@@ -143,7 +143,7 @@ flowchart TB
 
 図から読み取ること：質問は「書いた」と申告した分類にしか出ないので、申告の数で所要時間が決まる。
 
-- 事前条件：プロファイルがまだ無い（または作り直しを選んだ）。`NEBIUS_API_KEY` がある
+- 事前条件：プロファイルがまだ無い（または作り直しを選んだ）。エンドポイントが API キーを要求する場合、その環境変数（既定 `NEBIUS_API_KEY`）がある
 - 主フロー：申告 → （参考リポジトリ） → 質問と判定 → 確認 → 保存。申告の反映は「書いた」→ 質疑応答の結果（要素ごとに `known` / `unknown`）、「読める」→ その分類の要素を `seen`、「知らない」→ `unknown`
 - 主フロー：外部クレートは init では聞かない。参考リポジトリの共有があれば、その `Cargo.toml` の依存を `known`（根拠：参考リポジトリ）にする。それ以外のクレートは最初に使おうとしたときに境界になる（UC3）
 - 代替フロー：すべて「知らない」 → 質問を飛ばし、基本要素だけのプロファイルを保存する
@@ -312,7 +312,7 @@ flowchart TB
   cli --> onboarding["onboarding<br/>questionnaire・probe・repo_scan"]
   agent --> workspace["workspace<br/>パスの閉じ込め・cargo・git"]
   agent --> checker["checker<br/>visitor・diff・crates・finding"]
-  agent --> llm["llm<br/>ChatClient・nebius・router・fake"]
+  agent --> llm["llm<br/>ChatClient・openai・router・fake"]
   agent --> profile["profile<br/>element・状態・baseline・store"]
   agent --> session["session<br/>jsonl ログ"]
   onboarding --> checker
@@ -388,7 +388,7 @@ molt                      cwd の cargo プロジェクトで本線を開く（�
 molt init [--repo PATH]   質疑応答でプロファイルを作る。--repo は参考リポジトリの棚卸し
 molt profile show|set <key> <status>|path
 molt check [PATHS..]      検査器を単体で走らせ、finding を表示（あれば exit 1）
-molt doctor               Token Factory の対応確認
+molt doctor               設定したエンドポイントとモデルの対応確認
 ```
 
 共通フラグ：`--profile PATH`、`--fake`（`FakeChatClient` と台本でオフライン実行）。
@@ -404,8 +404,16 @@ molt doctor               Token Factory の対応確認
 | reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | 境界の判断、プロファイル内の代替案、解説、副線の質疑応答、質問の生成 |
 
 `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` は light の代替候補。既定値の正は `config.toml` を読むコード。
-設定は `config.toml`（`[api]` `[models]` `[reasoning_effort]` `[capabilities]`）。`[capabilities]` は `molt doctor` が書く。
+設定は `config.toml`（`[api]` `[models]` `[reasoning_effort]` `[capabilities]`）。`[api]` はエンドポイントを指す。API キーが要るかはエンドポイントごとに違い、キーは環境変数から読む（3 節）。`[capabilities]` は `molt doctor` が書く。
 `molt doctor` は各役割のモデルに対し、ID の存在、素の chat、`tool_choice: required` でのツール呼び出し、`response_format: json_schema` の遵守、`reasoning_effort` の挙動を確かめて表にする。`json_schema` が使えないモデルでは、`json_object` ＋ プロンプトにスキーマ ＋ serde 検証 ＋ 1 回修復に切り替える。
+
+エージェントをモデルに対して確かめる層は 3 つあり、どれも他の代わりにならない。
+
+| 層 | エンドポイント | 確かめること | 走らせる場所 |
+|---|---|---|---|
+| `--fake` | 台本を持つ `FakeChatClient` | 制御の流れと 3 節の保証を、決定論的に | CI と手元のテスト |
+| ローカルモデル | ローカルの OpenAI 互換エンドポイント。モデルは `doctor` を通るものなら何でもよい | プロンプトが実際にツール呼び出し・書き直し・境界の判断・解説を引き出すこと。クレジットを使わずに | 開発中に手で、および `#[ignore]` のテストで |
+| Nemotron | Nebius Token Factory | 提出時の設定で `doctor` と 10 節の 1 本が通ること | 提出前に手で |
 
 ### 8.8 永続化
 
@@ -429,7 +437,7 @@ molt doctor               Token Factory の対応確認
 |---|---|
 | checker | `tests/fixtures/elements/*.rs` の先頭 `// expect: …` と検出集合の完全一致。`fixtures/negative/*.rs` は基本要素以外 0 件。全 `Element` に fixture があることをテストで強制。変更行フィルタ（旧↔新）で既存の要素が出ないこと |
 | profile | toml 往復、遷移で履歴が増える、未記載 = unknown、allow / deny、存在しない要素名・無効な状態の拒否 |
-| llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` |
+| llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` で、`[api]` が指すエンドポイントに対して走らせる（8.7） |
 | agent（本線） | `FakeCargo` + tempdir。Clean → ディスクに書かれる。却下 → ディスクは変わらず、書き直しで通る。2 回却下で境界。`request_boundary` で境界。予算超過で止まる |
 | agent（副線） | ① で known、② で seen、③ で利用者が書いた行の要素が known。③ で `cargo check` が失敗したらプロファイルは変わらない。① の後、同じ要素で再び境界にならない。本線のリクエスト履歴に副線のメッセージが無い。`/abort` で何も変わらない |
 | agent（git） | tempdir の git リポジトリで、承認なし → コミットが増えない。承認 → molt が変えたファイルだけがコミットされ、push は呼ばれない |
@@ -465,7 +473,7 @@ flowchart TB
   classDef ok fill:#ecfdf5,stroke:#059669,color:#065f46
 ```
 
-図から読み取ること：検査器・LLM クライアント・Workspace は互いに依存しないので、本線のループより前ならどの順でもよい。本線から git コミットまでが 1 本通った時点が、製品として成立したかの目安。
+図から読み取ること：検査器・LLM クライアント・Workspace は互いに依存しないので、本線のループより前ならどの順でもよい。本線から git コミットまでが 1 本通った時点が、製品として成立したかの目安。同じ 1 本を、そのあと実モデルに対して手で試す（8.7）。これは CI が走らせる `--fake` の 1 本の代わりにはならない。
 
 ---
 
