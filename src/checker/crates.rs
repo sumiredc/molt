@@ -12,12 +12,13 @@ use syn::parse::ParseStream;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, ExprPath, ExprStruct, Ident, ItemExternCrate, ItemUse, Meta, PatStruct,
+    Attribute, ExprPath, ExprStruct, Ident, ItemExternCrate, ItemUse, Macro, Meta, PatStruct,
     PatTupleStruct, Path, QSelf, Token, TypePath, UseTree,
 };
 use toml_edit::{Document, TableLike};
 
 use crate::checker::finding::{Finding, ParseError};
+use crate::checker::macro_args::{self, MacroArgs};
 use crate::profile::status::ItemKey;
 
 /// The key a crate is checked under: its name with every `-` turned into `_`.
@@ -160,6 +161,9 @@ fn line_col(source: &str, offset: usize) -> (usize, usize) {
 ///
 /// A first segment that is an alias of a crate (`use tokio as rt;`) names
 /// that crate. A `use` reports its crate on every line of its tree.
+/// The paths in the arguments of a std macro that takes Rust expressions
+/// (`println!("{}", serde_json::to_string(&x))`) are read too
+/// (`macro_args`).
 ///
 /// Content syn cannot parse has no crates here: `visitor::detect` reports it.
 pub fn in_source(source: &str, own_modules: &BTreeSet<String>) -> Vec<Finding> {
@@ -318,6 +322,13 @@ impl<'ast> Visit<'ast> for Locals {
         self.use_tree(&item.tree, None, false, item.leading_colon.is_some());
         visit::visit_item_use(self, item);
     }
+
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        visit::visit_macro(self, mac);
+        if let MacroArgs::Parsed(args) = macro_args::read(mac) {
+            macro_args::visit(&args, self);
+        }
+    }
 }
 
 struct Finder {
@@ -439,6 +450,15 @@ impl<'ast> Visit<'ast> for Finder {
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         self.use_roots(&item.tree, item.leading_colon.is_some());
         visit::visit_item_use(self, item);
+    }
+
+    /// The path of the macro, and the arguments of a std macro whose
+    /// arguments are Rust (`macro_args`).
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        visit::visit_macro(self, mac);
+        if let MacroArgs::Parsed(args) = macro_args::read(mac) {
+            macro_args::visit(&args, self);
+        }
     }
 
     fn visit_item_extern_crate(&mut self, item: &'ast ItemExternCrate) {

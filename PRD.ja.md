@@ -333,7 +333,7 @@ flowchart TB
 - `Profile`：要素ごとの `{ status, provenance, at, evidence }`、分類ごとの申告、基本要素の追加・除外（`allow` / `deny`）、履歴（追記のみ）
 - 基本要素の既定はコードが持つ。`clone()` は入れない（所有権の分類の核）。利用者は `deny` で基本要素を外せる
 - `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`。ParseError はコンパイル系の失敗として扱い、境界にしない
-- マクロ呼び出しの中身は syn では見えない → 基本マクロ以外の呼び出し自体を finding にする
+- マクロ呼び出しの中身は syn では見えない。Rust の式を引数に取る std マクロ（`print!`・`format!` / `write!`・`vec!`・`assert!`・`dbg!`・`matches!`・`panic!` の各族。`asm!` は除く）は、引数を式とパターンとして parse し、周りのコードと同じに検査する。finding はそれぞれ、要素を作るトークンの行に置く。書式文字列のインラインの引数（`{x}`）は名前しか書けないので見ない。マクロの形で parse できない引数は見えず、その呼び出しを `macro_call` の finding にもする。それ以外のマクロの中身は見えない → 呼び出しが基本要素でも `known` でもなければ、呼び出し自体を finding にする
 - 新規クレートは `Cargo.toml` の依存キーの差分と、ソース中のパスの先頭セグメント（std / core / crate / self / super / 自プロジェクトのモジュール以外）の両方から検出する
 
 ### 8.4 書き込みの経路
@@ -492,7 +492,7 @@ flowchart TB
 | `json_schema` 非対応 | `doctor` で検出し、8.7 の切り替えで対応する |
 | `reasoning_effort` を拒否される | `doctor` で確認し、`[capabilities]` が真のときだけ送る |
 | syn が生成コードを parse できない | コンパイル系の失敗として行・列つきで返す。境界にしない |
-| マクロ本体の中が見えない | 基本マクロ以外の呼び出し自体を finding にする。README に制限として書く |
+| マクロ本体の中が見えない | Rust の式を引数に取る std マクロは、引数を parse して検査する（8.3）。それ以外の呼び出しは、基本要素でも `known` でもなければ呼び出し自体を finding にする。引数を parse できない std マクロも同じ。README に制限として書く |
 | 分類をまたぐ要素（`Box<dyn Error>` 等） | 要素ごとに 1 件ずつ出し、解説で分類ごとにまとめて重複を除く。解禁は要素単位なので矛盾しない |
 | 承認が開発のテンポを落とす | 承認はコミットと `cargo add` だけ（4 節）。検査を通った書き込みと cargo check / test / clippy は承認不要 |
 | パス逸脱・破壊的操作 | ルート配下に canonicalize して閉じ込め、`.git/` `target/` は書き込み禁止。`run_cargo` のサブコマンドは列挙したものだけ。シェル文字列は使わず固定 argv |
