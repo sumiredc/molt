@@ -368,6 +368,7 @@ sequenceDiagram
 図から読み取ること：ディスクに届くのは Clean と判定された内容だけ。却下された内容はモデルにだけ返り、利用者にもディスクにも出ない。`cargo check` はモデルが呼ばなくてもエージェント側が走らせるので、3 節「検証」はモデルの振る舞いに依存しない。
 
 ツール：`list_files` `read_file` `write_file` `edit_file` `run_cargo` `git_status` `git_diff` `git_commit`（承認必須）`request_boundary(items, reason, proposed_code)` `finish`。
+`write_file` / `edit_file` が書けるのは、検査が読める Rust ソース（`.rs`）と `Cargo.toml` だけ。それ以外のファイルは、内容が検査されずに build に届きうる（`#[path]`、`.cargo/config.toml`）ので書かない。
 `run_cargo` が受け付けるのは `check` `test` `clippy` `build` `fmt` `add` だけ（`add` は承認必須、`run` や任意のサブコマンドは受け付けない）。
 1 ターンの予算：同じ要素の却下 2 回、コンパイル修正 3 回、ツール呼び出し 40 回。質疑応答（UC1）の予算：1 分類につき質問 1 問、追加の質問は 1 問まで。
 
