@@ -6,10 +6,12 @@ use std::process::ExitCode;
 
 use super::profile;
 use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
-use crate::agent::mainline::{MainLine, TOOL_CALL_BUDGET, Turn, TurnEnd};
+use crate::agent::mainline::{Boundary, BoundaryCause, MainLine, TOOL_CALL_BUDGET, Turn, TurnEnd};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{OpenAiClient, Router};
+use crate::profile::status::ItemKey;
+use crate::profile::store::Profile;
 use crate::workspace::cargo::Cargo;
 use crate::workspace::path::Root;
 
@@ -20,12 +22,12 @@ const PROMPT: &str = "molt> ";
 const INTERRUPTED: u8 = 130;
 
 pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> ExitCode {
-    let opened = preconditions(profile_flag).and_then(|root| {
+    let opened = preconditions(profile_flag).and_then(|(root, profile)| {
         let (config, client) = connect()?;
         let ui = open_ui(ui_script)?;
-        Ok((root, config, client, ui))
+        Ok((root, profile, config, client, ui))
     });
-    let (root, config, client, mut ui) = match opened {
+    let (root, profile, config, client, mut ui) = match opened {
         Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
@@ -34,15 +36,15 @@ pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> Exit
     };
     let cargo = Cargo::new(root.clone());
     let tools = Tools::new(root, &cargo);
-    let mut agent = MainLine::new(&client, Router::new(&config), tools);
+    let mut agent = MainLine::new(&client, Router::new(&config), tools, profile);
     main_line(ui.as_mut(), &mut agent)
 }
 
 /// UC2's preconditions: a profile exists, and the current directory is a cargo project. Returns
-/// that directory as the root the tools are confined to.
-fn preconditions(profile_flag: Option<&Path>) -> Result<Root, String> {
+/// that directory as the root the tools are confined to, and the profile.
+fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile), String> {
     let path = profile::profile_path(profile_flag)?;
-    profile::load(&path)?;
+    let loaded = profile::load(&path)?;
     let cwd = std::env::current_dir()
         .map_err(|error| format!("cannot read the current directory: {error}"))?;
     if !cwd.join("Cargo.toml").is_file() {
@@ -51,7 +53,8 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<Root, String> {
             cwd.display()
         ));
     }
-    Root::new(&cwd).map_err(|error| error.to_string())
+    let root = Root::new(&cwd).map_err(|error| error.to_string())?;
+    Ok((root, loaded))
 }
 
 /// Reads `config.toml` and creates the client for its endpoint. The main line does not open
@@ -86,6 +89,11 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
             Ok(Input::Line(line)) => {
                 let turn = agent.turn(&line, &mut UiApprover::new(ui));
                 show_turn(ui, &turn);
+                if matches!(turn.end, TurnEnd::Boundary(_))
+                    && let Some(code) = at_boundary(ui)
+                {
+                    return code;
+                }
             }
             Ok(Input::Eof) => return ExitCode::SUCCESS,
             Ok(Input::Interrupted) => return ExitCode::from(INTERRUPTED),
@@ -97,8 +105,8 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
     }
 }
 
-/// Shows what the model said last. When the turn stopped instead of finishing, also shows why
-/// and the tool calls made so far.
+/// Shows what the model said last. When the turn stopped instead of finishing, also shows why,
+/// the tool calls and the files written so far.
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     if let Some(reply) = &turn.reply {
         ui.show(reply);
@@ -112,6 +120,7 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
             "Stopped: the model sent tool arguments that are not valid JSON again after being asked to resend them: {error}"
         ),
         TurnEnd::ApiFailed(error) => format!("Stopped: {error}"),
+        TurnEnd::Boundary(boundary) => boundary_text(boundary),
     };
     ui.show(&stopped);
     if !turn.tool_calls.is_empty() {
@@ -119,6 +128,60 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
             "Tool calls in this turn: {}",
             count_by_name(&turn.tool_calls)
         ));
+    }
+    // Writes before the stop stay on disk; withdrawing the request does not undo them.
+    if !turn.written.is_empty() {
+        ui.show(&format!(
+            "Files written in this turn: {}",
+            turn.written.join(", ")
+        ));
+    }
+}
+
+/// Why the turn stopped at `boundary`, and what the user can do there.
+fn boundary_text(boundary: &Boundary) -> String {
+    let items = boundary
+        .items
+        .iter()
+        .map(|item| match item {
+            ItemKey::Element(element) => format!("{item} ({})", element.category().name()),
+            ItemKey::Crate(_) => item.to_string(),
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let why = match &boundary.cause {
+        BoundaryCause::RejectedTwice { .. } => {
+            "the model could not avoid them after a rewrite".to_owned()
+        }
+        BoundaryCause::Requested { reason, .. } => format!("the model says: {reason}"),
+    };
+    format!(
+        "Stopped at a boundary: the request needs {items}, which your profile does not allow yet ({why}). Nothing was written for it."
+    )
+}
+
+/// What the user can do at a boundary until the side line (UC3) is there.
+const AT_BOUNDARY: &str = "Type /abort to withdraw the request.";
+
+/// Reads lines at a boundary until `/abort`, which withdraws the request: nothing more is
+/// changed, and the main line waits for the next request. Any other line is not accepted. Ctrl-D
+/// and Ctrl-C end the main line as at the prompt, and their exit code is returned.
+fn at_boundary(ui: &mut dyn Ui) -> Option<ExitCode> {
+    ui.show(AT_BOUNDARY);
+    loop {
+        match ui.read_line(PROMPT) {
+            Ok(Input::Line(line)) if line.trim() == "/abort" => {
+                ui.show("Request withdrawn.");
+                return None;
+            }
+            Ok(Input::Line(_)) => ui.show(AT_BOUNDARY),
+            Ok(Input::Eof) => return Some(ExitCode::SUCCESS),
+            Ok(Input::Interrupted) => return Some(ExitCode::from(INTERRUPTED)),
+            Err(error) => {
+                eprintln!("{error}");
+                return Some(ExitCode::FAILURE);
+            }
+        }
     }
 }
 
@@ -165,7 +228,12 @@ mod tests {
         let dir = project();
         let cargo = FakeCargo::new();
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
-        let mut agent = MainLine::new(client, Router::new(&Config::default()), tools);
+        let mut agent = MainLine::new(
+            client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        );
         let mut ui = ScriptedUi::new(steps);
         let code = main_line(&mut ui, &mut agent);
         (code, ui)
@@ -278,7 +346,12 @@ mod turn {
         client.push_chat(Ok(reply("back again")));
         let cargo = FakeCargo::new();
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
-        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools);
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        );
         let mut ui = ScriptedUi::new([input("add a test"), input("again"), input("/quit")]);
 
         let code = main_line(&mut ui, &mut agent);
@@ -368,12 +441,253 @@ mod approval {
             stderr: String::new(),
         }));
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
-        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools);
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        );
         let mut ui = ScriptedUi::new([input("add serde"), Step::Confirm(false), input("/quit")]);
 
         main_line(&mut ui, &mut agent);
 
         assert!(ui.asked()[1].contains("`serde`"), "{:?}", ui.asked());
         assert!(cargo.calls().is_empty(), "not approved, so not added");
+    }
+}
+
+/// How the write path shows on the main line: a rejection stays between molt and the model, and
+/// a boundary stops the main line until `/abort`. Named so that `cargo test mainline::write`
+/// selects them.
+#[cfg(test)]
+mod write {
+    use std::fs;
+
+    use serde_json::json;
+
+    use super::tests::{input, project, reply};
+    use super::*;
+    use crate::cli::ui::Step;
+    use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::workspace::cargo::FakeCargo;
+
+    fn write_main(id: &str, content: &str) -> ChatResponse {
+        ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/main.rs", "content": content }).to_string(),
+            }],
+        }
+    }
+
+    const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
+
+    /// A model that tries `dbg!` twice, which stops the first turn at a boundary, then answers
+    /// the next request with `reply`.
+    fn rejected_twice_then(reply_text: &str) -> FakeChatClient {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("first", WITH_DBG)));
+        client.push_chat(Ok(write_main("second", WITH_DBG)));
+        client.push_chat(Ok(reply(reply_text)));
+        client
+    }
+
+    /// Runs the main line on `steps` in a project with `src/main.rs`, with the profile read from
+    /// `profile.toml` in the project. Returns the exit code, the ui and the project.
+    fn run(
+        client: &FakeChatClient,
+        steps: impl IntoIterator<Item = Step>,
+    ) -> (ExitCode, ScriptedUi, tempfile::TempDir) {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.path().join("profile.toml"), "").unwrap();
+        let profile = Profile::load(&dir.path().join("profile.toml")).unwrap();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(client, Router::new(&Config::default()), tools, profile);
+        let mut ui = ScriptedUi::new(steps);
+        let code = main_line(&mut ui, &mut agent);
+        (code, ui, dir)
+    }
+
+    fn snapshot(dir: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+        let mut files = Vec::new();
+        for path in ["Cargo.toml", "profile.toml", "src/main.rs"] {
+            files.push((path.to_owned(), fs::read(dir.join(path)).unwrap()));
+        }
+        files.push((
+            "entries".to_owned(),
+            fs::read_dir(dir).unwrap().count().to_string().into_bytes(),
+        ));
+        files
+    }
+
+    #[test]
+    fn a_boundary_is_shown_and_abort_leaves_the_files_and_the_profile_and_waits_for_the_next_input()
+    {
+        let client = rejected_twice_then("hello again");
+        let (code, ui, dir) = run(
+            &client,
+            [
+                input("debug 1"),
+                input("/abort"),
+                input("next"),
+                input("/quit"),
+            ],
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert_eq!(
+            ui.shown(),
+            [
+                "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.",
+                "Tool calls in this turn: write_file (2)",
+                "Type /abort to withdraw the request.",
+                "Request withdrawn.",
+                "hello again",
+            ]
+        );
+        assert_eq!(ui.asked(), ["molt> "; 4]);
+        assert_eq!(
+            client.requests().len(),
+            3,
+            "the next input went to the model"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            "fn main() {}\n"
+        );
+        assert_eq!(fs::read(dir.path().join("profile.toml")).unwrap(), b"");
+    }
+
+    #[test]
+    fn at_a_boundary_only_abort_is_accepted() {
+        let client = rejected_twice_then("hello again");
+        let (code, ui, _dir) = run(
+            &client,
+            [
+                input("debug 1"),
+                input("go on"),
+                input("/quit"),
+                input("/abort"),
+                input("/quit"),
+            ],
+        );
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        let shown = ui.shown();
+        assert_eq!(
+            shown[2..],
+            [
+                "Type /abort to withdraw the request.",
+                "Type /abort to withdraw the request.",
+                "Type /abort to withdraw the request.",
+                "Request withdrawn.",
+            ]
+        );
+        assert_eq!(
+            client.requests().len(),
+            2,
+            "nothing went to the model at the boundary"
+        );
+    }
+
+    #[test]
+    fn abort_changes_nothing_that_the_boundary_left() {
+        let client = rejected_twice_then("unused");
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        fs::write(dir.path().join("profile.toml"), "").unwrap();
+        let before = snapshot(dir.path());
+        let profile = Profile::load(&dir.path().join("profile.toml")).unwrap();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+        let mut ui = ScriptedUi::new([input("debug 1"), input("/abort"), input("/quit")]);
+
+        main_line(&mut ui, &mut agent);
+
+        assert_eq!(snapshot(dir.path()), before);
+        assert!(cargo.calls().is_empty());
+    }
+
+    #[test]
+    fn a_rejection_is_not_shown_to_the_user() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("first", WITH_DBG)));
+        client.push_chat(Ok(write_main(
+            "second",
+            "fn main() {\n    println!(\"1\");\n}\n",
+        )));
+        client.push_chat(Ok(reply("Printed 1.")));
+        let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
+
+        assert_eq!(ui.shown(), ["Printed 1."]);
+        assert!(
+            fs::read_to_string(dir.path().join("src/main.rs"))
+                .unwrap()
+                .contains("println!")
+        );
+    }
+
+    #[test]
+    fn a_requested_boundary_shows_the_reason_of_the_model() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "b".to_owned(),
+                name: "request_boundary".to_owned(),
+                arguments: json!({ "items": ["arc", "crate:tokio"], "reason": "tasks share it" })
+                    .to_string(),
+            }],
+        }));
+        let (_, ui, _dir) = run(&client, [input("share it"), Step::Eof]);
+
+        assert_eq!(
+            ui.shown()[0],
+            "Stopped at a boundary: the request needs arc (smart_pointers), crate:tokio, which your profile does not allow yet (the model says: tasks share it). Nothing was written for it."
+        );
+    }
+
+    #[test]
+    fn files_written_before_a_boundary_are_shown_and_stay_after_abort() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "lib".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/lib.rs", "content": "pub fn f() {}\n" })
+                    .to_string(),
+            }],
+        }));
+        client.push_chat(Ok(write_main("first", WITH_DBG)));
+        client.push_chat(Ok(write_main("second", WITH_DBG)));
+        let (_, ui, dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
+
+        assert_eq!(ui.shown()[2], "Files written in this turn: src/lib.rs");
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
+            "pub fn f() {}\n"
+        );
+    }
+
+    #[test]
+    fn ctrl_d_at_a_boundary_ends_the_main_line_with_success() {
+        let client = rejected_twice_then("unused");
+        let (code, _, _dir) = run(&client, [input("debug 1"), Step::Eof]);
+        assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn ctrl_c_at_a_boundary_ends_the_main_line_with_a_non_zero_code() {
+        let client = rejected_twice_then("unused");
+        let (code, _, _dir) = run(&client, [input("debug 1"), Step::Interrupt]);
+        assert_eq!(code, ExitCode::from(INTERRUPTED));
     }
 }

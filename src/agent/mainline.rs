@@ -3,7 +3,12 @@
 //!
 //! A turn ends when the model calls `finish` or answers without calling a tool, when it asks
 //! for more tool calls than the budget (PRD §8.4), when its arguments still do not parse after
-//! the one resend (PRD §11), or when the chat API fails (UC2's exception flow).
+//! the one resend (PRD §11), when the chat API fails (UC2's exception flow), or at a boundary
+//! (the write path, in `write`).
+
+mod write;
+
+use std::collections::BTreeSet;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -15,6 +20,8 @@ use crate::llm::{
     ChatClient, ChatError, ChatRequest, InvalidArguments, Message, Role, Router, ToolCall,
     ToolChoice, ToolDefinition,
 };
+use crate::profile::status::ItemKey;
+use crate::profile::store::Profile;
 
 /// Tool calls per turn (PRD §8.4). Every call counts, `finish` too, so that no call the model
 /// repeats can keep a turn going.
@@ -23,11 +30,19 @@ pub const TOOL_CALL_BUDGET: usize = 40;
 /// The tool that ends the turn. It is handled by the loop, not by [`Tools`].
 const FINISH: &str = "finish";
 
+/// The tools that write a file. The loop checks their content before [`Tools`] writes it.
+const WRITE_FILE: &str = "write_file";
+const EDIT_FILE: &str = "edit_file";
+
+/// The tool with which the model stops at a boundary itself. It is handled by the loop.
+const REQUEST_BOUNDARY: &str = "request_boundary";
+
 /// The main line on one project.
 pub struct MainLine<'a> {
     client: &'a dyn ChatClient,
     router: Router,
     tools: Tools<'a>,
+    profile: Profile,
     definitions: Vec<ToolDefinition>,
     messages: Vec<Message>,
 }
@@ -41,6 +56,34 @@ pub struct Turn {
     pub tool_calls: Vec<String>,
     /// What the model said last: the summary passed to `finish`, or the text of its last reply.
     pub reply: Option<String>,
+    /// The files written in this turn, as the model named them, each once, in the order first
+    /// written.
+    pub written: Vec<String>,
+    /// The compile fixes the model was asked for in this turn (PRD §8.4): so far, once for
+    /// each write whose content did not parse.
+    pub compile_fixes: usize,
+}
+
+/// Where the main line stopped because the request needs items the profile does not allow
+/// (PRD UC2). Nothing was written for it. The user chooses how to go on (UC3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Boundary {
+    /// The items the request needs, each once.
+    pub items: Vec<ItemKey>,
+    pub cause: BoundaryCause,
+}
+
+/// What made the boundary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BoundaryCause {
+    /// Content using `items` was rejected again after the model had seen their rejection in the
+    /// same turn. `content` is what the model tried to write to `path`.
+    RejectedTwice { path: String, content: String },
+    /// The model called `request_boundary`.
+    Requested {
+        reason: String,
+        proposed_code: Option<String>,
+    },
 }
 
 /// Why a turn ended.
@@ -55,6 +98,8 @@ pub enum TurnEnd {
     InvalidArguments(InvalidArguments),
     /// The chat API failed: authentication, rate limit, network, and so on.
     ApiFailed(ChatError),
+    /// The request needs items the profile does not allow.
+    Boundary(Boundary),
 }
 
 /// What to do after one tool call.
@@ -63,14 +108,35 @@ enum Next {
     Stop(TurnEnd),
 }
 
+/// What the loop keeps within a turn besides [`Turn`].
+#[derive(Default)]
+struct Progress {
+    /// Whether the previous response had broken arguments and was asked to resend them.
+    resend_asked: bool,
+    /// Whether this response has broken arguments the model is asked to resend.
+    broken: bool,
+    /// The items rejected in earlier responses of this turn, in any file. The model has seen
+    /// those rejections, so writing one of these items again means it could not avoid it.
+    rejected: BTreeSet<ItemKey>,
+    /// The items rejected in the response being run. Calls in one response are made before the
+    /// model sees any of their results, so these count only from the next response on.
+    rejected_now: BTreeSet<ItemKey>,
+}
+
 impl<'a> MainLine<'a> {
     /// A main line with only the system prompt in its message list. Requests go to the
-    /// `generate` model of `router`.
-    pub fn new(client: &'a dyn ChatClient, router: Router, tools: Tools<'a>) -> Self {
+    /// `generate` model of `router`, and what the model writes is checked against `profile`.
+    pub fn new(
+        client: &'a dyn ChatClient,
+        router: Router,
+        tools: Tools<'a>,
+        profile: Profile,
+    ) -> Self {
         Self {
             client,
             router,
             tools,
+            profile,
             definitions: tool_definitions(),
             messages: vec![Message::System {
                 content: prompts::MAIN_LINE_SYSTEM.to_owned(),
@@ -97,9 +163,10 @@ impl<'a> MainLine<'a> {
             end: TurnEnd::Finished,
             tool_calls: Vec::new(),
             reply: None,
+            written: Vec::new(),
+            compile_fixes: 0,
         };
-        // Whether the previous response had broken arguments and was asked to resend them
-        let mut resend_asked = false;
+        let mut progress = Progress::default();
         loop {
             let response = match self.client.chat(&self.request()) {
                 Ok(response) => response,
@@ -120,13 +187,12 @@ impl<'a> MainLine<'a> {
             }
 
             let mut stop = None;
-            let mut broken = false;
+            progress.broken = false;
             for call in &response.tool_calls {
                 let result = if stop.is_some() {
                     prompts::NOT_RUN.to_owned()
                 } else {
-                    let (result, next) =
-                        self.run_call(call, &mut turn, resend_asked, &mut broken, approver);
+                    let (result, next) = self.run_call(call, &mut turn, &mut progress, approver);
                     if let Next::Stop(end) = next {
                         stop = Some(end);
                     }
@@ -141,18 +207,19 @@ impl<'a> MainLine<'a> {
                 turn.end = end;
                 return turn;
             }
-            resend_asked = broken;
+            progress.resend_asked = progress.broken;
+            let rejected_now = std::mem::take(&mut progress.rejected_now);
+            progress.rejected.extend(rejected_now);
         }
     }
 
-    /// Runs one tool call and returns its result for the model. `broken` is set when its
-    /// arguments are not a JSON object and the model is asked to resend them.
+    /// Runs one tool call and returns its result for the model. `progress.broken` is set when
+    /// its arguments are not a JSON object and the model is asked to resend them.
     fn run_call(
         &self,
         call: &ToolCall,
         turn: &mut Turn,
-        resend_asked: bool,
-        broken: &mut bool,
+        progress: &mut Progress,
         approver: &mut dyn Approver,
     ) -> (String, Next) {
         if turn.tool_calls.len() == TOOL_CALL_BUDGET {
@@ -167,15 +234,20 @@ impl<'a> MainLine<'a> {
         }
         let arguments = match parse_arguments(call) {
             Ok(arguments) => arguments,
-            Err(error) if resend_asked => {
+            Err(error) if progress.resend_asked => {
                 let result = prompts::tool_error(&error);
                 return (result, Next::Stop(TurnEnd::InvalidArguments(error)));
             }
             Err(error) => {
-                *broken = true;
+                progress.broken = true;
                 return (prompts::resend_arguments(error), Next::Continue);
             }
         };
+        match call.name.as_str() {
+            WRITE_FILE | EDIT_FILE => return self.write(&call.name, arguments, turn, progress),
+            REQUEST_BOUNDARY => return write::request_boundary(&self.profile, arguments),
+            _ => {}
+        }
         if call.name == FINISH {
             return match serde_json::from_value::<FinishArgs>(Value::Object(arguments)) {
                 Ok(args) => {
@@ -212,7 +284,9 @@ struct FinishArgs {
     summary: Option<String>,
 }
 
-/// The function calling schema: the tools [`Tools::dispatch`] runs, and `finish`.
+/// The function calling schema (PRD §8.4): the tools [`Tools::dispatch`] runs, and the ones the
+/// loop runs itself: `write_file` and `edit_file` through the check, `request_boundary` and
+/// `finish`.
 fn tool_definitions() -> Vec<ToolDefinition> {
     let tool =
         |name: &str, description: &str, properties: Value, required: &[&str]| ToolDefinition {
@@ -237,6 +311,25 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             prompts::READ_FILE,
             json!({ "path": { "type": "string", "description": prompts::READ_FILE_PATH } }),
             &["path"],
+        ),
+        tool(
+            WRITE_FILE,
+            prompts::WRITE_FILE,
+            json!({
+                "path": { "type": "string", "description": prompts::WRITE_FILE_PATH },
+                "content": { "type": "string", "description": prompts::WRITE_FILE_CONTENT },
+            }),
+            &["path", "content"],
+        ),
+        tool(
+            EDIT_FILE,
+            prompts::EDIT_FILE,
+            json!({
+                "path": { "type": "string", "description": prompts::EDIT_FILE_PATH },
+                "old_string": { "type": "string", "description": prompts::EDIT_FILE_OLD_STRING },
+                "new_string": { "type": "string", "description": prompts::EDIT_FILE_NEW_STRING },
+            }),
+            &["path", "old_string", "new_string"],
         ),
         tool(
             "run_cargo",
@@ -267,6 +360,23 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             prompts::GIT_COMMIT,
             json!({ "message": { "type": "string", "description": prompts::GIT_COMMIT_MESSAGE } }),
             &["message"],
+        ),
+        tool(
+            REQUEST_BOUNDARY,
+            prompts::REQUEST_BOUNDARY,
+            json!({
+                "items": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": prompts::REQUEST_BOUNDARY_ITEMS,
+                },
+                "reason": { "type": "string", "description": prompts::REQUEST_BOUNDARY_REASON },
+                "proposed_code": {
+                    "type": "string",
+                    "description": prompts::REQUEST_BOUNDARY_PROPOSED_CODE,
+                },
+            }),
+            &["items", "reason"],
         ),
         tool(
             FINISH,
@@ -340,7 +450,12 @@ mod turn {
         dir: &TempDir,
     ) -> MainLine<'a> {
         let tools = Tools::new(Root::new(dir.path()).unwrap(), cargo);
-        MainLine::new(client, Router::new(&Config::default()), tools)
+        MainLine::new(
+            client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
     }
 
     fn call(id: &str, name: &str, arguments: &str) -> ToolCall {
@@ -660,29 +775,32 @@ mod turn {
         let cargo = FakeCargo::new();
         client.push_chat(Ok(calls(vec![call(
             "call_0",
-            "write_file",
-            r#"{"path": "a.rs", "content": ""}"#,
+            "delete_file",
+            r#"{"path": "src/main.rs"}"#,
         )])));
-        client.push_chat(Ok(reply("cannot write")));
+        client.push_chat(Ok(reply("cannot delete")));
         let mut main_line = main_line(&client, &cargo, &dir);
 
-        let turn = main_line.turn("write a.rs", &mut Refuse);
+        let turn = main_line.turn("delete main", &mut Refuse);
 
         let result = result_of(&main_line, "call_0");
-        assert!(result.contains("unknown tool `write_file`"), "{result}");
+        assert!(result.contains("unknown tool `delete_file`"), "{result}");
         for name in [
             "list_files",
             "read_file",
+            "write_file",
+            "edit_file",
             "run_cargo",
             "git_status",
             "git_diff",
             "git_commit",
+            "request_boundary",
             "finish",
         ] {
             assert!(result.contains(name), "{result}");
         }
         assert!(matches!(turn.end, TurnEnd::Finished), "{:?}", turn.end);
-        assert!(!dir.path().join("a.rs").exists());
+        assert!(dir.path().join("src/main.rs").exists());
     }
 
     #[test]
@@ -771,7 +889,7 @@ mod turn {
     }
 
     #[test]
-    fn the_request_offers_the_six_tools_and_finish_to_the_generate_model() {
+    fn the_request_offers_every_tool_of_the_write_path_to_the_generate_model() {
         let dir = project();
         let client = FakeChatClient::new();
         let cargo = FakeCargo::new();
@@ -791,10 +909,13 @@ mod turn {
             [
                 "list_files",
                 "read_file",
+                "write_file",
+                "edit_file",
                 "run_cargo",
                 "git_status",
                 "git_diff",
                 "git_commit",
+                "request_boundary",
                 "finish"
             ]
         );
@@ -803,12 +924,13 @@ mod turn {
     }
 
     #[test]
-    fn every_offered_tool_but_finish_is_one_the_tools_dispatch() {
+    fn every_offered_tool_the_loop_does_not_run_itself_is_one_the_tools_dispatch() {
         let dir = project();
         let cargo = FakeCargo::new();
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
         for definition in tool_definitions() {
-            if definition.name == FINISH {
+            if [FINISH, WRITE_FILE, EDIT_FILE, REQUEST_BOUNDARY].contains(&definition.name.as_str())
+            {
                 continue;
             }
             let result = tools.dispatch(&definition.name, &Map::new(), &mut Refuse);

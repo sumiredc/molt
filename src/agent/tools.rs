@@ -2,9 +2,8 @@
 //! the workspace out.
 //!
 //! [`Tools::dispatch`] runs the tools that do not write files. `write_file` and `edit_file` are
-//! not dispatched here: their content has to pass the check before it reaches the disk, so they
-//! are split into preparing a [`FileChange`] and writing it after the check
-//! ([`Tools::write_checked`]).
+//! not dispatched here: they are split into preparing a [`FileChange`] and [`Tools::write`], which
+//! checks its content against the profile and writes it only when the check finds it Clean.
 
 mod args;
 
@@ -17,10 +16,13 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
+use crate::profile::store::Profile;
 use crate::workspace::approve;
 use crate::workspace::cargo::{CargoError, CargoRequest, CargoRunner, CrateName, RequestError};
 use crate::workspace::git::{DiffScope, Git, GitError, GitOutput};
+use crate::workspace::modules::ModuleScope;
 use crate::workspace::path::{PathError, Root};
 
 pub use args::{
@@ -62,6 +64,10 @@ pub enum ToolError {
     Path(PathError),
     /// Reading or writing a file failed, e.g. it does not exist or is not UTF-8.
     Io { path: String, source: io::Error },
+    /// A write to a file the checker cannot check: neither Rust source (`.rs`) nor a
+    /// `Cargo.toml`. Its content could reach the build unchecked (`#[path = "x.txt"] mod x;`,
+    /// `.cargo/config.toml`), so it is not written at all.
+    NotCheckable { path: String },
     /// `old_string` of `edit_file` occurs `count` times instead of exactly once.
     EditNotUnique { path: String, count: usize },
     /// The cargo subcommand or its arguments are not allowed.
@@ -108,6 +114,22 @@ impl FileChange {
     }
 }
 
+/// What [`Tools::write`] did with a [`FileChange`].
+#[derive(Debug)]
+pub enum WriteOutcome {
+    /// Every item is a base element or `known`, and the content was written.
+    Written,
+    /// The content uses items that are neither base elements nor `known` (in line order, never
+    /// empty). Nothing was written. `change` is handed back for what was tried, which a boundary
+    /// carries (UC3).
+    OutOfProfile {
+        findings: Vec<Finding>,
+        change: FileChange,
+    },
+    /// The content does not parse. Nothing was written.
+    ParseError(ParseError),
+}
+
 impl<'a> Tools<'a> {
     /// Runs cargo through `cargo`, and git in `root`.
     pub fn new(root: Root, cargo: &'a dyn CargoRunner) -> Self {
@@ -150,9 +172,9 @@ impl<'a> Tools<'a> {
     }
 
     /// Prepares writing `args.content` to `args.path`, which may not exist yet. Nothing is
-    /// written until [`Tools::write_checked`].
+    /// written until [`Tools::write`].
     pub fn prepare_write_file(&self, args: &WriteFileArgs) -> Result<FileChange, ToolError> {
-        let resolved = self.root.resolve_write(&args.path)?;
+        let resolved = self.resolve_checkable(&args.path)?;
         let old_content = match fs::read_to_string(&resolved) {
             Ok(content) => Some(content),
             Err(source) if source.kind() == io::ErrorKind::NotFound => None,
@@ -169,7 +191,7 @@ impl<'a> Tools<'a> {
     /// Prepares replacing `args.old_string` with `args.new_string` in the existing file
     /// `args.path`. Fails unless `old_string` occurs exactly once, since replacing one of
     /// several would change a place the model did not mean. Nothing is written until
-    /// [`Tools::write_checked`].
+    /// [`Tools::write`].
     pub fn prepare_edit_file(&self, args: &EditFileArgs) -> Result<FileChange, ToolError> {
         if args.old_string.is_empty() {
             return Err(ToolError::InvalidArguments {
@@ -177,7 +199,7 @@ impl<'a> Tools<'a> {
                 reason: "old_string must not be empty".to_owned(),
             });
         }
-        let resolved = self.root.resolve_write(&args.path)?;
+        let resolved = self.resolve_checkable(&args.path)?;
         let old_content =
             fs::read_to_string(&resolved).map_err(|source| io_error(&args.path, source))?;
         let new_content =
@@ -195,14 +217,52 @@ impl<'a> Tools<'a> {
         })
     }
 
-    /// Writes `change`, creating the missing parent directories. Call it only with content
-    /// that passed the check.
-    pub fn write_checked(&self, change: FileChange) -> Result<(), ToolError> {
+    /// Checks the content of `change` against `profile` (PRD §8.4) and writes it, creating the
+    /// missing parent directories, only when the check finds it Clean. Only the lines changed
+    /// from the content on disk are checked. The project's own modules are read from the
+    /// project as it is now, since the model may have added one earlier in the turn.
+    pub fn write(&self, change: FileChange, profile: &Profile) -> Result<WriteOutcome, ToolError> {
+        let own_modules = ModuleScope::of(&change.resolved).own_modules();
+        let ctx = CheckContext {
+            profile,
+            own_modules: &own_modules,
+        };
+        let report = checker::check_file(
+            &change.resolved,
+            change.old_content().unwrap_or(""),
+            change.new_content(),
+            &ctx,
+        );
+        match report {
+            CheckReport::Clean => {}
+            CheckReport::OutOfProfile(findings) => {
+                return Ok(WriteOutcome::OutOfProfile { findings, change });
+            }
+            CheckReport::ParseError(error) => {
+                return Ok(WriteOutcome::ParseError(error));
+            }
+        }
         if let Some(parent) = change.resolved.parent() {
             fs::create_dir_all(parent).map_err(|source| io_error(&change.path, source))?;
         }
         fs::write(&change.resolved, &change.new_content)
-            .map_err(|source| io_error(&change.path, source))
+            .map_err(|source| io_error(&change.path, source))?;
+        Ok(WriteOutcome::Written)
+    }
+
+    /// Resolves `path` for writing, if the checker can check it: a `.rs` file or a `Cargo.toml`.
+    fn resolve_checkable(&self, path: &str) -> Result<PathBuf, ToolError> {
+        let resolved = self.root.resolve_write(path)?;
+        let checkable = resolved.extension().is_some_and(|ext| ext == "rs")
+            || resolved
+                .file_name()
+                .is_some_and(|name| name == "Cargo.toml");
+        if !checkable {
+            return Err(ToolError::NotCheckable {
+                path: path.to_owned(),
+            });
+        }
+        Ok(resolved)
     }
 
     /// The files under `args.path`, one per line, relative to the root and sorted. Does not
@@ -379,6 +439,10 @@ impl fmt::Display for ToolError {
             }
             Self::Path(source) => write!(f, "{source}"),
             Self::Io { path, source } => write!(f, "{path}: {source}"),
+            Self::NotCheckable { path } => write!(
+                f,
+                "{path} cannot be written: molt writes only Rust source files (`.rs`) and `Cargo.toml`, whose content it can check"
+            ),
             Self::EditNotUnique { path, count: 0 } => write!(
                 f,
                 "old_string does not occur in {path}: read the file and copy the text exactly"
@@ -404,7 +468,10 @@ impl Error for ToolError {
             Self::CargoRequest(source) => Some(source),
             Self::Cargo(source) => Some(source),
             Self::Git(source) => Some(source),
-            Self::InvalidArguments { .. } | Self::EditNotUnique { .. } | Self::NotApproved => None,
+            Self::InvalidArguments { .. }
+            | Self::NotCheckable { .. }
+            | Self::EditNotUnique { .. }
+            | Self::NotApproved => None,
         }
     }
 }
@@ -475,6 +542,12 @@ mod tests {
 
     fn tools<'a>(dir: &TempDir, cargo: &'a FakeCargo) -> Tools<'a> {
         Tools::new(Root::new(dir.path()).unwrap(), cargo)
+    }
+
+    /// Writes `change` with a profile of base elements only, which its content must pass.
+    fn write_clean(tools: &Tools, change: FileChange) {
+        let outcome = tools.write(change, &Profile::new()).unwrap();
+        assert!(matches!(outcome, WriteOutcome::Written), "{outcome:?}");
     }
 
     /// Tools on a new git repository in `dir`, whose git runs with the test environment.
@@ -911,7 +984,7 @@ mod tests {
         assert_eq!(change.new_content(), "fn main() { loop {} }\n");
         assert_eq!(read(&dir, "src/main.rs"), "fn main() {}\n");
 
-        tools.write_checked(change).unwrap();
+        write_clean(&tools, change);
 
         assert_eq!(read(&dir, "src/main.rs"), "fn main() { loop {} }\n");
     }
@@ -929,9 +1002,100 @@ mod tests {
             })
             .unwrap();
         assert_eq!(change.old_content(), None);
-        tools.write_checked(change).unwrap();
+        write_clean(&tools, change);
 
         assert_eq!(read(&dir, "src/a/b.rs"), "fn b() {}\n");
+    }
+
+    #[test]
+    fn content_out_of_the_profile_is_not_written_and_its_findings_come_back() {
+        let dir = project();
+        let cargo = FakeCargo::new();
+        let tools = tools(&dir, &cargo);
+        let change = tools
+            .prepare_write_file(&WriteFileArgs {
+                path: "src/main.rs".to_owned(),
+                content: "fn main() {\n    dbg!(1);\n}\n".to_owned(),
+            })
+            .unwrap();
+
+        let outcome = tools.write(change, &Profile::new()).unwrap();
+
+        let WriteOutcome::OutOfProfile { findings, change } = outcome else {
+            panic!("{outcome:?}");
+        };
+        assert_eq!(findings[0].line, 2);
+        assert_eq!(change.path(), "src/main.rs");
+        assert_eq!(read(&dir, "src/main.rs"), "fn main() {}\n");
+    }
+
+    #[test]
+    fn content_that_does_not_parse_is_not_written() {
+        let dir = project();
+        let cargo = FakeCargo::new();
+        let tools = tools(&dir, &cargo);
+        let change = tools
+            .prepare_write_file(&WriteFileArgs {
+                path: "src/new.rs".to_owned(),
+                content: "fn f( {}\n".to_owned(),
+            })
+            .unwrap();
+
+        let outcome = tools.write(change, &Profile::new()).unwrap();
+
+        assert!(
+            matches!(outcome, WriteOutcome::ParseError(_)),
+            "{outcome:?}"
+        );
+        assert!(!dir.path().join("src/new.rs").exists());
+    }
+
+    #[test]
+    fn a_file_that_is_neither_rust_nor_cargo_toml_cannot_be_written_or_edited() {
+        let dir = project();
+        fs::write(dir.path().join("README.md"), "# demo\n").unwrap();
+        let cargo = FakeCargo::new();
+        let tools = tools(&dir, &cargo);
+
+        let write = tools.prepare_write_file(&WriteFileArgs {
+            path: "src/x.txt".to_owned(),
+            content: "fn main() {}\n".to_owned(),
+        });
+        let edit = tools.prepare_edit_file(&EditFileArgs {
+            path: "README.md".to_owned(),
+            old_string: "demo".to_owned(),
+            new_string: "molt".to_owned(),
+        });
+
+        assert!(
+            matches!(&write, Err(ToolError::NotCheckable { path }) if path == "src/x.txt"),
+            "{write:?}"
+        );
+        assert!(
+            matches!(&edit, Err(ToolError::NotCheckable { path }) if path == "README.md"),
+            "{edit:?}"
+        );
+        assert!(!dir.path().join("src/x.txt").exists());
+    }
+
+    #[test]
+    fn a_cargo_toml_in_a_subdirectory_can_be_written() {
+        let dir = project();
+        let cargo = FakeCargo::new();
+        let tools = tools(&dir, &cargo);
+        let change = tools
+            .prepare_write_file(&WriteFileArgs {
+                path: "member/Cargo.toml".to_owned(),
+                content: "[package]\nname = \"member\"\n".to_owned(),
+            })
+            .unwrap();
+
+        write_clean(&tools, change);
+
+        assert_eq!(
+            read(&dir, "member/Cargo.toml"),
+            "[package]\nname = \"member\"\n"
+        );
     }
 
     #[test]
@@ -1011,7 +1175,7 @@ mod tests {
 
         assert_eq!(change.old_content(), Some("fn a() {}\nfn b() {}\n"));
         assert_eq!(change.new_content(), "fn a() {}\nfn c() {}\n");
-        tools.write_checked(change).unwrap();
+        write_clean(&tools, change);
         assert_eq!(read(&dir, "src/lib.rs"), "fn a() {}\nfn c() {}\n");
     }
 
