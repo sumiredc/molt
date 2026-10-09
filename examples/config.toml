@@ -1,0 +1,43 @@
+# molt の設定ファイルの例。置き場所は $MOLT_HOME/config.toml、
+# 無ければ $XDG_CONFIG_HOME/molt/config.toml、それも無ければ ~/.config/molt/config.toml。
+# ファイルが無いときや、書かれていないキーは既定値になる。下の値はすべて既定値。
+
+[api]
+# OpenAI 互換の chat API の URL（/chat/completions の手前まで）
+base_url = "https://api.tokenfactory.nebius.com/v1"
+# API キーを読む環境変数の名前。キーそのものはここに書かない
+api_key_env = "NEBIUS_API_KEY"
+# 1 リクエストのタイムアウト（秒）
+timeout_secs = 300
+
+[models]
+light = "nvidia/Nemotron-3_5-Lightning"
+generate = "nvidia/nemotron-3-super-120b-a12b"
+reason = "nvidia/Nemotron-3-Ultra-550b-a55b"
+
+# そのまま reasoning_effort として送る。[capabilities] でその役割の reasoning_effort が真のときだけ送る
+[reasoning_effort]
+light = "low"
+generate = "medium"
+reason = "high"
+
+# molt doctor が書き換える。確かめるまではすべて偽
+[capabilities.light]
+tool_choice_required = false
+json_schema = false
+reasoning_effort = false
+
+[capabilities.generate]
+tool_choice_required = false
+json_schema = false
+reasoning_effort = false
+
+[capabilities.reason]
+tool_choice_required = false
+json_schema = false
+reasoning_effort = false
+
+# ローカルの OpenAI 互換エンドポイントを使うときは、上の [api] の base_url を次のように書き換え、
+# <local-endpoint> を実際のホストとポートにする。[models] にはそのエンドポイントのモデル ID を書く。
+#
+# base_url = "http://<local-endpoint>/v1"
