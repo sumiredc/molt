@@ -18,12 +18,12 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
-    Expr, ExprAsync, ExprAwait, ExprBreak, ExprClosure, ExprContinue, ExprForLoop, ExprIndex,
-    ExprMethodCall, ExprRange, ExprRawAddr, ExprReference, ExprTry, ExprUnary, ExprUnsafe,
-    ForeignItemStatic, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemType, Item,
-    ItemEnum, ItemForeignMod, ItemImpl, ItemMacro, ItemStatic, ItemStruct, ItemTrait,
-    ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta, PatIdent,
-    PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
+    Expr, ExprAsync, ExprAwait, ExprBreak, ExprCall, ExprClosure, ExprContinue, ExprForLoop,
+    ExprIndex, ExprMethodCall, ExprRange, ExprRawAddr, ExprReference, ExprTry, ExprUnary,
+    ExprUnsafe, ForeignItemStatic, GenericArgument, Generics, ImplItem, ImplItemConst,
+    ImplItemType, Item, ItemEnum, ItemForeignMod, ItemImpl, ItemMacro, ItemStatic, ItemStruct,
+    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
+    PatIdent, PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
     ReceiverKind, Safety, Signature, StaticMutability, Token, TraitItem, TraitItemConst,
     TraitItemType, Type, TypeFnPtr, TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypePtr,
     TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
@@ -32,6 +32,7 @@ use syn::{
 use crate::checker::finding::{Finding, ParseError};
 use crate::profile::element::Element;
 use crate::profile::status::ItemKey;
+use names::PathUse;
 
 /// Every element in `source`, base elements included, in line order.
 ///
@@ -39,8 +40,11 @@ use crate::profile::status::ItemKey;
 /// arguments are not a list of paths, is a `ParseError`.
 pub fn detect(source: &str) -> Result<Vec<Finding>, ParseError> {
     let file = syn::parse_file(source).map_err(|error| to_parse_error(source, &error))?;
+    let mut imports = Imports::default();
+    imports.visit_file(&file);
     let mut detector = Detector {
         source,
+        imports,
         ..Detector::default()
     };
     detector.visit_file(&file);
@@ -93,6 +97,11 @@ struct Detector<'s> {
     /// Whether the functions being visited are items of a trait or of a trait
     /// impl, where `async fn` is `async_fn_in_trait`.
     in_trait: bool,
+    /// The `use` items of the whole file.
+    imports: Imports,
+    /// How the path about to be visited is used, when its parent knows: the
+    /// function of a call, or the path of a macro.
+    path_use: Option<(*const Path, PathUse)>,
 }
 
 /// What a trait in a list of bounds stands for: a bound (`T: Trait`), a
@@ -253,6 +262,7 @@ impl<'ast> Visit<'ast> for Detector<'_> {
             element,
             format!("{}!", path_text(&mac.path)),
         );
+        self.path_use = Some((&mac.path as *const Path, PathUse::NotACall));
         visit::visit_macro(self, mac);
     }
 
@@ -277,6 +287,7 @@ impl<'ast> Visit<'ast> for Detector<'_> {
 
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
         self.attribute(attr);
+        self.path_use = Some((attr.path() as *const Path, PathUse::NotACall));
         visit::visit_attribute(self, attr);
     }
 
@@ -506,8 +517,10 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         if ty.qself.is_some() || from_param {
             self.mark(ty.span(), Element::AssociatedType);
         }
-        if is_box_dyn_error(ty) {
-            self.mark(ty.span(), Element::BoxDynError);
+        if let Some(error) = box_dyn_error(ty) {
+            // On the line of `Error`, which may be below `Box<`.
+            let text = self.snippet(ty.span());
+            self.push(error, Element::BoxDynError, text);
         }
         visit::visit_type_path(self, ty);
     }
@@ -707,21 +720,34 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     // Names: paths, imports and method calls
 
     fn visit_path(&mut self, path: &'ast Path) {
-        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
-        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
-        for element in names::path_elements(&segments) {
-            self.push(path.span(), element, path_text(path));
+        let usage = match self.path_use {
+            Some((marked, usage)) if std::ptr::eq(marked, path) => usage,
+            _ => PathUse::Other,
+        };
+        let spans: Vec<Span> = path.segments.iter().map(|s| s.ident.span()).collect();
+        let own: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let text = path_text(path);
+        for (element, span) in self.imports.elements(path, &own, &spans, usage) {
+            self.push(span, element, text.clone());
         }
         visit::visit_path(self, path);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        if let Expr::Path(func) = &*call.func {
+            let usage = PathUse::Call(call.args.len());
+            self.path_use = Some((&func.path as *const Path, usage));
+        }
+        visit::visit_expr_call(self, call);
     }
 
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let mut imports = Vec::new();
         imported_paths(&item.tree, &mut Vec::new(), &mut imports);
-        for (segments, span) in imports {
-            let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
-            for element in names::path_elements(&segments) {
-                self.push(span, element, segments.join("::"));
+        for import in imports {
+            let segments: Vec<&str> = import.segments.iter().map(String::as_str).collect();
+            for (element, _) in names::path_elements(&segments, PathUse::NotACall) {
+                self.push(import.span, element, import.text());
             }
         }
         visit::visit_item_use(self, item);
@@ -742,16 +768,46 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     }
 }
 
-/// Every path a `use` tree imports, as its segments and the span of its last
-/// name. `self` in a group stands for the path before it, and a glob imports
-/// no name.
-fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Span)>) {
-    let mut leaf = |prefix: &[String], ident: &syn::Ident| {
+/// One path a `use` tree imports.
+struct ImportedPath {
+    /// The full path (`["std", "mem", "take"]`); for a glob, its prefix.
+    segments: Vec<String>,
+    /// The name it is used by in the file (`take`, or the `as` name). `None`
+    /// for a glob.
+    name: Option<String>,
+    /// The last name, or the `*` of a glob.
+    span: Span,
+}
+
+impl ImportedPath {
+    fn text(&self) -> String {
+        let path = self.segments.join("::");
+        match &self.name {
+            None => format!("{path}::*"),
+            Some(name) if self.segments.last() != Some(name) => format!("{path} as {name}"),
+            Some(_) => path,
+        }
+    }
+}
+
+/// Every path a `use` tree imports. `self` in a group stands for the path
+/// before it.
+fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<ImportedPath>) {
+    let mut leaf = |prefix: &[String], ident: &syn::Ident, name: &syn::Ident| {
         let mut segments = prefix.to_vec();
         if ident != "self" {
             segments.push(ident.to_string());
         }
-        out.push((segments, ident.span()));
+        let name = if name == "self" {
+            segments.last().cloned()
+        } else {
+            Some(name.to_string())
+        };
+        out.push(ImportedPath {
+            segments,
+            name,
+            span: ident.span(),
+        });
     };
     match tree {
         UseTree::Path(path) => {
@@ -759,9 +815,13 @@ fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
             imported_paths(&path.tree, prefix, out);
             prefix.pop();
         }
-        UseTree::Name(name) => leaf(prefix, &name.ident),
-        UseTree::Rename(rename) => leaf(prefix, &rename.ident),
-        UseTree::Glob(_) => {}
+        UseTree::Name(name) => leaf(prefix, &name.ident, &name.ident),
+        UseTree::Rename(rename) => leaf(prefix, &rename.ident, &rename.rename),
+        UseTree::Glob(glob) => out.push(ImportedPath {
+            segments: prefix.clone(),
+            name: None,
+            span: glob.star_token.span(),
+        }),
         UseTree::Group(group) => {
             for tree in &group.items {
                 imported_paths(tree, prefix, out);
@@ -770,25 +830,119 @@ fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
     }
 }
 
+/// What the `use` items anywhere in the file bring in, so that a name used
+/// on a later line (`take(v)` after `use std::mem::take;`) is reported on
+/// that line, not only at the import. Scopes are not tracked: an import in
+/// one module counts for the whole file, which reports more, not less.
+#[derive(Default)]
+struct Imports {
+    /// The name in the file and the path it stands for.
+    names: Vec<(String, Vec<String>)>,
+    /// The prefixes of glob imports.
+    globs: Vec<Vec<String>>,
+}
+
+impl<'ast> Visit<'ast> for Imports {
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut imports = Vec::new();
+        imported_paths(&item.tree, &mut Vec::new(), &mut imports);
+        for import in imports {
+            match import.name {
+                Some(name) => self.names.push((name, import.segments)),
+                None => self.globs.push(import.segments),
+            }
+        }
+    }
+}
+
+impl Imports {
+    /// The elements `path` (its segment names `own`, their spans `spans`)
+    /// names, reading its first segment through the imports. Each is on the
+    /// span of the segment that decides it.
+    fn elements(
+        &self,
+        path: &Path,
+        own: &[String],
+        spans: &[Span],
+        usage: PathUse,
+    ) -> Vec<(Element, Span)> {
+        let mut found: Vec<(Element, Span)> = Vec::new();
+        let mut add = |element: Element, span: Span| {
+            if !found.iter().any(|&(e, _)| e == element) {
+                found.push((element, span));
+            }
+        };
+
+        // The path as written.
+        for (element, index) in names::path_elements(&as_str(own), usage) {
+            add(element, spans[index]);
+        }
+        if path.leading_colon.is_some() || own.is_empty() {
+            return found;
+        }
+        // The first segment as an imported name: `Shared::new` after
+        // `use std::sync::Arc as Shared;`. The imported part is on the span
+        // of the first segment.
+        for (name, target) in &self.names {
+            if *name != own[0] {
+                continue;
+            }
+            let mut full = target.clone();
+            full.extend(own[1..].iter().cloned());
+            for (element, index) in names::path_elements(&as_str(&full), usage) {
+                let index = (index + 1).saturating_sub(target.len());
+                add(element, spans[index]);
+            }
+        }
+        // Behind a glob: `take(v)` after `use std::mem::*;`. What the prefix
+        // names by itself is reported at the import, not on every path.
+        for prefix in &self.globs {
+            let mut full = prefix.clone();
+            full.extend(own.iter().cloned());
+            let of_prefix = names::path_elements(&as_str(prefix), PathUse::NotACall);
+            for (element, index) in names::path_elements(&as_str(&full), usage) {
+                if index >= prefix.len() && !of_prefix.iter().any(|&(e, _)| e == element) {
+                    add(element, spans[index - prefix.len()]);
+                }
+            }
+            if let Some((element, exported)) = prefix.last().and_then(|m| names::glob_exports(m))
+                && exported.contains(&own[0].as_str())
+            {
+                add(element, spans[0]);
+            }
+        }
+        found
+    }
+}
+
+fn as_str(segments: &[String]) -> Vec<&str> {
+    segments.iter().map(String::as_str).collect()
+}
+
 /// `Box<dyn Error>`, also with more bounds (`Box<dyn Error + Send + Sync>`)
-/// or a path to the trait (`Box<dyn std::error::Error>`).
-fn is_box_dyn_error(ty: &TypePath) -> bool {
-    let Some(last) = ty.path.segments.last() else {
-        return false;
-    };
+/// or a path to the trait (`Box<dyn std::error::Error>`): the span of `Error`.
+fn box_dyn_error(ty: &TypePath) -> Option<Span> {
+    let last = ty.path.segments.last()?;
     let PathArguments::AngleBracketed(args) = &last.arguments else {
-        return false;
+        return None;
     };
-    last.ident == "Box"
-        && args.args.iter().any(|arg| {
-            let GenericArgument::Type(Type::TraitObject(object)) = arg else {
-                return false;
-            };
-            object.bounds.iter().any(|bound| {
-                matches!(bound, TypeParamBound::Trait(t)
-                    if t.path.segments.last().is_some_and(|s| s.ident == "Error"))
-            })
+    if last.ident != "Box" {
+        return None;
+    }
+    args.args.iter().find_map(|arg| {
+        let GenericArgument::Type(Type::TraitObject(object)) = arg else {
+            return None;
+        };
+        object.bounds.iter().find_map(|bound| match bound {
+            TypeParamBound::Trait(t) => t
+                .path
+                .segments
+                .last()
+                .filter(|s| s.ident == "Error")
+                .map(|s| s.ident.span()),
+            _ => None,
         })
+    })
 }
 
 /// The element of implementing a trait, by the trait's last name, besides
@@ -1423,9 +1577,94 @@ impl S {
             elements(source),
             [
                 (1, Element::MemReplace, "std::mem::replace".to_owned()),
-                (1, Element::MemSwap, "std::mem::swap".to_owned()),
+                (1, Element::MemSwap, "std::mem::swap as exchange".to_owned()),
                 (2, Element::MemTake, "std::mem::take".to_owned()),
             ]
+        );
+    }
+
+    fn lines_of(source: &str, element: Element) -> Vec<usize> {
+        elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == element)
+            .map(|(line, _, _)| line)
+            .collect()
+    }
+
+    #[test]
+    fn an_imported_name_used_on_a_later_line_is_reported_on_that_line_too() {
+        let source = "\
+use std::mem::take;
+use std::sync::Arc as Shared;
+fn f(v: V) {
+    take(v);
+    Shared::new(1);
+}
+";
+        assert_eq!(lines_of(source, Element::MemTake), [1, 4]);
+        assert_eq!(lines_of(source, Element::Arc), [2, 5]);
+    }
+
+    #[test]
+    fn a_module_imported_under_another_name_is_read_through_its_path() {
+        let source = "use std::sync::mpsc as chan;\nfn f() {\n    chan::channel::<u8>();\n}\n";
+        assert_eq!(lines_of(source, Element::Channel), [1, 3]);
+    }
+
+    #[test]
+    fn a_function_of_a_module_or_of_self_with_a_method_name_is_not_that_method() {
+        let found = only("fn f() {\n    repo::find(1);\n    Self::all(3);\n}\n");
+        assert!(!found.contains(&Element::IteratorConsumer), "{found:?}");
+    }
+
+    #[test]
+    fn a_name_behind_a_glob_import_is_reported_where_it_is_used() {
+        let source = "\
+use std::mem::*;
+use std::sync::mpsc::*;
+fn f(v: V) {
+    take(v);
+    channel::<u8>();
+    String::new();
+}
+";
+        assert_eq!(lines_of(source, Element::MemTake), [4]);
+        assert_eq!(lines_of(source, Element::Channel), [2, 5]);
+        assert_eq!(
+            only("use std::mem::*;\nfn f() {\n    String::new();\n}\n"),
+            []
+        );
+    }
+
+    #[test]
+    fn a_method_called_or_passed_through_its_path_is_that_method_element() {
+        let cases = [
+            ("v.filter_map(Result::ok)", Element::ResultCombinator),
+            ("Option::unwrap(x)", Element::Unwrap),
+            ("Option::expect(x, \"m\")", Element::Expect),
+            ("Vec::iter(&v)", Element::IterMethod),
+            ("Iterator::sum(it)", Element::IteratorConsumer),
+        ];
+        for (expr, element) in cases {
+            let found = only(&format!("fn f() {{\n    {expr};\n}}\n"));
+            assert!(found.contains(&element), "{expr}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_function_through_its_path_whose_arguments_do_not_fit_the_method_is_not_it() {
+        // `cmp::max(a, b)` is not the iterator's `max()`; `mem::take(x)` is
+        // not `Iterator::take(n)`.
+        let found = only("fn f() {\n    std::cmp::max(a, b);\n    Option::expect(x);\n}\n");
+        assert!(!found.contains(&Element::IteratorConsumer), "{found:?}");
+        assert!(!found.contains(&Element::Expect), "{found:?}");
+    }
+
+    #[test]
+    fn a_function_with_a_method_name_in_a_macro_or_attribute_path_is_not_a_method() {
+        assert_eq!(
+            only("#[rustfmt::skip]\nfn f() {\n    itertools::chain!();\n}\n"),
+            [Element::MacroCall]
         );
     }
 
@@ -1776,6 +2015,25 @@ impl S {
     fn an_unsafe_impl_is_unsafe_trait() {
         let found = only("unsafe impl Send for S {}\n");
         assert!(found.contains(&Element::UnsafeTrait), "{found:?}");
+    }
+
+    #[test]
+    fn a_thread_builder_is_thread_spawn() {
+        let found = only("fn f() {\n    std::thread::Builder::new().spawn(g);\n}\n");
+        assert_eq!(found, [Element::ThreadSpawn]);
+    }
+
+    #[test]
+    fn a_fallible_conversion_is_from_into() {
+        let found =
+            only("fn f(n: u64) {\n    let a: u8 = n.try_into();\n    u8::try_from(n);\n}\n");
+        assert_eq!(found, [Element::FromInto, Element::FromInto]);
+    }
+
+    #[test]
+    fn box_dyn_error_is_on_the_line_of_error() {
+        let source = "fn f() -> Box<\n    dyn Error,\n> {}\n";
+        assert_eq!(lines_of(source, Element::BoxDynError), [2]);
     }
 
     #[test]

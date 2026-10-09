@@ -7,6 +7,10 @@
 //!
 //! `tests/fixtures/negative/*.rs` hold code with base elements only, and the
 //! checker must find nothing else in them.
+//!
+//! The tests through `check_file` hold the visitor to the line it reports an
+//! element on: the line of the token that makes it, which the changed-line
+//! filter looks at.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -185,6 +189,26 @@ fn a_question_mark_added_to_a_later_line_of_an_existing_chain_is_reported_on_tha
     };
     let reported: Vec<(usize, ItemKey)> = findings.into_iter().map(|f| (f.line, f.key)).collect();
     assert_eq!(reported, [(3, ItemKey::Element(Element::QuestionMark))]);
+}
+
+#[test]
+fn a_name_imported_on_an_unchanged_line_and_used_on_a_new_line_is_reported_on_the_new_line() {
+    let profile = Profile::new();
+    let own_modules = BTreeSet::new();
+    let ctx = CheckContext {
+        profile: &profile,
+        own_modules: &own_modules,
+    };
+    let old = "use std::mem::take;\n\nfn f(v: Vec<u8>) {\n}\n";
+    let new = "use std::mem::take;\n\nfn f(v: Vec<u8>) {\n    take(v);\n}\n";
+
+    let report = check_file(Path::new("src/lib.rs"), old, new, &ctx);
+
+    let CheckReport::OutOfProfile(findings) = report else {
+        panic!("expected OutOfProfile, got {report:?}");
+    };
+    let reported: Vec<(usize, ItemKey)> = findings.into_iter().map(|f| (f.line, f.key)).collect();
+    assert_eq!(reported, [(4, ItemKey::Element(Element::MemTake))]);
 }
 
 #[test]

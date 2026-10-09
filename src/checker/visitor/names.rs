@@ -5,53 +5,113 @@ use syn::Expr;
 
 use crate::profile::element::Element;
 
-/// The elements a path names, from its segments (`["std", "mem", "take"]`).
-/// The same rules hold for a path in code and for a path imported by `use`.
-pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
-    let mut found = Vec::new();
-    let last = segments.last().copied().unwrap_or("");
-    let before_last = segments.len().checked_sub(2).map(|i| segments[i]);
+/// How a path is used, for the method named by its last segment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PathUse {
+    /// Imported by `use`, or the path of a macro: it names no method call.
+    NotACall,
+    /// Called with this many arguments: `Option::expect(x, "m")` is the
+    /// method `expect` with one argument besides the receiver.
+    Call(usize),
+    /// Anything else, such as a function passed as a value
+    /// (`.filter_map(Result::ok)`), where the arguments are not known.
+    Other,
+}
+
+/// The elements a path names, from its segments (`["std", "mem", "take"]`),
+/// each with the index of the segment that decides it. The same rules hold
+/// for a path in code and for a path imported by `use`.
+pub(super) fn path_elements(segments: &[&str], usage: PathUse) -> Vec<(Element, usize)> {
+    let mut found: Vec<(Element, usize)> = Vec::new();
+    let mut add = |element: Element, index: usize| {
+        if !found.iter().any(|&(e, _)| e == element) {
+            found.push((element, index));
+        }
+    };
+    let Some(last_index) = segments.len().checked_sub(1) else {
+        return Vec::new();
+    };
+    let last = segments[last_index];
+    let before_last = last_index.checked_sub(1).map(|i| segments[i]);
     let qualified = segments.len() > 1;
 
     // A type or trait anywhere in the path: `PhantomData<T>`,
     // `std::marker::PhantomData`, `From::from`.
-    for &segment in segments {
-        if let Some(element) = type_name(segment)
-            && !found.contains(&element)
-        {
-            found.push(element);
+    for (index, &segment) in segments.iter().enumerate() {
+        if let Some(element) = type_name(segment) {
+            add(element, index);
+        }
+        // `std::thread::Builder::new().spawn(f)` spawns a thread too.
+        if segment == "Builder" && index > 0 && segments[index - 1] == "thread" {
+            add(Element::ThreadSpawn, index);
         }
     }
 
     match (before_last, last) {
-        (Some("mem"), "take") => found.push(Element::MemTake),
-        (Some("mem"), "replace") => found.push(Element::MemReplace),
-        (Some("mem"), "swap") => found.push(Element::MemSwap),
-        (Some("mem"), "drop") | (None, "drop") => found.push(Element::Drop),
-        (Some("thread"), "spawn") => found.push(Element::ThreadSpawn),
-        (Some("thread"), "scope") => found.push(Element::ThreadScope),
+        (Some("mem"), "take") => add(Element::MemTake, last_index),
+        (Some("mem"), "replace") => add(Element::MemReplace, last_index),
+        (Some("mem"), "swap") => add(Element::MemSwap, last_index),
+        (Some("mem"), "drop") | (None, "drop") => add(Element::Drop, last_index),
+        (Some("thread"), "spawn") => add(Element::ThreadSpawn, last_index),
+        (Some("thread"), "scope") => add(Element::ThreadScope, last_index),
         // `Box::pin(x)` makes a `Pin<Box<_>>`.
-        (Some("Box"), "pin") => found.push(Element::Pin),
+        (Some("Box"), "pin") => add(Element::Pin, last_index),
         _ => {}
     }
-    // `Clone::clone(&x)`, `Rc::clone(&x)`, `str::to_owned(s)`: the method
-    // called through its path.
     match last {
         // Distinctive enough to count bare, as after `use std::mem::transmute`.
-        "transmute" | "transmute_copy" => found.push(Element::Transmute),
-        "clone" if qualified => found.push(Element::Clone),
-        "to_owned" if qualified => found.push(Element::ToOwned),
+        "transmute" | "transmute_copy" => add(Element::Transmute, last_index),
         // `String::from(s)`, `u64::from(n)`: a conversion through `From`.
-        "from" if qualified && !found.contains(&Element::FromInto) => found.push(Element::FromInto),
+        "from" | "try_from" if qualified => add(Element::FromInto, last_index),
         _ => {}
     }
+    // A method called or passed through its path: `Clone::clone(&x)`,
+    // `Option::unwrap(x)`, `.filter_map(Result::ok)`. The receiver is not
+    // known, so a name both iterators and `Option` have is both. Only after
+    // a type or trait (`Option::`, `Iterator::`, `str::`): a function of a
+    // module (`repo::find`, `std::cmp::max`) or of the type being written
+    // (`Self::all`) is not a method of std.
+    let after_type = before_last.is_some_and(|owner| {
+        owner != "Self" && (owner.starts_with(char::is_uppercase) || owner == "str")
+    });
+    if after_type && usage != PathUse::NotACall {
+        let arities = match usage {
+            PathUse::Call(args) => args.checked_sub(1).into_iter().collect::<Vec<_>>(),
+            _ => vec![0, 1, 2],
+        };
+        for args in arities {
+            for element in method_elements(last, args, None) {
+                add(element, last_index);
+            }
+        }
+    }
     found
+}
+
+/// Modules whose names a glob import brings in without naming them, and the
+/// element those names stand for: after `use std::sync::mpsc::*;`, a bare
+/// `channel()` is a channel.
+pub(super) fn glob_exports(module: &str) -> Option<(Element, &'static [&'static str])> {
+    match module {
+        "mpsc" => Some((
+            Element::Channel,
+            &[
+                "channel",
+                "sync_channel",
+                "Sender",
+                "SyncSender",
+                "Receiver",
+            ],
+        )),
+        "atomic" => Some((Element::Atomic, &["Ordering", "fence", "compiler_fence"])),
+        _ => None,
+    }
 }
 
 /// The element a type or trait name stands for, wherever it is in a path.
 fn type_name(segment: &str) -> Option<Element> {
     let element = match segment {
-        "From" | "Into" => Element::FromInto,
+        "From" | "Into" | "TryFrom" | "TryInto" => Element::FromInto,
         "PhantomData" => Element::PhantomData,
         "Box" => Element::Box,
         "Rc" => Element::Rc,
@@ -142,7 +202,7 @@ pub(super) fn method_elements(name: &str, args: usize, receiver: Option<Receiver
         name if is_iterator_consumer(name, args) => Element::IteratorConsumer,
         "clone" => Element::Clone,
         "to_owned" => Element::ToOwned,
-        "into" => Element::FromInto,
+        "into" | "try_into" => Element::FromInto,
         "unwrap" => Element::Unwrap,
         "expect" if args == 1 => Element::Expect,
         name if RESULT_COMBINATORS.contains(&name) => Element::ResultCombinator,
@@ -302,3 +362,172 @@ const RESULT_COMBINATORS: &[&str] = &[
     "expect_err",
     "inspect_err",
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_type_or_trait_name_is_its_element() {
+        let cases = [
+            ("From", Element::FromInto),
+            ("Into", Element::FromInto),
+            ("TryFrom", Element::FromInto),
+            ("TryInto", Element::FromInto),
+            ("PhantomData", Element::PhantomData),
+            ("Box", Element::Box),
+            ("Rc", Element::Rc),
+            ("Arc", Element::Arc),
+            ("Weak", Element::Weak),
+            ("Cell", Element::Cell),
+            ("RefCell", Element::RefCell),
+            ("Mutex", Element::Mutex),
+            ("MutexGuard", Element::Mutex),
+            ("RwLock", Element::RwLock),
+            ("RwLockReadGuard", Element::RwLock),
+            ("RwLockWriteGuard", Element::RwLock),
+            ("atomic", Element::Atomic),
+            ("AtomicBool", Element::Atomic),
+            ("OnceCell", Element::OnceCell),
+            ("OnceLock", Element::OnceCell),
+            ("LazyCell", Element::LazyLock),
+            ("LazyLock", Element::LazyLock),
+            ("Cow", Element::Cow),
+            ("mpsc", Element::Channel),
+            ("Send", Element::SendSync),
+            ("Sync", Element::SendSync),
+            ("Result", Element::Result),
+            ("Ok", Element::Result),
+            ("Err", Element::Result),
+            ("Option", Element::Option),
+            ("Some", Element::Option),
+            ("None", Element::Option),
+            ("Fn", Element::FnTrait),
+            ("FnMut", Element::FnTrait),
+            ("FnOnce", Element::FnTrait),
+            ("Future", Element::Future),
+            ("IntoFuture", Element::Future),
+            ("Pin", Element::Pin),
+        ];
+        for (name, element) in cases {
+            assert_eq!(type_name(name), Some(element), "{name}");
+        }
+    }
+
+    #[test]
+    fn every_method_name_in_the_tables_is_its_element() {
+        let mut cases: Vec<(&str, usize, Element)> = vec![
+            ("iter", 0, Element::IterMethod),
+            ("iter_mut", 0, Element::IterMethod),
+            ("into_iter", 0, Element::IterMethod),
+            ("take", 1, Element::IteratorAdapter),
+            ("max", 0, Element::IteratorConsumer),
+            ("min", 0, Element::IteratorConsumer),
+            ("clone", 0, Element::Clone),
+            ("to_owned", 0, Element::ToOwned),
+            ("into", 0, Element::FromInto),
+            ("try_into", 0, Element::FromInto),
+            ("unwrap", 0, Element::Unwrap),
+            ("expect", 1, Element::Expect),
+        ];
+        cases.extend(
+            ITERATOR_ADAPTERS
+                .iter()
+                .map(|&n| (n, 1, Element::IteratorAdapter)),
+        );
+        cases.extend(
+            ITERATOR_CONSUMERS
+                .iter()
+                .map(|&n| (n, 1, Element::IteratorConsumer)),
+        );
+        cases.extend(
+            RESULT_COMBINATORS
+                .iter()
+                .map(|&n| (n, 1, Element::ResultCombinator)),
+        );
+        for (name, args, element) in cases {
+            assert_eq!(method_elements(name, args, None), [element], "{name}");
+        }
+    }
+
+    #[test]
+    fn a_method_after_every_iterator_source_or_option_source_is_told_apart() {
+        for &source in ITER_SOURCES.iter().chain(ITERATOR_ADAPTERS) {
+            let expr: Expr = syn::parse_str(&format!("x.{source}(a)")).unwrap();
+            assert_eq!(receiver_kind(&expr), Some(Receiver::Iterator), "{source}");
+        }
+        for &source in OPTION_OR_RESULT_SOURCES {
+            let expr: Expr = syn::parse_str(&format!("x.{source}(a)")).unwrap();
+            assert_eq!(
+                receiver_kind(&expr),
+                Some(Receiver::OptionOrResult),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn transmute_and_its_copy_variant_are_transmute_even_bare() {
+        for name in ["transmute", "transmute_copy"] {
+            let found = path_elements(&[name], PathUse::Call(1));
+            assert!(
+                found.iter().any(|&(e, _)| e == Element::Transmute),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_ambiguous_adapter_is_both_without_a_receiver_and_one_with_it() {
+        for &name in AMBIGUOUS_ADAPTERS {
+            assert_eq!(
+                method_elements(name, 1, None),
+                [Element::IteratorAdapter, Element::ResultCombinator],
+                "{name}"
+            );
+            assert_eq!(
+                method_elements(name, 1, Some(Receiver::Iterator)),
+                [Element::IteratorAdapter],
+                "{name}"
+            );
+            assert_eq!(
+                method_elements(name, 1, Some(Receiver::OptionOrResult)),
+                [Element::ResultCombinator],
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_name_a_glob_of_mpsc_or_atomic_brings_in_is_listed() {
+        let (element, names) = glob_exports("mpsc").unwrap();
+        assert_eq!(element, Element::Channel);
+        assert_eq!(
+            names,
+            [
+                "channel",
+                "sync_channel",
+                "Sender",
+                "SyncSender",
+                "Receiver"
+            ]
+        );
+        let (element, names) = glob_exports("atomic").unwrap();
+        assert_eq!(element, Element::Atomic);
+        assert_eq!(names, ["Ordering", "fence", "compiler_fence"]);
+        assert_eq!(glob_exports("mem"), None);
+    }
+
+    #[test]
+    fn a_method_through_a_path_counts_only_after_a_type_or_trait() {
+        let call = PathUse::Call(1);
+        let consumers = |segments: &[&str]| {
+            path_elements(segments, call)
+                .iter()
+                .any(|&(e, _)| e == Element::IteratorConsumer)
+        };
+        assert!(consumers(&["Iterator", "count"]));
+        assert!(!consumers(&["repo", "count"]));
+        assert!(!consumers(&["Self", "count"]));
+    }
+}
