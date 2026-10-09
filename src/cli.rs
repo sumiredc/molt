@@ -76,7 +76,7 @@ pub fn run() -> ExitCode {
         // --fake の台本は chat の応答の列で、doctor が確かめるモデルの一覧を書けない。
         // 黙って実際の接続先に送らないよう、受けずに止める
         Some(Command::Doctor) if cli.common.fake.is_some() => {
-            eprintln!("doctor does not support --fake yet");
+            eprintln!("doctor does not support --fake: its script has no list of models");
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),

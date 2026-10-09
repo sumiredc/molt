@@ -24,7 +24,7 @@ fn doctor_with_fake_stops_without_connecting_or_writing_config() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("doctor does not support --fake yet"),
+        stderr.contains("doctor does not support --fake: its script has no list of models"),
         "{stderr}"
     );
     assert!(!stderr.contains("connection failed"), "{stderr}");
