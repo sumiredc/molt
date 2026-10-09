@@ -24,6 +24,7 @@ use crate::llm::{
 };
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
+use crate::session::{self, Event, SessionLog};
 use crate::workspace::cargo::{CargoError, CargoOutput};
 
 /// Tool calls per turn (PRD §8.4). Every call counts, `finish` too, so that no call the model
@@ -64,6 +65,8 @@ pub struct MainLine<'a> {
     /// What a turn stopped at a boundary left unchecked, until the request is withdrawn
     /// ([`MainLine::withdraw`]) or the next turn starts.
     held: Option<Held>,
+    /// Where the events of the main line are recorded (PRD §8.8).
+    log: SessionLog,
 }
 
 /// The changes of a turn held at a boundary, and whether they still need `cargo check`.
@@ -229,7 +232,19 @@ impl<'a> MainLine<'a> {
             }],
             molt_checks: 0,
             held: None,
+            log: SessionLog::disabled(),
         }
+    }
+
+    /// The same main line, recording its events and requests in `log`.
+    pub fn with_log(mut self, log: SessionLog) -> Self {
+        self.log = log;
+        self
+    }
+
+    /// Where the main line records its events.
+    pub(crate) fn log(&self) -> &SessionLog {
+        &self.log
     }
 
     /// The message list so far, starting with the system prompt.
@@ -287,7 +302,9 @@ impl<'a> MainLine<'a> {
         approver: &mut dyn Approver,
     ) -> TurnEnd {
         loop {
-            let response = match self.client.chat(&self.request()) {
+            let request = self.request();
+            self.log.record_request(&request);
+            let response = match self.client.chat(&request) {
                 Ok(response) => response,
                 Err(error) => return TurnEnd::ApiFailed(error),
             };
@@ -345,6 +362,10 @@ impl<'a> MainLine<'a> {
             );
         }
         turn.tool_calls.push(call.name.clone());
+        self.log.record(&Event::ToolCall {
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        });
         if let Err(unknown) = check_tool_name(call, &self.definitions) {
             return (prompts::tool_error(unknown), Next::Continue);
         }
@@ -420,6 +441,23 @@ impl<'a> MainLine<'a> {
         request.tool_choice = Some(ToolChoice::Auto);
         request
     }
+}
+
+/// The event of a `cargo check` molt ran.
+fn check_event(check: &Result<CargoOutput, CargoError>) -> Event {
+    Event::CargoCheck(match check {
+        Ok(output) if output.success => session::CargoCheck::Passed {
+            stdout: output.stdout.clone(),
+            stderr: output.stderr.clone(),
+        },
+        Ok(output) => session::CargoCheck::Failed {
+            stdout: output.stdout.clone(),
+            stderr: output.stderr.clone(),
+        },
+        Err(error) => session::CargoCheck::NotRun {
+            error: error.to_string(),
+        },
+    })
 }
 
 /// The arguments of a `run_cargo` call, if they fit.

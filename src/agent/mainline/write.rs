@@ -13,6 +13,7 @@ use crate::agent::prompts;
 use crate::agent::tools::{EditFileArgs, FileChange, ToolError, WriteFileArgs, WriteOutcome};
 use crate::profile::status::{ItemKey, Status};
 use crate::profile::store::Profile;
+use crate::session::{Detected, Event};
 
 impl MainLine<'_> {
     /// Runs `write_file` or `edit_file` (`name`) through the check.
@@ -58,6 +59,18 @@ impl MainLine<'_> {
                 (prompts::written(&path), Next::Continue)
             }
             WriteOutcome::OutOfProfile { findings, change } => {
+                self.log.record(&Event::Detected {
+                    path: path.clone(),
+                    items: findings
+                        .iter()
+                        .map(|finding| Detected {
+                            line: finding.line,
+                            item: finding.key.to_string(),
+                            category: finding.category().map(|c| c.name().to_owned()),
+                            text: finding.text.clone(),
+                        })
+                        .collect(),
+                });
                 let mut items: Vec<ItemKey> = Vec::new();
                 for finding in &findings {
                     if !items.contains(&finding.key) {
@@ -69,6 +82,12 @@ impl MainLine<'_> {
                     .filter(|item| progress.rejected.contains(item))
                     .cloned()
                     .collect();
+                self.log.record(&Event::Rejected {
+                    path: path.clone(),
+                    items: items.iter().map(ToString::to_string).collect(),
+                    content: change.new_content().to_owned(),
+                    boundary: !repeated.is_empty(),
+                });
                 if repeated.is_empty() {
                     progress.rejected_now.extend(items);
                     return (prompts::rejected(&path, &findings), Next::Continue);

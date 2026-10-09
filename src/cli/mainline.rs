@@ -3,7 +3,7 @@
 
 mod diff;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use super::profile;
@@ -17,22 +17,27 @@ use crate::config::{self, Config};
 use crate::llm::{OpenAiClient, Router};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
+use crate::session::{self, SessionLog};
 use crate::workspace::cargo::{Cargo, CargoError, CargoOutput};
 use crate::workspace::path::Root;
 
 /// The main-line prompt (PRD §8.6).
 const PROMPT: &str = "molt> ";
 
+/// The directory in molt's place (`config::molt_home`) that holds the session logs (PRD §8.8).
+const SESSIONS_DIR: &str = "sessions";
+
 /// The exit code after Ctrl-C at the prompt (128 + SIGINT, as a shell reports it).
 const INTERRUPTED: u8 = 130;
 
 pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> ExitCode {
     let opened = preconditions(profile_flag).and_then(|(root, profile)| {
-        let (config, client) = connect()?;
+        let (home, config, client) = connect()?;
         let ui = open_ui(ui_script)?;
-        Ok((root, profile, config, client, ui))
+        let log = open_log(&home)?;
+        Ok((root, profile, config, client, ui, log))
     });
-    let (root, profile, config, client, mut ui) = match opened {
+    let (root, profile, config, client, mut ui, log) = match opened {
         Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
@@ -41,7 +46,7 @@ pub(super) fn run(profile_flag: Option<&Path>, ui_script: Option<&Path>) -> Exit
     };
     let cargo = Cargo::new(root.clone());
     let tools = Tools::new(root, &cargo);
-    let mut agent = MainLine::new(&client, Router::new(&config), tools, profile);
+    let mut agent = MainLine::new(&client, Router::new(&config), tools, profile).with_log(log);
     main_line(ui.as_mut(), &mut agent)
 }
 
@@ -64,12 +69,26 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile), String>
 
 /// Reads `config.toml` and creates the client for its endpoint. The main line does not open
 /// when the client cannot be created, e.g. the API key's environment variable is unset.
-fn connect() -> Result<(Config, OpenAiClient), String> {
+fn connect() -> Result<(PathBuf, Config, OpenAiClient), String> {
     let home = config::molt_home(|name| std::env::var_os(name)).map_err(|e| e.to_string())?;
     let config = Config::load(&config::config_path(&home)).map_err(|e| e.to_string())?;
     let client = OpenAiClient::new(&config.api, |name| std::env::var(name).ok())
         .map_err(|e| e.to_string())?;
-    Ok((config, client))
+    Ok((home, config, client))
+}
+
+/// Creates the session log in the `sessions` directory of molt's place `home`, beside the
+/// profile. The main line does not open without it, since what it records is a guarantee
+/// (PRD §3 Observability).
+fn open_log(home: &Path) -> Result<SessionLog, String> {
+    let dir = home.join(SESSIONS_DIR);
+    let request_bodies = session::request_bodies_enabled(|name| std::env::var_os(name));
+    SessionLog::create(&dir, request_bodies).map_err(|error| {
+        format!(
+            "cannot create the session log in {}: {error}",
+            dir.display()
+        )
+    })
 }
 
 /// The scripted UI when `--ui-script` is given, otherwise the terminal.
@@ -94,6 +113,7 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
             Ok(Input::Line(line)) => {
                 let turn = agent.turn(&line, &mut UiApprover::new(ui));
                 show_turn(ui, &turn);
+                show_log_error(ui, agent);
                 if matches!(turn.end, TurnEnd::Boundary(_))
                     && let Some(code) = at_boundary(ui, agent)
                 {
@@ -242,6 +262,7 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine) -> Option<ExitCode> {
                 let withdrawal = agent.withdraw();
                 ui.show("Request withdrawn.");
                 show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
+                show_log_error(ui, agent);
                 return None;
             }
             Ok(Input::Line(_)) => ui.show(AT_BOUNDARY),
@@ -252,6 +273,17 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine) -> Option<ExitCode> {
                 return Some(ExitCode::FAILURE);
             }
         }
+    }
+}
+
+/// That the session log could not be written, the first time it happens to a file. The main line
+/// goes on without it.
+fn show_log_error(ui: &mut dyn Ui, agent: &MainLine) {
+    if let Some((path, error)) = agent.log().take_error() {
+        ui.show(&format!(
+            "Could not write the session log {}: {error}. The session goes on without it.",
+            path.display()
+        ));
     }
 }
 
@@ -1017,5 +1049,180 @@ mod turn_end {
             "{:?}",
             ui.shown()
         );
+    }
+}
+
+/// What the main line leaves in the session log (PRD §3 Observability, §8.8). Named so that
+/// `cargo test session` selects them.
+#[cfg(test)]
+mod session_log {
+    use std::fs;
+
+    use serde_json::{Value, json};
+
+    use super::tests::{input, project};
+    use super::*;
+    use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::workspace::cargo::FakeCargo;
+
+    fn write_main(id: &str, content: &str) -> ChatResponse {
+        ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/main.rs", "content": content }).to_string(),
+            }],
+        }
+    }
+
+    const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
+
+    #[test]
+    fn a_run_from_a_rejection_to_a_boundary_leaves_the_four_kinds_of_events_in_the_session_log() {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let client = FakeChatClient::new();
+        // A clean write, then `dbg!` twice: the second rejection is a boundary.
+        client.push_chat(Ok(write_main(
+            "clean",
+            "fn main() {\n    println!(\"1\");\n}\n",
+        )));
+        client.push_chat(Ok(write_main("first", WITH_DBG)));
+        client.push_chat(Ok(write_main("second", WITH_DBG)));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(CargoOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: "Finished".to_owned(),
+        }));
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let log = SessionLog::create(logs.path(), false).unwrap();
+        let path = log.path().unwrap().to_owned();
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_log(log);
+        let mut ui = ScriptedUi::new([input("debug 1"), input("/abort"), input("/quit")]);
+
+        assert_eq!(main_line(&mut ui, &mut agent), ExitCode::SUCCESS);
+
+        let events: Vec<Value> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        let kinds: Vec<&str> = events
+            .iter()
+            .map(|event| event["event"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            [
+                "tool_call",
+                "tool_call",
+                "detected",
+                "rejected",
+                "tool_call",
+                "detected",
+                "rejected",
+                "cargo_check",
+            ]
+        );
+        assert_eq!(events[0]["name"], "write_file");
+        assert_eq!(events[2]["path"], "src/main.rs");
+        assert_eq!(
+            events[2]["items"],
+            json!([{ "line": 2, "item": "dbg_macro", "category": "macros", "text": "dbg!" }])
+        );
+        assert_eq!(events[3]["items"], json!(["dbg_macro"]));
+        assert_eq!(events[3]["content"], WITH_DBG);
+        assert_eq!(events[3]["boundary"], false);
+        assert_eq!(events[6]["boundary"], true);
+        assert_eq!(events[7]["status"], "passed");
+        assert!(
+            events.iter().all(|event| event.get("line").is_none()),
+            "main-line events carry no `line`"
+        );
+    }
+
+    #[test]
+    fn the_cargo_check_at_the_end_of_a_turn_is_in_the_session_log_with_its_errors() {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("write", "fn main() {}\n")));
+        client.push_chat(Err(crate::llm::ChatError::FakeExhausted));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(CargoOutput {
+            success: false,
+            stdout: String::new(),
+            stderr: "error[E0425]".to_owned(),
+        }));
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let log = SessionLog::create(logs.path(), false).unwrap();
+        let path = log.path().unwrap().to_owned();
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_log(log);
+        let mut ui = ScriptedUi::new([input("write main"), input("/quit")]);
+
+        main_line(&mut ui, &mut agent);
+
+        let text = fs::read_to_string(&path).unwrap();
+        let last: Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        assert_eq!(last["event"], "cargo_check");
+        assert_eq!(last["status"], "failed");
+        assert_eq!(last["stderr"], "error[E0425]");
+    }
+
+    #[test]
+    fn a_session_log_that_cannot_be_written_is_shown_once_and_the_main_line_goes_on() {
+        let dir = project();
+        let logs = tempfile::tempdir().unwrap();
+        let path = logs.path().join("read-only.jsonl");
+        fs::write(&path, "").unwrap();
+        let client = FakeChatClient::new();
+        let read = |id: &str| ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: "read_file".to_owned(),
+                arguments: r#"{"path": "Cargo.toml"}"#.to_owned(),
+            }],
+        };
+        client.push_chat(Ok(read("first")));
+        client.push_chat(Ok(super::tests::reply("one")));
+        client.push_chat(Ok(read("second")));
+        client.push_chat(Ok(super::tests::reply("two")));
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_log(SessionLog::unwritable(&path));
+        let mut ui = ScriptedUi::new([input("first"), input("second"), input("/quit")]);
+
+        assert_eq!(main_line(&mut ui, &mut agent), ExitCode::SUCCESS);
+
+        let warning = format!("Could not write the session log {}: ", path.display());
+        let shown = ui.shown();
+        assert_eq!(shown.len(), 3, "{shown:?}");
+        assert_eq!(shown[0], "one");
+        assert!(shown[1].starts_with(&warning), "{shown:?}");
+        assert_eq!(shown[2], "two");
     }
 }

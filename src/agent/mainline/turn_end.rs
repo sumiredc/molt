@@ -7,7 +7,7 @@ use serde_json::json;
 
 use super::{
     AddOutcome, COMPILE_FIX_BUDGET, Change, CrateAdd, MANIFEST, MainLine, Progress, Turn, TurnEnd,
-    Withdrawal,
+    Withdrawal, check_event,
 };
 use crate::agent::prompts;
 use crate::agent::tools::{Approver, ToolError};
@@ -40,6 +40,7 @@ impl MainLine<'_> {
         };
         self.update_changes(&mut turn.changes, progress.manifest_before.as_deref());
         let check = self.tools.cargo_check();
+        self.log.record(&check_event(&check));
         let failed = match &check {
             Ok(output) if !output.success => Some(prompts::check_failed(
                 &output.stdout,
@@ -105,9 +106,11 @@ impl MainLine<'_> {
             };
         }
         self.update_changes(&mut held.changes, held.manifest_before.as_deref());
+        let check = self.tools.cargo_check();
+        self.log.record(&check_event(&check));
         Withdrawal {
             changes: held.changes,
-            check: Some(self.tools.cargo_check()),
+            check: Some(check),
         }
     }
 
