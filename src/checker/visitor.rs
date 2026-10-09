@@ -1,8 +1,13 @@
 //! Parses content with syn and finds the syntax elements in it.
 //!
-//! Detected so far: the `macros` category, plus the elements whose syntax is
-//! a macro invocation or a `derive` (`panic`, `inline_asm`, `derive`), since
-//! telling them apart from `macro_call` and `custom_derive` happens here.
+//! Every element is detected here, from syntax alone: syn has no types and no
+//! name resolution, so elements told by a name (`Arc`, `.map(..)`) are
+//! decided by the rules in `names`.
+//!
+//! An element built from other elements is reported together with them, one
+//! finding per element (PRD §11): `&[u8]` is both `shared_ref` and `slice`.
+
+mod names;
 
 use std::mem;
 
@@ -11,11 +16,23 @@ use syn::parse::ParseStream;
 use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
-use syn::{Attribute, ItemEnum, ItemMacro, ItemStruct, ItemUnion, Macro, Meta, Path, Token};
+use syn::{
+    AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
+    Expr, ExprAsync, ExprAwait, ExprBreak, ExprCall, ExprClosure, ExprContinue, ExprForLoop,
+    ExprIndex, ExprMethodCall, ExprRange, ExprRawAddr, ExprReference, ExprTry, ExprUnary,
+    ExprUnsafe, ForeignItemStatic, GenericArgument, Generics, ImplItem, ImplItemConst,
+    ImplItemType, Item, ItemEnum, ItemForeignMod, ItemImpl, ItemMacro, ItemStatic, ItemStruct,
+    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
+    PatIdent, PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
+    ReceiverKind, Safety, Signature, StaticMutability, Token, TraitItem, TraitItemConst,
+    TraitItemType, Type, TypeFnPtr, TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypePtr,
+    TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
+};
 
 use crate::checker::finding::{Finding, ParseError};
 use crate::profile::element::Element;
 use crate::profile::status::ItemKey;
+use names::PathUse;
 
 /// Every element in `source`, base elements included, in line order.
 ///
@@ -23,7 +40,13 @@ use crate::profile::status::ItemKey;
 /// arguments are not a list of paths, is a `ParseError`.
 pub fn detect(source: &str) -> Result<Vec<Finding>, ParseError> {
     let file = syn::parse_file(source).map_err(|error| to_parse_error(source, &error))?;
-    let mut detector = Detector::default();
+    let mut imports = Imports::default();
+    imports.visit_file(&file);
+    let mut detector = Detector {
+        source,
+        imports,
+        ..Detector::default()
+    };
     detector.visit_file(&file);
     if let Some(error) = detector.error {
         return Err(to_parse_error(source, &error));
@@ -56,7 +79,8 @@ fn to_parse_error(source: &str, error: &syn::Error) -> ParseError {
 }
 
 #[derive(Default)]
-struct Detector {
+struct Detector<'s> {
+    source: &'s str,
     findings: Vec<Finding>,
     /// The first error met while visiting; the whole content is then a
     /// `ParseError`.
@@ -65,9 +89,57 @@ struct Detector {
     /// (`#[serde(..)]`) rather than an attribute macro: on fields and variants,
     /// where attribute macros cannot go, and on a type with a custom derive.
     helpers_allowed: bool,
+    /// The type parameters in scope, so that `T::Item` reads as an associated
+    /// type rather than a path into a module `T`.
+    type_params: Vec<String>,
+    /// What a trait in the bound list being visited is.
+    bound_role: BoundRole,
+    /// Whether the functions being visited are items of a trait or of a trait
+    /// impl, where `async fn` is `async_fn_in_trait`.
+    in_trait: bool,
+    /// The `use` items of the whole file.
+    imports: Imports,
+    /// How the path about to be visited is used, when its parent knows: the
+    /// function of a call, or the path of a macro.
+    path_use: Option<(*const Path, PathUse)>,
 }
 
-impl Detector {
+/// What a trait in a list of bounds stands for: a bound (`T: Trait`), a
+/// supertrait (`trait A: B`), or a part of `impl Trait` / `dyn Trait`, which
+/// are elements of their own.
+#[derive(Default, Clone, Copy)]
+enum BoundRole {
+    #[default]
+    Bound,
+    Supertrait,
+    Plain,
+}
+
+impl Detector<'_> {
+    /// Reports `element` at `span`, with the source `span` covers as the text.
+    fn mark(&mut self, span: Span, element: Element) {
+        let text = self.snippet(span);
+        self.push(span, element, text);
+    }
+
+    /// The source `span` covers, cut after its first line.
+    fn snippet(&self, span: Span) -> String {
+        self.text(span.byte_range())
+    }
+
+    fn text(&self, range: std::ops::Range<usize>) -> String {
+        let text = self.source.get(range).unwrap_or("").trim();
+        match text.split_once('\n') {
+            Some((first, _)) => format!("{} ..", first.trim_end()),
+            None => text.to_owned(),
+        }
+    }
+
+    /// Reports `element` on the line where `span` starts. `span` is the token
+    /// that makes the element (`?`, a method name, `async`, `impl`), not the
+    /// expression around it: `check_file` reports a finding only when its line
+    /// changed, so a `?` added to the third line of an existing chain must be
+    /// on that line.
     fn push(&mut self, span: Span, element: Element, text: String) {
         self.findings.push(Finding {
             line: span.start().line,
@@ -130,6 +202,49 @@ impl Detector {
         self.push(meta.span(), Element::AttributeMacro, path_text(path));
     }
 
+    /// Reports `element` on the line of `token`, with the source from `token`
+    /// to the end of `node` as the text, so that attributes before an item are
+    /// left out.
+    fn mark_from(&mut self, token: Span, node: Span, element: Element) {
+        let start = token.byte_range().start;
+        let end = node.byte_range().end.max(token.byte_range().end);
+        let text = self.text(start..end);
+        self.push(token, element, text);
+    }
+
+    /// `type Item = ..;` in an impl or `type Item;` in a trait. With
+    /// parameters of its own (`type Item<'a>`) it is also generic.
+    fn associated_type(&mut self, token: Span, node: Span, generics: &Generics) {
+        self.mark_from(token, node, Element::AssociatedType);
+        if !generics.params.is_empty() {
+            self.mark_from(token, node, Element::GenericAssociatedType);
+        }
+    }
+
+    /// A lifetime as a bound (`T: 'a`, `'a: 'b`): `lifetime_bound`, and
+    /// `static_lifetime` too for `'static`.
+    fn lifetime_bound(&mut self, lifetime: &Lifetime) {
+        self.mark(lifetime.span(), Element::LifetimeBound);
+        if lifetime.ident == "static" {
+            self.mark(lifetime.span(), Element::StaticLifetime);
+        }
+    }
+
+    fn with_bound_role(&mut self, role: BoundRole, visit: impl FnOnce(&mut Self)) {
+        let outer = mem::replace(&mut self.bound_role, role);
+        visit(self);
+        self.bound_role = outer;
+    }
+
+    /// Visits an item, and forgets the type parameters it declared after it.
+    fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
+        let outer = self.type_params.len();
+        let in_trait = self.in_trait;
+        visit(self);
+        self.type_params.truncate(outer);
+        self.in_trait = in_trait;
+    }
+
     fn with_helpers_allowed(&mut self, allowed: bool, visit: impl FnOnce(&mut Self)) {
         let outer = mem::replace(&mut self.helpers_allowed, allowed);
         visit(self);
@@ -137,7 +252,7 @@ impl Detector {
     }
 }
 
-impl<'ast> Visit<'ast> for Detector {
+impl<'ast> Visit<'ast> for Detector<'_> {
     fn visit_macro(&mut self, mac: &'ast Macro) {
         let element = std_name(&mac.path)
             .and_then(|name| std_macro(&name))
@@ -147,6 +262,7 @@ impl<'ast> Visit<'ast> for Detector {
             element,
             format!("{}!", path_text(&mac.path)),
         );
+        self.path_use = Some((&mac.path as *const Path, PathUse::NotACall));
         visit::visit_macro(self, mac);
     }
 
@@ -171,6 +287,7 @@ impl<'ast> Visit<'ast> for Detector {
 
     fn visit_attribute(&mut self, attr: &'ast Attribute) {
         self.attribute(attr);
+        self.path_use = Some((attr.path() as *const Path, PathUse::NotACall));
         visit::visit_attribute(self, attr);
     }
 
@@ -185,6 +302,7 @@ impl<'ast> Visit<'ast> for Detector {
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        self.mark_from(item.union_token.span(), item.span(), Element::Union);
         let allowed = has_custom_derive(&item.attrs);
         self.with_helpers_allowed(allowed, |v| visit::visit_item_union(v, item));
     }
@@ -195,6 +313,657 @@ impl<'ast> Visit<'ast> for Detector {
 
     fn visit_variant(&mut self, variant: &'ast syn::Variant) {
         self.with_helpers_allowed(true, |v| visit::visit_variant(v, variant));
+    }
+
+    // borrowing
+
+    fn visit_type_reference(&mut self, ty: &'ast TypeReference) {
+        self.mark(ty.span(), reference(ty.mutability.is_some()));
+        visit::visit_type_reference(self, ty);
+    }
+
+    fn visit_expr_reference(&mut self, expr: &'ast ExprReference) {
+        self.mark(expr.span(), reference(expr.mutability.is_some()));
+        visit::visit_expr_reference(self, expr);
+    }
+
+    fn visit_pat_reference(&mut self, pat: &'ast PatReference) {
+        self.mark(pat.span(), reference(pat.mutability.is_some()));
+        visit::visit_pat_reference(self, pat);
+    }
+
+    fn visit_receiver(&mut self, receiver: &'ast Receiver) {
+        if let ReceiverKind::Reference(_, _, mutability) = &receiver.kind {
+            self.mark(receiver.span(), reference(mutability.is_some()));
+        }
+        visit::visit_receiver(self, receiver);
+    }
+
+    fn visit_expr_unary(&mut self, expr: &'ast ExprUnary) {
+        if let UnOp::Deref(_) = expr.op {
+            self.mark(expr.span(), Element::Deref);
+        }
+        visit::visit_expr_unary(self, expr);
+    }
+
+    fn visit_pat_ident(&mut self, pat: &'ast PatIdent) {
+        if pat.by_ref.is_some() {
+            self.mark(pat.span(), Element::RefPattern);
+        }
+        // syn reads `None` in a pattern as a binding named `None`.
+        if pat.ident == "None" && pat.by_ref.is_none() && pat.subpat.is_none() {
+            self.mark(pat.span(), Element::Option);
+        }
+        visit::visit_pat_ident(self, pat);
+    }
+
+    // error_handling
+
+    fn visit_expr_try(&mut self, expr: &'ast ExprTry) {
+        self.push(
+            expr.question_token.span(),
+            Element::QuestionMark,
+            "?".to_owned(),
+        );
+        visit::visit_expr_try(self, expr);
+    }
+
+    fn visit_type_slice(&mut self, ty: &'ast TypeSlice) {
+        self.mark(ty.span(), Element::Slice);
+        visit::visit_type_slice(self, ty);
+    }
+
+    fn visit_expr_index(&mut self, expr: &'ast ExprIndex) {
+        if let Expr::Range(_) = &*expr.index {
+            // On the line of `[`: the indexed expression may start lines above.
+            let text = self.snippet(expr.span());
+            self.push(expr.bracket_token.span.open(), Element::Slice, text);
+        }
+        visit::visit_expr_index(self, expr);
+    }
+
+    // traits_generics
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        self.scoped(|v| {
+            // A trait or a trait impl sets it again for its own items.
+            v.in_trait = false;
+            visit::visit_item(v, item)
+        });
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        self.scoped(|v| visit::visit_impl_item(v, item));
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
+        self.scoped(|v| visit::visit_trait_item(v, item));
+    }
+
+    fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
+        self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        if let Some(unsafety) = &item.unsafety {
+            self.mark_from(unsafety.span(), item.span(), Element::UnsafeTrait);
+        }
+        self.in_trait = true;
+        self.with_bound_role(BoundRole::Supertrait, |v| visit::visit_item_trait(v, item));
+    }
+
+    fn visit_item_trait_alias(&mut self, item: &'ast ItemTraitAlias) {
+        self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_item_trait_alias(v, item));
+    }
+
+    fn visit_item_impl(&mut self, item: &'ast ItemImpl) {
+        if let Some((path, _)) = &item.trait_ {
+            self.mark_from(item.impl_token.span(), item.span(), Element::TraitImpl);
+            let name = path.segments.last().map(|s| s.ident.to_string());
+            if let Some(element) = name.as_deref().and_then(implemented_trait) {
+                self.mark_from(item.impl_token.span(), item.span(), element);
+            }
+        }
+        if let Some(unsafety) = &item.unsafety {
+            self.mark_from(unsafety.span(), item.span(), Element::UnsafeTrait);
+        }
+        self.in_trait = item.trait_.is_some();
+        visit::visit_item_impl(self, item);
+    }
+
+    fn visit_type_param(&mut self, param: &'ast TypeParam) {
+        self.type_params.push(param.ident.to_string());
+        self.mark(param.span(), Element::GenericParam);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_type_param(v, param));
+    }
+
+    fn visit_const_param(&mut self, param: &'ast ConstParam) {
+        self.mark_from(
+            param.const_token.span(),
+            param.span(),
+            Element::ConstGeneric,
+        );
+        visit::visit_const_param(self, param);
+    }
+
+    fn visit_where_clause(&mut self, clause: &'ast WhereClause) {
+        if !clause.predicates.is_empty() {
+            self.mark_from(
+                clause.where_token.span(),
+                clause.span(),
+                Element::WhereClause,
+            );
+        }
+        visit::visit_where_clause(self, clause);
+    }
+
+    fn visit_predicate_type(&mut self, predicate: &'ast PredicateType) {
+        self.with_bound_role(BoundRole::Bound, |v| {
+            visit::visit_predicate_type(v, predicate)
+        });
+    }
+
+    fn visit_type_param_bound(&mut self, bound: &'ast TypeParamBound) {
+        match bound {
+            TypeParamBound::Trait(trait_bound) => match self.bound_role {
+                BoundRole::Bound => self.mark(trait_bound.span(), Element::TraitBound),
+                BoundRole::Supertrait => self.mark(trait_bound.span(), Element::Supertrait),
+                BoundRole::Plain => {}
+            },
+            // `T: 'a`, `impl Trait + 'a`: a bound, not a lifetime on a type.
+            TypeParamBound::Lifetime(lifetime) => {
+                self.lifetime_bound(lifetime);
+                return;
+            }
+            _ => {}
+        }
+        visit::visit_type_param_bound(self, bound);
+    }
+
+    fn visit_type_impl_trait(&mut self, ty: &'ast TypeImplTrait) {
+        self.mark(ty.span(), Element::ImplTrait);
+        self.with_bound_role(BoundRole::Plain, |v| visit::visit_type_impl_trait(v, ty));
+    }
+
+    fn visit_type_trait_object(&mut self, ty: &'ast TypeTraitObject) {
+        self.mark(ty.span(), Element::DynTrait);
+        self.with_bound_role(BoundRole::Plain, |v| visit::visit_type_trait_object(v, ty));
+    }
+
+    fn visit_trait_item_type(&mut self, item: &'ast TraitItemType) {
+        self.associated_type(item.type_token.span(), item.span(), &item.generics);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_trait_item_type(v, item));
+    }
+
+    fn visit_impl_item_type(&mut self, item: &'ast ImplItemType) {
+        self.associated_type(item.type_token.span(), item.span(), &item.generics);
+        visit::visit_impl_item_type(self, item);
+    }
+
+    fn visit_assoc_type(&mut self, assoc: &'ast AssocType) {
+        self.mark(assoc.span(), Element::AssociatedType);
+        visit::visit_assoc_type(self, assoc);
+    }
+
+    fn visit_constraint(&mut self, constraint: &'ast Constraint) {
+        self.mark(constraint.span(), Element::AssociatedType);
+        self.with_bound_role(BoundRole::Bound, |v| visit::visit_constraint(v, constraint));
+    }
+
+    fn visit_type_path(&mut self, ty: &'ast TypePath) {
+        // `Self::Item`, `T::Item` and `<T as Trait>::Item` in a type are
+        // associated types. A path into a module (`io::Error`) is not.
+        let first = ty.path.segments.first().map(|s| s.ident.to_string());
+        let from_param = ty.path.segments.len() > 1
+            && first.is_some_and(|first| first == "Self" || self.type_params.contains(&first));
+        if ty.qself.is_some() || from_param {
+            self.mark(ty.span(), Element::AssociatedType);
+        }
+        if let Some(error) = box_dyn_error(ty) {
+            // On the line of `Error`, which may be below `Box<`.
+            let text = self.snippet(ty.span());
+            self.push(error, Element::BoxDynError, text);
+        }
+        visit::visit_type_path(self, ty);
+    }
+
+    fn visit_qself(&mut self, qself: &'ast QSelf) {
+        self.mark(qself.span(), Element::QualifiedPath);
+        visit::visit_qself(self, qself);
+    }
+
+    fn visit_angle_bracketed_generic_arguments(
+        &mut self,
+        args: &'ast AngleBracketedGenericArguments,
+    ) {
+        if let Some(colon2) = &args.colon2_token {
+            self.mark_from(colon2.span(), args.span(), Element::Turbofish);
+        }
+        visit::visit_angle_bracketed_generic_arguments(self, args);
+    }
+
+    fn visit_impl_item_const(&mut self, item: &'ast ImplItemConst) {
+        self.mark_from(
+            item.const_token.span(),
+            item.span(),
+            Element::AssociatedConst,
+        );
+        visit::visit_impl_item_const(self, item);
+    }
+
+    fn visit_trait_item_const(&mut self, item: &'ast TraitItemConst) {
+        self.mark_from(
+            item.const_token.span(),
+            item.span(),
+            Element::AssociatedConst,
+        );
+        visit::visit_trait_item_const(self, item);
+    }
+
+    // lifetimes
+
+    fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
+        let element = match lifetime.ident.to_string().as_str() {
+            "static" => Element::StaticLifetime,
+            "_" => Element::AnonymousLifetime,
+            _ => Element::LifetimeAnnotation,
+        };
+        self.mark(lifetime.span(), element);
+    }
+
+    fn visit_lifetime_param(&mut self, param: &'ast LifetimeParam) {
+        for attr in &param.attrs {
+            self.visit_attribute(attr);
+        }
+        self.mark(param.lifetime.span(), Element::LifetimeParam);
+        for bound in &param.bounds {
+            self.lifetime_bound(bound);
+        }
+    }
+
+    fn visit_predicate_lifetime(&mut self, predicate: &'ast PredicateLifetime) {
+        for bound in &predicate.bounds {
+            self.lifetime_bound(bound);
+        }
+    }
+
+    fn visit_bound_lifetimes(&mut self, lifetimes: &'ast BoundLifetimes) {
+        // The lifetimes `for<'a>` declares are part of this element, not
+        // parameters of an item.
+        self.mark(lifetimes.span(), Element::HigherRankedBound);
+    }
+
+    // A label (`'outer: loop`, `break 'outer`) is written like a lifetime
+    // but is not one.
+
+    fn visit_label(&mut self, _label: &'ast Label) {}
+
+    fn visit_expr_break(&mut self, expr: &'ast ExprBreak) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(value) = &expr.expr {
+            self.visit_expr(value);
+        }
+    }
+
+    fn visit_expr_continue(&mut self, expr: &'ast ExprContinue) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
+    }
+
+    // iterators_closures
+
+    fn visit_expr_for_loop(&mut self, expr: &'ast ExprForLoop) {
+        self.mark_from(expr.for_token.span(), expr.span(), Element::ForLoop);
+        visit::visit_expr_for_loop(self, expr);
+    }
+
+    fn visit_expr_range(&mut self, expr: &'ast ExprRange) {
+        // On the line of `..`: in a pattern or an expression the start may be
+        // lines above.
+        let text = self.snippet(expr.span());
+        self.push(expr.limits.span(), Element::Range, text);
+        visit::visit_expr_range(self, expr);
+    }
+
+    fn visit_expr_closure(&mut self, expr: &'ast ExprClosure) {
+        let head = expr
+            .asyncness
+            .map(|t| t.span())
+            .or(expr.capture.map(|t| t.span()))
+            .unwrap_or(expr.inputs_begin.span());
+        self.mark_from(head, expr.span(), Element::Closure);
+        if let Some(capture) = &expr.capture {
+            self.mark_from(capture.span(), expr.span(), Element::MoveClosure);
+        }
+        if let Some(asyncness) = &expr.asyncness {
+            self.mark_from(asyncness.span(), expr.span(), Element::AsyncClosure);
+        }
+        visit::visit_expr_closure(self, expr);
+    }
+
+    fn visit_type_fn_ptr(&mut self, ty: &'ast TypeFnPtr) {
+        self.mark_from(ty.fn_token.span(), ty.span(), Element::FnPointer);
+        if let Some(unsafety) = &ty.unsafety {
+            self.mark_from(unsafety.span(), ty.span(), Element::UnsafeFn);
+        }
+        if let Some(abi) = &ty.abi {
+            self.mark_from(abi.extern_token.span(), ty.span(), Element::Extern);
+        }
+        visit::visit_type_fn_ptr(self, ty);
+    }
+
+    // async (and the parts of a signature that belong to unsafe)
+
+    fn visit_signature(&mut self, sig: &'ast Signature) {
+        if let Some(asyncness) = &sig.asyncness {
+            self.mark_from(asyncness.span(), sig.span(), Element::AsyncFn);
+            if self.in_trait {
+                self.mark_from(asyncness.span(), sig.span(), Element::AsyncFnInTrait);
+            }
+        }
+        if let Safety::Unsafe(unsafety) = &sig.safety {
+            self.mark_from(unsafety.span(), sig.span(), Element::UnsafeFn);
+        }
+        if let Some(abi) = &sig.abi {
+            self.mark_from(abi.extern_token.span(), sig.span(), Element::Extern);
+        }
+        visit::visit_signature(self, sig);
+    }
+
+    // unsafe
+
+    fn visit_expr_unsafe(&mut self, expr: &'ast ExprUnsafe) {
+        self.mark_from(expr.unsafe_token.span(), expr.span(), Element::UnsafeBlock);
+        visit::visit_expr_unsafe(self, expr);
+    }
+
+    fn visit_type_ptr(&mut self, ty: &'ast TypePtr) {
+        self.mark(ty.span(), Element::RawPointer);
+        visit::visit_type_ptr(self, ty);
+    }
+
+    fn visit_expr_raw_addr(&mut self, expr: &'ast ExprRawAddr) {
+        self.mark(expr.span(), Element::RawPointer);
+        visit::visit_expr_raw_addr(self, expr);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast ItemStatic) {
+        if let StaticMutability::Mut(_) = item.mutability {
+            self.mark_from(item.static_token.span(), item.span(), Element::StaticMut);
+        }
+        visit::visit_item_static(self, item);
+    }
+
+    fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
+        if let StaticMutability::Mut(_) = item.mutability {
+            self.mark_from(item.static_token.span(), item.span(), Element::StaticMut);
+        }
+        visit::visit_foreign_item_static(self, item);
+    }
+
+    fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
+        self.mark_from(item.abi.extern_token.span(), item.span(), Element::Extern);
+        visit::visit_item_foreign_mod(self, item);
+    }
+
+    fn visit_expr_await(&mut self, expr: &'ast ExprAwait) {
+        self.push(expr.await_token.span(), Element::Await, ".await".to_owned());
+        visit::visit_expr_await(self, expr);
+    }
+
+    fn visit_expr_async(&mut self, expr: &'ast ExprAsync) {
+        self.mark_from(expr.async_token.span(), expr.span(), Element::AsyncBlock);
+        visit::visit_expr_async(self, expr);
+    }
+
+    // Names: paths, imports and method calls
+
+    fn visit_path(&mut self, path: &'ast Path) {
+        let usage = match self.path_use {
+            Some((marked, usage)) if std::ptr::eq(marked, path) => usage,
+            _ => PathUse::Other,
+        };
+        let spans: Vec<Span> = path.segments.iter().map(|s| s.ident.span()).collect();
+        let own: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let text = path_text(path);
+        for (element, span) in self.imports.elements(path, &own, &spans, usage) {
+            self.push(span, element, text.clone());
+        }
+        visit::visit_path(self, path);
+    }
+
+    fn visit_expr_call(&mut self, call: &'ast ExprCall) {
+        if let Expr::Path(func) = &*call.func {
+            let usage = PathUse::Call(call.args.len());
+            self.path_use = Some((&func.path as *const Path, usage));
+        }
+        visit::visit_expr_call(self, call);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut imports = Vec::new();
+        imported_paths(&item.tree, &mut Vec::new(), &mut imports);
+        for import in imports {
+            let segments: Vec<&str> = import.segments.iter().map(String::as_str).collect();
+            for (element, _) in names::path_elements(&segments, PathUse::NotACall) {
+                self.push(import.span, element, import.text());
+            }
+        }
+        visit::visit_item_use(self, item);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        let name = call.method.to_string();
+        let text = if call.args.is_empty() {
+            format!(".{name}()")
+        } else {
+            format!(".{name}(..)")
+        };
+        let receiver = names::receiver_kind(&call.receiver);
+        for element in names::method_elements(&name, call.args.len(), receiver) {
+            self.push(call.method.span(), element, text.clone());
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// One path a `use` tree imports.
+struct ImportedPath {
+    /// The full path (`["std", "mem", "take"]`); for a glob, its prefix.
+    segments: Vec<String>,
+    /// The name it is used by in the file (`take`, or the `as` name). `None`
+    /// for a glob.
+    name: Option<String>,
+    /// The last name, or the `*` of a glob.
+    span: Span,
+}
+
+impl ImportedPath {
+    fn text(&self) -> String {
+        let path = self.segments.join("::");
+        match &self.name {
+            None => format!("{path}::*"),
+            Some(name) if self.segments.last() != Some(name) => format!("{path} as {name}"),
+            Some(_) => path,
+        }
+    }
+}
+
+/// Every path a `use` tree imports. `self` in a group stands for the path
+/// before it.
+fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<ImportedPath>) {
+    let mut leaf = |prefix: &[String], ident: &syn::Ident, name: &syn::Ident| {
+        let mut segments = prefix.to_vec();
+        if ident != "self" {
+            segments.push(ident.to_string());
+        }
+        let name = if name == "self" {
+            segments.last().cloned()
+        } else {
+            Some(name.to_string())
+        };
+        out.push(ImportedPath {
+            segments,
+            name,
+            span: ident.span(),
+        });
+    };
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            imported_paths(&path.tree, prefix, out);
+            prefix.pop();
+        }
+        UseTree::Name(name) => leaf(prefix, &name.ident, &name.ident),
+        UseTree::Rename(rename) => leaf(prefix, &rename.ident, &rename.rename),
+        UseTree::Glob(glob) => out.push(ImportedPath {
+            segments: prefix.clone(),
+            name: None,
+            span: glob.star_token.span(),
+        }),
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                imported_paths(tree, prefix, out);
+            }
+        }
+    }
+}
+
+/// What the `use` items anywhere in the file bring in, so that a name used
+/// on a later line (`take(v)` after `use std::mem::take;`) is reported on
+/// that line, not only at the import. Scopes are not tracked: an import in
+/// one module counts for the whole file, which reports more, not less.
+#[derive(Default)]
+struct Imports {
+    /// The name in the file and the path it stands for.
+    names: Vec<(String, Vec<String>)>,
+    /// The prefixes of glob imports.
+    globs: Vec<Vec<String>>,
+}
+
+impl<'ast> Visit<'ast> for Imports {
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut imports = Vec::new();
+        imported_paths(&item.tree, &mut Vec::new(), &mut imports);
+        for import in imports {
+            match import.name {
+                Some(name) => self.names.push((name, import.segments)),
+                None => self.globs.push(import.segments),
+            }
+        }
+    }
+}
+
+impl Imports {
+    /// The elements `path` (its segment names `own`, their spans `spans`)
+    /// names, reading its first segment through the imports. Each is on the
+    /// span of the segment that decides it.
+    fn elements(
+        &self,
+        path: &Path,
+        own: &[String],
+        spans: &[Span],
+        usage: PathUse,
+    ) -> Vec<(Element, Span)> {
+        let mut found: Vec<(Element, Span)> = Vec::new();
+        let mut add = |element: Element, span: Span| {
+            if !found.iter().any(|&(e, _)| e == element) {
+                found.push((element, span));
+            }
+        };
+
+        // The path as written.
+        for (element, index) in names::path_elements(&as_str(own), usage) {
+            add(element, spans[index]);
+        }
+        if path.leading_colon.is_some() || own.is_empty() {
+            return found;
+        }
+        // The first segment as an imported name: `Shared::new` after
+        // `use std::sync::Arc as Shared;`. The imported part is on the span
+        // of the first segment.
+        for (name, target) in &self.names {
+            if *name != own[0] {
+                continue;
+            }
+            let mut full = target.clone();
+            full.extend(own[1..].iter().cloned());
+            for (element, index) in names::path_elements(&as_str(&full), usage) {
+                let index = (index + 1).saturating_sub(target.len());
+                add(element, spans[index]);
+            }
+        }
+        // Behind a glob: `take(v)` after `use std::mem::*;`. What the prefix
+        // names by itself is reported at the import, not on every path.
+        for prefix in &self.globs {
+            let mut full = prefix.clone();
+            full.extend(own.iter().cloned());
+            let of_prefix = names::path_elements(&as_str(prefix), PathUse::NotACall);
+            for (element, index) in names::path_elements(&as_str(&full), usage) {
+                if index >= prefix.len() && !of_prefix.iter().any(|&(e, _)| e == element) {
+                    add(element, spans[index - prefix.len()]);
+                }
+            }
+            if let Some((element, exported)) = prefix.last().and_then(|m| names::glob_exports(m))
+                && exported.contains(&own[0].as_str())
+            {
+                add(element, spans[0]);
+            }
+        }
+        found
+    }
+}
+
+fn as_str(segments: &[String]) -> Vec<&str> {
+    segments.iter().map(String::as_str).collect()
+}
+
+/// `Box<dyn Error>`, also with more bounds (`Box<dyn Error + Send + Sync>`)
+/// or a path to the trait (`Box<dyn std::error::Error>`): the span of `Error`.
+fn box_dyn_error(ty: &TypePath) -> Option<Span> {
+    let last = ty.path.segments.last()?;
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return None;
+    };
+    if last.ident != "Box" {
+        return None;
+    }
+    args.args.iter().find_map(|arg| {
+        let GenericArgument::Type(Type::TraitObject(object)) = arg else {
+            return None;
+        };
+        object.bounds.iter().find_map(|bound| match bound {
+            TypeParamBound::Trait(t) => t
+                .path
+                .segments
+                .last()
+                .filter(|s| s.ident == "Error")
+                .map(|s| s.ident.span()),
+            _ => None,
+        })
+    })
+}
+
+/// The element of implementing a trait, by the trait's last name, besides
+/// `trait_impl`.
+fn implemented_trait(name: &str) -> Option<Element> {
+    let element = match name {
+        "Deref" | "DerefMut" => Element::ImplDeref,
+        "Drop" => Element::ImplDrop,
+        "Error" => Element::ImplError,
+        "Iterator" | "IntoIterator" => Element::ImplIterator,
+        _ => return None,
+    };
+    Some(element)
+}
+
+/// `&` or `&mut`, in a type, an expression, a pattern or a receiver.
+fn reference(mutable: bool) -> Element {
+    if mutable {
+        Element::MutRef
+    } else {
+        Element::SharedRef
     }
 }
 
@@ -428,7 +1197,7 @@ mod tests {
     #[test]
     fn a_std_macro_without_an_element_of_its_own_is_macro_call() {
         assert_eq!(
-            elements("const S: &str = concat!(\"a\", \"b\");\n"),
+            elements("fn f() { concat!(\"a\", \"b\"); }\n"),
             [(1, Element::MacroCall, "concat!".to_owned())]
         );
     }
@@ -508,8 +1277,11 @@ trait T {
 #[doc = my_attr_value!()]
 fn g() {}
 ";
+        // `impl S` and `trait T` are only there to hold the macros; the
+        // `trait_def` it yields is not what this test is about.
         let found: Vec<(usize, String)> = elements(source)
             .into_iter()
+            .filter(|(_, element, _)| *element != Element::TraitDef)
             .map(|(line, element, text)| {
                 assert_eq!(element, Element::MacroCall, "{text}");
                 (line, text)
@@ -560,10 +1332,11 @@ fn g() {}
     #[test]
     fn findings_are_in_line_order_even_where_syn_visits_out_of_order() {
         // syn visits a signature's generics, `where` clause included, before
-        // its return type.
+        // its return type: `where_clause` (3) and `trait_bound` and `bound!`
+        // (4) are visited before `ret!` (2).
         let source = "fn f()\n-> ret!()\nwhere\n    bound!(): Copy,\n{}\n";
         let lines: Vec<usize> = elements(source).into_iter().map(|(l, _, _)| l).collect();
-        assert_eq!(lines, [2, 4]);
+        assert_eq!(lines, [2, 3, 4, 4]);
     }
 
     // Attributes
@@ -592,7 +1365,7 @@ fn g() {}
     #[test]
     fn an_attribute_that_is_not_built_in_is_attribute_macro() {
         assert_eq!(
-            elements("#[tokio::main]\nasync fn main() {}\n\n#[my_attr]\nfn f() {}\n"),
+            elements("#[tokio::main]\nfn main() {}\n\n#[my_attr]\nfn f() {}\n"),
             [
                 (1, Element::AttributeMacro, "tokio::main".to_owned()),
                 (4, Element::AttributeMacro, "my_attr".to_owned()),
@@ -671,7 +1444,7 @@ enum E {
 #[cfg_attr(feature = \"serde\", derive(Debug, Serialize))]
 struct S;
 #[cfg_attr(all(), cfg_attr(test, tokio::main), inline)]
-async fn main() {}
+fn main() {}
 ";
         assert_eq!(
             elements(source),
@@ -717,6 +1490,550 @@ pub fn c(attr: TokenStream, item: TokenStream) -> TokenStream { item }
                 (5, Element::ProcMacroDef, "proc_macro_attribute".to_owned()),
             ]
         );
+    }
+
+    // borrowing
+
+    #[test]
+    fn references_are_shared_ref_or_mut_ref_in_types_expressions_patterns_and_receivers() {
+        let source = "\
+impl S {
+    fn f(&mut self, a: &u8) {
+        let &b = a;
+        g(&mut 1);
+    }
+}
+";
+        assert_eq!(
+            elements(source),
+            [
+                (2, Element::MutRef, "&mut self".to_owned()),
+                (2, Element::SharedRef, "&u8".to_owned()),
+                (3, Element::SharedRef, "&b".to_owned()),
+                (4, Element::MutRef, "&mut 1".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_index_by_a_range_is_slice_and_an_index_by_a_number_is_not() {
+        let found = only("fn f(v: Vec<u8>) -> u8 {\n    v[1..3][0]\n}\n");
+        let slices = found.iter().filter(|&&e| e == Element::Slice).count();
+        assert_eq!(slices, 1);
+    }
+
+    #[test]
+    fn a_finding_on_several_lines_has_its_first_line_as_the_text() {
+        let found = elements("fn f(v: Vec<u8>) -> u8 {\n    *v\n        .first()\n}\n");
+        assert_eq!(found, [(2, Element::Deref, "*v ..".to_owned())]);
+    }
+
+    #[test]
+    fn an_index_by_a_range_is_on_the_line_of_its_bracket() {
+        let found = elements("fn f(v: Vec<u8>) -> usize {\n    v\n        [1..3].len()\n}\n");
+        let lines: Vec<usize> = found
+            .iter()
+            .filter(|(_, e, _)| *e == Element::Slice)
+            .map(|(line, _, _)| *line)
+            .collect();
+        assert_eq!(lines, [3]);
+    }
+
+    // ownership
+
+    #[test]
+    fn a_method_in_a_chain_is_on_the_line_of_its_name() {
+        let source = "fn f(s: String) -> String {\n    s\n        .trim()\n        .to_owned()\n        .clone()\n}\n";
+        assert_eq!(
+            elements(source),
+            [
+                (4, Element::ToOwned, ".to_owned()".to_owned()),
+                (5, Element::Clone, ".clone()".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_called_through_its_path_is_that_element() {
+        let found = only(
+            "fn f(a: A) -> A {\n    Clone::clone(a)\n}\nfn g(s: S) -> S {\n    S::to_owned(s)\n}\n",
+        );
+        assert_eq!(found, [Element::Clone, Element::ToOwned]);
+    }
+
+    #[test]
+    fn drop_is_the_bare_name_or_through_mem_and_not_a_function_of_another_module() {
+        let found = only(
+            "fn f(a: A, b: B, c: C) {\n    drop(a);\n    std::mem::drop(b);\n    pool::drop(c);\n}\n",
+        );
+        assert_eq!(found, [Element::Drop, Element::Drop]);
+    }
+
+    #[test]
+    fn a_function_imported_by_use_is_found_at_the_import() {
+        let source =
+            "use std::mem::{self, replace, swap as exchange};\nuse std::mem::take;\nuse std::*;\n";
+        assert_eq!(
+            elements(source),
+            [
+                (1, Element::MemReplace, "std::mem::replace".to_owned()),
+                (1, Element::MemSwap, "std::mem::swap as exchange".to_owned()),
+                (2, Element::MemTake, "std::mem::take".to_owned()),
+            ]
+        );
+    }
+
+    fn lines_of(source: &str, element: Element) -> Vec<usize> {
+        elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == element)
+            .map(|(line, _, _)| line)
+            .collect()
+    }
+
+    #[test]
+    fn an_imported_name_used_on_a_later_line_is_reported_on_that_line_too() {
+        let source = "\
+use std::mem::take;
+use std::sync::Arc as Shared;
+fn f(v: V) {
+    take(v);
+    Shared::new(1);
+}
+";
+        assert_eq!(lines_of(source, Element::MemTake), [1, 4]);
+        assert_eq!(lines_of(source, Element::Arc), [2, 5]);
+    }
+
+    #[test]
+    fn a_module_imported_under_another_name_is_read_through_its_path() {
+        let source = "use std::sync::mpsc as chan;\nfn f() {\n    chan::channel::<u8>();\n}\n";
+        assert_eq!(lines_of(source, Element::Channel), [1, 3]);
+    }
+
+    #[test]
+    fn a_function_of_a_module_or_of_self_with_a_method_name_is_not_that_method() {
+        let found = only("fn f() {\n    repo::find(1);\n    Self::all(3);\n}\n");
+        assert!(!found.contains(&Element::IteratorConsumer), "{found:?}");
+    }
+
+    #[test]
+    fn a_name_behind_a_glob_import_is_reported_where_it_is_used() {
+        let source = "\
+use std::mem::*;
+use std::sync::mpsc::*;
+fn f(v: V) {
+    take(v);
+    channel::<u8>();
+    String::new();
+}
+";
+        assert_eq!(lines_of(source, Element::MemTake), [4]);
+        assert_eq!(lines_of(source, Element::Channel), [2, 5]);
+        assert_eq!(
+            only("use std::mem::*;\nfn f() {\n    String::new();\n}\n"),
+            []
+        );
+    }
+
+    #[test]
+    fn a_method_called_or_passed_through_its_path_is_that_method_element() {
+        let cases = [
+            ("v.filter_map(Result::ok)", Element::ResultCombinator),
+            ("Option::unwrap(x)", Element::Unwrap),
+            ("Option::expect(x, \"m\")", Element::Expect),
+            ("Vec::iter(&v)", Element::IterMethod),
+            ("Iterator::sum(it)", Element::IteratorConsumer),
+        ];
+        for (expr, element) in cases {
+            let found = only(&format!("fn f() {{\n    {expr};\n}}\n"));
+            assert!(found.contains(&element), "{expr}: {found:?}");
+        }
+    }
+
+    #[test]
+    fn a_function_through_its_path_whose_arguments_do_not_fit_the_method_is_not_it() {
+        // `cmp::max(a, b)` is not the iterator's `max()`; `mem::take(x)` is
+        // not `Iterator::take(n)`.
+        let found = only("fn f() {\n    std::cmp::max(a, b);\n    Option::expect(x);\n}\n");
+        assert!(!found.contains(&Element::IteratorConsumer), "{found:?}");
+        assert!(!found.contains(&Element::Expect), "{found:?}");
+    }
+
+    #[test]
+    fn a_function_with_a_method_name_in_a_macro_or_attribute_path_is_not_a_method() {
+        assert_eq!(
+            only("#[rustfmt::skip]\nfn f() {\n    itertools::chain!();\n}\n"),
+            [Element::MacroCall]
+        );
+    }
+
+    #[test]
+    fn a_function_named_take_outside_mem_is_not_mem_take() {
+        assert_eq!(
+            only("fn f(r: R) {\n    io::take(r);\n    take(r);\n}\n"),
+            []
+        );
+    }
+
+    // traits_generics
+
+    #[test]
+    fn a_trait_in_a_bound_is_trait_bound_but_in_impl_trait_dyn_trait_or_supertraits_is_not() {
+        let source = "\
+fn f<T: Copy>(a: impl Copy, b: &dyn Copy) where T: Clone {}
+trait A: Copy {}
+";
+        let found = only(source);
+        let bounds = found.iter().filter(|&&e| e == Element::TraitBound).count();
+        assert_eq!(bounds, 2, "{found:?}");
+        assert!(found.contains(&Element::Supertrait));
+    }
+
+    #[test]
+    fn a_trait_bound_inside_a_dyn_trait_inside_a_bound_is_a_bound_again() {
+        let found = only(
+            "fn f<T: Into<Box<dyn Fn() + Send>>>() {}\nfn g<U>() where U: Iterator<Item: Copy> {}\n",
+        );
+        let bounds = found.iter().filter(|&&e| e == Element::TraitBound).count();
+        // `T: Into<..>`, `U: Iterator<..>` and `Item: Copy`; not `Fn` or `Send`.
+        assert_eq!(bounds, 3, "{found:?}");
+    }
+
+    #[test]
+    fn a_path_from_a_type_parameter_or_self_in_a_type_is_associated_type() {
+        let source = "\
+fn f<T>(x: T::Item) {}
+fn g(x: T::Item, e: io::Error) {}
+impl S { fn h() -> Self::Output {} }
+";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::AssociatedType)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [1, 3]);
+    }
+
+    #[test]
+    fn a_qualified_path_in_a_type_is_also_associated_type_and_in_an_expression_is_not() {
+        assert_eq!(
+            only("fn f(x: <T as Iterator>::Item) {}\n"),
+            [Element::AssociatedType, Element::QualifiedPath]
+        );
+        assert_eq!(
+            only("fn f() {\n    <u8 as Default>::default();\n}\n"),
+            [Element::QualifiedPath]
+        );
+    }
+
+    #[test]
+    fn generic_arguments_after_double_colon_are_turbofish_and_in_a_type_are_not() {
+        let source =
+            "fn f(v: Vec<u8>) {\n    v.iter()\n        .sum::<u8>();\n    Vec::<u8>::new();\n}\n";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::Turbofish)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [3, 4]);
+    }
+
+    #[test]
+    fn an_item_is_on_the_line_of_its_keyword_after_its_attributes() {
+        let source = "#[doc = \"x\"]\nimpl Copy for S {}\n#[doc = \"y\"]\ntrait T {}\n";
+        assert_eq!(
+            elements(source),
+            [
+                (2, Element::TraitImpl, "impl Copy for S {}".to_owned()),
+                (4, Element::TraitDef, "trait T {}".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_conversion_through_from_or_into_is_from_into() {
+        let found = only("fn f(n: u8) -> u64 {\n    let a = u64::from(n);\n    n.into()\n}\n");
+        assert_eq!(found, [Element::FromInto, Element::FromInto]);
+    }
+
+    // lifetimes
+
+    #[test]
+    fn a_label_is_not_a_lifetime() {
+        let source = "fn f() {\n    'outer: loop {\n        'inner: while true {\n            continue 'outer;\n        }\n        break 'outer;\n    }\n}\n";
+        assert_eq!(only(source), []);
+    }
+
+    #[test]
+    fn a_lifetime_in_a_bound_is_lifetime_bound_and_not_lifetime_annotation() {
+        let source = "fn f<'a, 'b: 'a, T: 'a>() where 'a: 'b {}\n";
+        let found = only(source);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|&&e| e == Element::LifetimeBound)
+                .count(),
+            3,
+            "{found:?}"
+        );
+        assert!(!found.contains(&Element::LifetimeAnnotation), "{found:?}");
+    }
+
+    #[test]
+    fn static_as_a_bound_is_both_lifetime_bound_and_static_lifetime() {
+        let found = only("fn f<T: 'static>(t: T) {}\n");
+        assert!(found.contains(&Element::LifetimeBound), "{found:?}");
+        assert!(found.contains(&Element::StaticLifetime), "{found:?}");
+    }
+
+    #[test]
+    fn a_lifetime_on_a_type_is_annotation_static_or_anonymous_by_its_name() {
+        assert_eq!(
+            only("struct S {\n    a: Foo<'a>,\n    b: Foo<'static>,\n    c: Foo<'_>,\n}\n"),
+            [
+                Element::LifetimeAnnotation,
+                Element::StaticLifetime,
+                Element::AnonymousLifetime,
+            ]
+        );
+    }
+
+    // smart_pointers
+
+    #[test]
+    fn a_smart_pointer_named_anywhere_in_a_path_or_an_import_is_that_element() {
+        let source = "\
+use std::sync::{Arc, Mutex};
+fn f(g: MutexGuard<u8>, a: AtomicUsize) -> Arc<u8> {
+    std::rc::Rc::new(1);
+}
+";
+        assert_eq!(
+            only(source),
+            [
+                Element::Arc,
+                Element::Mutex,
+                Element::Mutex,
+                Element::Atomic,
+                Element::Arc,
+                Element::Rc,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_name_that_only_starts_like_a_smart_pointer_is_not_one() {
+        assert_eq!(only("fn f(a: Boxed, b: Atomic, c: Arcade) {}\n"), []);
+    }
+
+    #[test]
+    fn spawn_and_scope_are_thread_elements_only_through_thread() {
+        let source = "fn f() {\n    thread::spawn(g);\n    std::thread::scope(g);\n    tokio::spawn(g);\n    spawn(g);\n}\n";
+        assert_eq!(only(source), [Element::ThreadSpawn, Element::ThreadScope]);
+    }
+
+    // error_handling
+
+    #[test]
+    fn a_question_mark_in_a_chain_is_on_its_own_line() {
+        let source =
+            "fn f(s: S) -> R {\n    let n = s\n        .first()?\n        .second()?;\n}\n";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::QuestionMark)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [3, 4]);
+    }
+
+    #[test]
+    fn none_in_a_pattern_is_option_and_a_binding_with_another_name_is_not() {
+        let source =
+            "fn f(x: X) {\n    match x {\n        None => {}\n        none => {}\n    }\n}\n";
+        assert_eq!(elements(source), [(3, Element::Option, "None".to_owned())]);
+    }
+
+    #[test]
+    fn expect_with_a_message_is_expect_and_a_method_of_another_arity_is_not() {
+        assert_eq!(
+            only("fn f(x: X) {\n    x.expect(\"msg\");\n    x.expect();\n}\n"),
+            [Element::Expect]
+        );
+    }
+
+    #[test]
+    fn a_box_of_a_dyn_error_with_more_bounds_is_box_dyn_error() {
+        let found = only("fn f() -> Box<dyn std::error::Error + Send + Sync> {}\n");
+        assert!(found.contains(&Element::BoxDynError), "{found:?}");
+        let other = only("fn f() -> Box<dyn Display> {}\n");
+        assert!(!other.contains(&Element::BoxDynError), "{other:?}");
+    }
+
+    // iterators_closures
+
+    fn adapters_and_combinators(source: &str) -> Vec<Element> {
+        only(source)
+            .into_iter()
+            .filter(|e| matches!(e, Element::IteratorAdapter | Element::ResultCombinator))
+            .collect()
+    }
+
+    #[test]
+    fn map_after_an_iterator_is_an_adapter_even_after_other_ambiguous_methods() {
+        let source = "fn f(v: V) {\n    v.iter().filter(p).map(g);\n    (0..3).map(g);\n}\n";
+        assert_eq!(
+            adapters_and_combinators(source),
+            [Element::IteratorAdapter; 3]
+        );
+    }
+
+    #[test]
+    fn map_after_an_option_or_a_result_is_a_combinator() {
+        let source =
+            "fn f(v: V) {\n    v.first().map(g);\n    Some(1).map(g);\n    s.parse().map(g);\n}\n";
+        assert_eq!(
+            adapters_and_combinators(source),
+            [Element::ResultCombinator; 3]
+        );
+    }
+
+    #[test]
+    fn map_on_a_receiver_the_chain_does_not_tell_is_both_adapter_and_combinator() {
+        assert_eq!(
+            adapters_and_combinators("fn f(x: X) {\n    x.map(g);\n}\n"),
+            [Element::IteratorAdapter, Element::ResultCombinator]
+        );
+    }
+
+    #[test]
+    fn take_with_a_count_is_an_adapter_and_max_with_an_argument_is_not_a_consumer() {
+        let source =
+            "fn f(x: X, a: u8) {\n    x.take(2);\n    x.take();\n    a.max(3);\n    x.max();\n}\n";
+        assert_eq!(
+            only(source),
+            [Element::IteratorAdapter, Element::IteratorConsumer]
+        );
+    }
+
+    #[test]
+    fn a_range_is_on_the_line_of_its_dots() {
+        let found = elements("fn f() {\n    let r = start\n        ..end;\n}\n");
+        assert_eq!(found, [(3, Element::Range, "start ..".to_owned())]);
+    }
+
+    #[test]
+    fn a_move_closure_is_both_closure_and_move_closure() {
+        assert_eq!(
+            only("fn f() {\n    let g = move || 1;\n}\n"),
+            [Element::Closure, Element::MoveClosure]
+        );
+    }
+
+    // async
+
+    fn async_fn_lines(source: &str) -> Vec<(usize, Element)> {
+        elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| matches!(e, Element::AsyncFn | Element::AsyncFnInTrait))
+            .map(|(line, e, _)| (line, e))
+            .collect()
+    }
+
+    #[test]
+    fn async_fn_in_a_trait_or_a_trait_impl_is_async_fn_in_trait_and_elsewhere_is_not() {
+        let source = "\
+impl Store for S {
+    async fn load(&self) {
+        async fn inner() {}
+    }
+}
+impl S {
+    async fn save(&self) {}
+}
+";
+        assert_eq!(
+            async_fn_lines(source),
+            [
+                (2, Element::AsyncFn),
+                (2, Element::AsyncFnInTrait),
+                (3, Element::AsyncFn),
+                (7, Element::AsyncFn),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_await_in_a_chain_is_on_the_line_of_await() {
+        let found = elements("async fn f() {\n    fetch()\n        .await;\n}\n");
+        assert_eq!(found[1..], [(3, Element::Await, ".await".to_owned())]);
+    }
+
+    #[test]
+    fn an_async_closure_is_both_async_closure_and_closure() {
+        assert_eq!(
+            only("fn f() {\n    let g = async || 1;\n}\n"),
+            [Element::Closure, Element::AsyncClosure]
+        );
+    }
+
+    // unsafe
+
+    #[test]
+    fn extern_and_unsafe_on_a_function_or_a_function_pointer_are_extern_and_unsafe_fn() {
+        let source =
+            "extern \"C\" fn f() {}\nunsafe fn g() {}\ntype P = unsafe extern \"C\" fn();\n";
+        assert_eq!(
+            only(source),
+            [
+                Element::Extern,
+                Element::UnsafeFn,
+                Element::FnPointer,
+                Element::UnsafeFn,
+                Element::Extern,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_static_is_static_mut_only_when_mutable() {
+        assert_eq!(
+            elements("static A: u8 = 0;\nstatic mut B: u8 = 0;\n"),
+            [(2, Element::StaticMut, "static mut B: u8 = 0;".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_raw_borrow_is_raw_pointer() {
+        assert_eq!(
+            only("fn f(x: u8) {\n    let p = &raw const x;\n}\n"),
+            [Element::RawPointer]
+        );
+    }
+
+    #[test]
+    fn an_unsafe_impl_is_unsafe_trait() {
+        let found = only("unsafe impl Send for S {}\n");
+        assert!(found.contains(&Element::UnsafeTrait), "{found:?}");
+    }
+
+    #[test]
+    fn a_thread_builder_is_thread_spawn() {
+        let found = only("fn f() {\n    std::thread::Builder::new().spawn(g);\n}\n");
+        assert_eq!(found, [Element::ThreadSpawn]);
+    }
+
+    #[test]
+    fn a_fallible_conversion_is_from_into() {
+        let found =
+            only("fn f(n: u64) {\n    let a: u8 = n.try_into();\n    u8::try_from(n);\n}\n");
+        assert_eq!(found, [Element::FromInto, Element::FromInto]);
+    }
+
+    #[test]
+    fn box_dyn_error_is_on_the_line_of_error() {
+        let source = "fn f() -> Box<\n    dyn Error,\n> {}\n";
+        assert_eq!(lines_of(source, Element::BoxDynError), [2]);
     }
 
     #[test]
