@@ -1,0 +1,7 @@
+{
+  "model": "nvidia/Nemotron-3_5-Lightning",
+  "messages": [
+    {"role": "system", "content": "You are molt."},
+    {"role": "user", "content": "Say hello."}
+  ]
+}

@@ -1,0 +1,22 @@
+{
+  "id": "chatcmpl-1",
+  "object": "chat.completion",
+  "model": "nvidia/nemotron-3-super-120b-a12b",
+  "choices": [
+    {
+      "index": 0,
+      "message": {
+        "role": "assistant",
+        "content": null,
+        "tool_calls": [
+          {
+            "id": "call_0",
+            "type": "function",
+            "function": {"name": "read_file", "arguments": "{\"path\":\"src/main.rs\",}"}
+          }
+        ]
+      },
+      "finish_reason": "tool_calls"
+    }
+  ]
+}

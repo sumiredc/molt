@@ -1,0 +1,7 @@
+{
+  "model": "nvidia/Nemotron-3-Ultra-550b-a55b",
+  "messages": [
+    {"role": "user", "content": "Explain the boundary."}
+  ],
+  "reasoning_effort": "high"
+}

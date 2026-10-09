@@ -2,10 +2,12 @@
 //! テストでは [`FakeChatClient`] に差し替えればネットワーク無しで動く（PRD §8.1・§9）。
 
 pub mod fake;
+pub mod openai;
 pub mod router;
 pub mod types;
 
 pub use fake::FakeChatClient;
+pub use openai::OpenAiClient;
 pub use router::{JsonError, Role, Router};
 pub use types::{
     ChatError, ChatRequest, ChatResponse, InvalidArguments, Message, ResponseFormat, ToolCall,

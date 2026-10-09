@@ -86,17 +86,44 @@ pub struct ToolCall {
 pub enum ChatError {
     /// [`FakeChatClient`](super::FakeChatClient) に積んだ応答を使い切った。
     FakeExhausted,
+    /// `[api]` の `api_key_env` に名前があるのに、その環境変数が未設定か空。値ではなく名前だけを持つ。
+    MissingApiKey { env: String },
+    /// エンドポイントに届かない、タイムアウトした、応答を受け取り切れなかった。
+    /// クライアントを作れなかった（TLS の初期化など）ときも、まれにこれになる。
+    /// `molt doctor` が機能の欠落と分けて「接続の失敗」として報告するのに使う。
+    Request(reqwest::Error),
+    /// エンドポイントが 2xx 以外を返した。`body` は応答の本文で、API キーは伏せてある。
+    Status { status: u16, body: String },
+    /// 応答の本文が chat API の形として読めない。
+    InvalidResponse(String),
 }
 
 impl fmt::Display for ChatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FakeExhausted => write!(f, "the fake chat client has no more queued responses"),
+            Self::MissingApiKey { env } => {
+                write!(f, "the API key environment variable `{env}` is not set")
+            }
+            Self::Request(source) => write!(f, "request to the chat API failed: {source}"),
+            Self::Status { status, body } => {
+                write!(f, "the chat API returned HTTP {status}: {body}")
+            }
+            Self::InvalidResponse(reason) => {
+                write!(f, "the chat API returned an unexpected response: {reason}")
+            }
         }
     }
 }
 
-impl std::error::Error for ChatError {}
+impl std::error::Error for ChatError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Request(source) => Some(source),
+            _ => None,
+        }
+    }
+}
 
 /// tool_call の名前が、リクエストで渡したツールに無かった。
 #[derive(Debug, Clone, PartialEq, Eq)]

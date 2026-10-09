@@ -1,0 +1,7 @@
+{
+  "object": "list",
+  "data": [
+    {"id": "nvidia/Nemotron-3_5-Lightning", "object": "model"},
+    {"id": "nvidia/nemotron-3-super-120b-a12b", "object": "model"}
+  ]
+}
