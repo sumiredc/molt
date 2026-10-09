@@ -7,6 +7,7 @@
 
 mod args;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -319,14 +320,23 @@ impl<'a> Tools<'a> {
         fs::read_to_string(resolved).ok()
     }
 
+    /// The files under the root that the checker can check (`.rs` files and `Cargo.toml`s), with
+    /// their content, by path relative to the root. Skips what `list_files` skips, files that are
+    /// not UTF-8, and directories that cannot be read.
+    pub(crate) fn checkable_files(&self) -> BTreeMap<String, String> {
+        let mut paths = Vec::new();
+        self.walk_readable(self.root.as_path(), &mut paths);
+        paths
+            .into_iter()
+            .filter(|path| is_checkable(Path::new(path)))
+            .filter_map(|path| self.read(&path).map(|content| (path, content)))
+            .collect()
+    }
+
     /// Resolves `path` for writing, if the checker can check it: a `.rs` file or a `Cargo.toml`.
     fn resolve_checkable(&self, path: &str) -> Result<PathBuf, ToolError> {
         let resolved = self.root.resolve_write(path)?;
-        let checkable = resolved.extension().is_some_and(|ext| ext == "rs")
-            || resolved
-                .file_name()
-                .is_some_and(|name| name == "Cargo.toml");
-        if !checkable {
+        if !is_checkable(&resolved) {
             return Err(ToolError::NotCheckable {
                 path: path.to_owned(),
             });
@@ -360,6 +370,25 @@ impl<'a> Tools<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Like `walk`, but an entry that cannot be read is left out and the rest are still taken.
+    fn walk_readable(&self, dir: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    if !self.is_skipped(&path) {
+                        self.walk_readable(&path, files);
+                    }
+                }
+                Ok(_) => files.push(self.relative(&path)),
+                Err(_) => {}
+            }
+        }
     }
 
     /// Whether `dir` is git's data or cargo's output, which are noise in a listing.
@@ -446,6 +475,12 @@ fn replace_once(content: &str, old: &str, new: &str) -> Result<String, usize> {
     replaced.push_str(new);
     replaced.push_str(&content[start + old.len()..]);
     Ok(replaced)
+}
+
+/// Whether the checker can check the file at `path`: a `.rs` file or a `Cargo.toml`.
+fn is_checkable(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "rs")
+        || path.file_name().is_some_and(|name| name == "Cargo.toml")
 }
 
 fn io_error(path: &str, source: io::Error) -> ToolError {
@@ -585,6 +620,30 @@ mod tests {
             panic!("not an object: {value}");
         };
         map
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkable_files_still_takes_the_files_beside_a_directory_that_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["a/locked/x.rs", "a/y.rs", "b/z.rs", "Cargo.toml"] {
+            let path = dir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        let locked = dir.path().join("a/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+
+        let files: Vec<String> = tools.checkable_files().into_keys().collect();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        for path in ["Cargo.toml", "a/y.rs", "b/z.rs"] {
+            assert!(files.iter().any(|file| file == path), "{path}: {files:?}");
+        }
     }
 
     /// A project root with a few files, including some under `.git` and `target`.

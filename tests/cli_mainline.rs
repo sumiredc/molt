@@ -471,16 +471,30 @@ fn write_main(id: &str, content: &str) -> (u16, String) {
     (200, body.to_string())
 }
 
+/// A response of the chat API with `text` and no tool call.
+fn reply(text: &str) -> (u16, String) {
+    let body = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "message": { "role": "assistant", "content": text },
+            "finish_reason": "stop",
+        }],
+    });
+    (200, body.to_string())
+}
+
 #[test]
 fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout() {
     const KEY: &str = "sk-molt-session-test-4f9c2e";
     // `dbg!` twice stops the first request at a boundary. The model writes the key back in the
     // content of both, which the log records as the arguments of the tool call and the rejected
-    // content. The next request is refused by an endpoint that writes the key back in its body.
+    // content. The side line gets its explanation. The next request is refused by an endpoint
+    // that writes the key back in its body.
     let with_dbg = format!("fn main() {{\n    dbg!(\"{KEY}\");\n}}\n");
     let (base_url, server) = serve(vec![
         write_main("first", &with_dbg),
         write_main("second", &with_dbg),
+        reply("dbg! prints a value."),
         (401, format!(r#"{{"error":"invalid api key {KEY}"}}"#)),
     ]);
     let setup = Setup::with_api(&format!(
@@ -506,7 +520,7 @@ fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout()
 
     // The key was in play: every request carried it.
     let authorizations = server.join().unwrap();
-    assert_eq!(authorizations, vec![Some(format!("Bearer {KEY}")); 3]);
+    assert_eq!(authorizations, vec![Some(format!("Bearer {KEY}")); 4]);
     let stdout = stdout(&output);
     assert!(stdout.contains("Stopped at a boundary"), "{stdout}");
     assert!(stdout.contains("HTTP 401"), "{stdout}");
@@ -521,7 +535,8 @@ fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout()
     assert!(events.contains(r#""event":"rejected""#), "{events}");
     // What the model wrote back is in the log, with the key hidden.
     assert!(events.contains(r#"dbg!(\"<redacted>\")"#), "{events}");
-    assert_eq!(requests.lines().count(), 3, "{requests}");
+    // The two writes, the side line's explanation and the next request.
+    assert_eq!(requests.lines().count(), 4, "{requests}");
     for (name, content) in &files {
         assert!(!content.contains(KEY), "{name}: {content}");
     }

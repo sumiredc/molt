@@ -2,10 +2,12 @@
 //! project at cwd (PRD §8.6).
 
 mod diff;
+mod subline;
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use self::subline::Left;
 use super::profile;
 use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
 use crate::agent::mainline::{
@@ -125,8 +127,8 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
                 let turn = agent.turn(&line, &mut UiApprover::new(ui));
                 show_turn(ui, &turn);
                 show_log_error(ui, agent);
-                if matches!(turn.end, TurnEnd::Boundary(_))
-                    && let Some(code) = at_boundary(ui, agent)
+                if let TurnEnd::Boundary(boundary) = turn.end
+                    && let Some(code) = at_boundary(ui, agent, boundary)
                 {
                     return code;
                 }
@@ -258,39 +260,64 @@ fn boundary_text(boundary: &Boundary) -> String {
     )
 }
 
-/// What the user can do at a boundary until the side line (UC3) is there.
-const AT_BOUNDARY: &str = "Type /abort to withdraw the request.";
+/// What the user can do while the main line is paused at a boundary (UC3's exception flow).
+const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side line, or /abort to withdraw the request.";
 
-/// Reads lines at a boundary until `/abort`, which withdraws the request: nothing more is
-/// changed, what was written before the boundary is shown with its `cargo check`, and the main
-/// line waits for the next request. Any other line is not accepted. Ctrl-D and Ctrl-C end the
-/// main line as at the prompt, and their exit code is returned.
-fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine) -> Option<ExitCode> {
-    ui.show(AT_BOUNDARY);
+/// Opens the side line (UC3) at `boundary`, where the turn stopped. `/abort` there withdraws the
+/// request. Ctrl-C there pauses the main line at the boundary, where `/side` opens the same side
+/// line again and `/abort` withdraws the request, and no other line is accepted. Ctrl-D on the
+/// side line, and Ctrl-D and Ctrl-C while paused, end the main line as at the prompt, and their
+/// exit code is returned.
+fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Option<ExitCode> {
+    let mut side = agent.side_line(boundary);
     loop {
-        match ui.read_line(PROMPT) {
-            Ok(Input::Line(line)) if line.trim() == "/abort" => {
-                let withdrawal = agent.withdraw();
-                ui.show("Request withdrawn.");
-                show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
-                show_log_error(ui, agent);
+        match subline::run(ui, &mut side, agent.log()) {
+            Left::Aborted => {
+                withdraw(ui, agent);
                 return None;
             }
-            Ok(Input::Line(_)) => ui.show(AT_BOUNDARY),
-            Ok(Input::Eof) => return Some(ExitCode::SUCCESS),
-            Ok(Input::Interrupted) => return Some(ExitCode::from(INTERRUPTED)),
-            Err(error) => {
-                eprintln!("{error}");
-                return Some(ExitCode::FAILURE);
+            Left::Interrupted => {}
+            Left::Eof => return Some(ExitCode::SUCCESS),
+            Left::Failed => return Some(ExitCode::FAILURE),
+        }
+        ui.show(PAUSED);
+        loop {
+            match ui.read_line(PROMPT) {
+                Ok(Input::Line(line)) if line.trim() == "/side" => break,
+                Ok(Input::Line(line)) if line.trim() == "/abort" => {
+                    withdraw(ui, agent);
+                    return None;
+                }
+                Ok(Input::Line(_)) => ui.show(PAUSED),
+                Ok(Input::Eof) => return Some(ExitCode::SUCCESS),
+                Ok(Input::Interrupted) => return Some(ExitCode::from(INTERRUPTED)),
+                Err(error) => {
+                    eprintln!("{error}");
+                    return Some(ExitCode::FAILURE);
+                }
             }
         }
     }
 }
 
+/// Withdraws the request held at a boundary: nothing more is changed, what was written before the
+/// boundary is shown with its `cargo check`, and the main line waits for the next request.
+fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
+    let withdrawal = agent.withdraw();
+    ui.show("Request withdrawn.");
+    show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
+    show_log_error(ui, agent);
+}
+
 /// That the session log could not be written, the first time it happens to a file. The main line
 /// goes on without it.
 fn show_log_error(ui: &mut dyn Ui, agent: &MainLine) {
-    if let Some((path, error)) = agent.log().take_error() {
+    show_error_of(ui, agent.log());
+}
+
+/// That `log` could not be written, the first time it happens to a file.
+fn show_error_of(ui: &mut dyn Ui, log: &SessionLog) {
+    if let Some((path, error)) = log.take_error() {
         ui.show(&format!(
             "Could not write the session log {}: {error}. The session goes on without it.",
             path.display()
@@ -597,12 +624,13 @@ mod write {
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
 
-    /// A model that tries `dbg!` twice, which stops the first turn at a boundary, then answers
-    /// the next request with `reply`.
+    /// A model that tries `dbg!` twice, which stops the first turn at a boundary, explains the
+    /// idea on the side line, then answers the next request with `reply`.
     fn rejected_twice_then(reply_text: &str) -> FakeChatClient {
         let client = FakeChatClient::new();
         client.push_chat(Ok(write_main("first", WITH_DBG)));
         client.push_chat(Ok(write_main("second", WITH_DBG)));
+        client.push_chat(Ok(reply("dbg! prints a value.")));
         client.push_chat(Ok(reply(reply_text)));
         client
     }
@@ -639,8 +667,8 @@ mod write {
     }
 
     #[test]
-    fn a_boundary_is_shown_and_abort_leaves_the_files_and_the_profile_and_waits_for_the_next_input()
-    {
+    fn a_boundary_opens_the_side_line_and_abort_there_leaves_the_files_and_the_profile_and_waits_for_the_next_input()
+     {
         let client = rejected_twice_then("hello again");
         let (code, ui, dir) = run(
             &client,
@@ -658,54 +686,28 @@ mod write {
             [
                 "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.",
                 "Tool calls in this turn: write_file (2)",
-                "Type /abort to withdraw the request.",
+                "── side line: dbg_macro ────────────────────────────────────",
+                "  dbg! prints a value.",
+                "  Ask anything about it, as many times as you like. Type /abort to withdraw the request.",
+                "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
                 "hello again",
             ]
         );
-        assert_eq!(ui.asked(), ["molt> "; 4]);
+        assert_eq!(
+            ui.asked(),
+            ["molt> ", "molt [sub: dbg_macro]> ", "molt> ", "molt> "]
+        );
         assert_eq!(
             client.requests().len(),
-            3,
-            "the next input went to the model"
+            4,
+            "the explanation and the next input went to the model"
         );
         assert_eq!(
             fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
             "fn main() {}\n"
         );
         assert_eq!(fs::read(dir.path().join("profile.toml")).unwrap(), b"");
-    }
-
-    #[test]
-    fn at_a_boundary_only_abort_is_accepted() {
-        let client = rejected_twice_then("hello again");
-        let (code, ui, _dir) = run(
-            &client,
-            [
-                input("debug 1"),
-                input("go on"),
-                input("/quit"),
-                input("/abort"),
-                input("/quit"),
-            ],
-        );
-
-        assert_eq!(code, ExitCode::SUCCESS);
-        let shown = ui.shown();
-        assert_eq!(
-            shown[2..],
-            [
-                "Type /abort to withdraw the request.",
-                "Type /abort to withdraw the request.",
-                "Type /abort to withdraw the request.",
-                "Request withdrawn.",
-            ]
-        );
-        assert_eq!(
-            client.requests().len(),
-            2,
-            "nothing went to the model at the boundary"
-        );
     }
 
     #[test]
@@ -832,17 +834,10 @@ mod write {
     }
 
     #[test]
-    fn ctrl_d_at_a_boundary_ends_the_main_line_with_success() {
+    fn ctrl_d_on_the_side_line_at_a_boundary_ends_the_main_line_with_success() {
         let client = rejected_twice_then("unused");
         let (code, _, _dir) = run(&client, [input("debug 1"), Step::Eof]);
         assert_eq!(code, ExitCode::SUCCESS);
-    }
-
-    #[test]
-    fn ctrl_c_at_a_boundary_ends_the_main_line_with_a_non_zero_code() {
-        let client = rejected_twice_then("unused");
-        let (code, _, _dir) = run(&client, [input("debug 1"), Step::Interrupt]);
-        assert_eq!(code, ExitCode::from(INTERRUPTED));
     }
 }
 

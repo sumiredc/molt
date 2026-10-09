@@ -17,7 +17,7 @@ pub use types::{
 
 /// chat API のエンドポイント。
 ///
-/// 同期にしている。呼び出し側の本線は rustyline と dialoguer で入力を待つ同期の loop で、
+/// 同期にしている。呼び出し側の本線は rustyline で入力を待つ同期の loop で、
 /// 同時に飛ばすリクエストも 1 つに限るため、async にしても並行に走らせるものが無い。
 pub trait ChatClient {
     /// `request` を送り、モデルの応答を返す。
