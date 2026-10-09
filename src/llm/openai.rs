@@ -161,8 +161,8 @@ impl ChatClient for OpenAiClient {
     }
 }
 
-/// `/chat/completions` に送る本文。`None` と空の項目は送らない。
-fn request_body(request: &ChatRequest) -> Value {
+/// `/chat/completions` に送る本文。`None` と空の項目は送らない。ヘッダ（API キー）は含まない。
+pub(crate) fn request_body(request: &ChatRequest) -> Value {
     let mut body = Map::new();
     body.insert("model".to_owned(), json!(request.model));
     body.insert(
