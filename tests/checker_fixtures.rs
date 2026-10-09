@@ -2,13 +2,18 @@
 //!
 //! Each fixture starts with `// expect: a, b`, the names of the elements in
 //! it, and is named after the element it is for (`print_macro.rs`). The set
-//! the checker detects must equal the expected set exactly.
+//! the checker detects must equal the expected set exactly. Every element
+//! has its fixture.
+//!
+//! `tests/fixtures/negative/*.rs` hold code with base elements only, and the
+//! checker must find nothing else in them.
 
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use molt::checker::{CheckContext, CheckReport, check_file, visitor};
+use molt::profile::baseline;
 use molt::profile::element::Element;
 use molt::profile::status::{ItemKey, Provenance, Status};
 use molt::profile::store::{Profile, Timestamp};
@@ -17,6 +22,10 @@ const EXPECT: &str = "// expect:";
 
 fn elements_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/elements")
+}
+
+fn negative_dir() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/negative")
 }
 
 /// Every `*.rs` in `dir`, sorted by name.
@@ -104,6 +113,48 @@ fn every_element_fixture_is_named_after_an_element_it_expects() {
             path.display()
         );
     }
+}
+
+#[test]
+fn every_element_has_a_fixture_named_after_it() {
+    let names: BTreeSet<String> = fixtures(&elements_dir())
+        .iter()
+        .map(|path| path.file_stem().unwrap().to_str().unwrap().to_owned())
+        .collect();
+    let missing: Vec<&str> = Element::ALL
+        .iter()
+        .map(|e| e.name())
+        .filter(|name| !names.contains(*name))
+        .collect();
+    assert!(missing.is_empty(), "no fixture for {missing:?}");
+}
+
+#[test]
+fn negative_fixtures_contain_no_element_other_than_base_elements() {
+    let paths = fixtures(&negative_dir());
+    assert!(
+        !paths.is_empty(),
+        "no fixture in {}",
+        negative_dir().display()
+    );
+
+    let mut failures = Vec::new();
+    for path in &paths {
+        let source = fs::read_to_string(path).unwrap();
+        match detected(&source) {
+            Ok(detected) => {
+                let other: BTreeSet<Element> = detected
+                    .into_iter()
+                    .filter(|e| !baseline::DEFAULT.contains(e))
+                    .collect();
+                if !other.is_empty() {
+                    failures.push(format!("{}: {:?}", path.display(), names(&other)));
+                }
+            }
+            Err(message) => failures.push(format!("{}: {message}", path.display())),
+        }
+    }
+    assert!(failures.is_empty(), "\n{}", failures.join("\n"));
 }
 
 #[test]
