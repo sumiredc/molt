@@ -2,6 +2,7 @@
 //! テストでは [`FakeChatClient`] に差し替えればネットワーク無しで動く（PRD §8.1・§9）。
 
 pub mod fake;
+pub(crate) mod fake_script;
 pub mod openai;
 pub mod router;
 pub mod types;

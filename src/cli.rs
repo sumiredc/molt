@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use clap::{Args, Parser, Subcommand};
+use clap::error::{ContextKind, ContextValue};
+use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod check;
 mod doctor;
@@ -68,22 +69,20 @@ pub(crate) enum ProfileCommand {
 }
 
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
+    let cli = Cli::try_parse().unwrap_or_else(|error| with_usage(error).exit());
     match &cli.command {
         Some(Command::Profile(command)) => profile::run(cli.common.profile.as_deref(), command),
         Some(Command::Check { paths }) => check::run(cli.common.profile.as_deref(), paths),
-        // --fake の台本はまだ読めない。黙って実際の接続先に送らないよう、受けずに止める
+        // --fake の台本は chat の応答の列で、doctor が確かめるモデルの一覧を書けない。
+        // 黙って実際の接続先に送らないよう、受けずに止める
         Some(Command::Doctor) if cli.common.fake.is_some() => {
-            eprintln!("doctor does not support --fake yet");
+            eprintln!("doctor does not support --fake: its script has no list of models");
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),
-        None if cli.common.fake.is_some() => {
-            eprintln!("the main line does not support --fake yet");
-            ExitCode::FAILURE
-        }
         None => mainline::run(
             cli.common.profile.as_deref(),
+            cli.common.fake.as_deref(),
             cli.common.ui_script.as_deref(),
         ),
         _ => {
@@ -93,10 +92,23 @@ pub fn run() -> ExitCode {
     }
 }
 
+/// `error` with molt's usage line when it has none, as clap leaves it out of some errors, e.g. a
+/// flag given without its value (`molt --fake`, `molt --profile`). `--help` and `--version` keep
+/// their own text.
+fn with_usage(mut error: clap::Error) -> clap::Error {
+    if error.get(ContextKind::Usage).is_none() {
+        error.insert(
+            ContextKind::Usage,
+            ContextValue::StyledStr(Cli::command().render_usage()),
+        );
+    }
+    error
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory;
+    use clap::error::ErrorKind;
 
     #[test]
     fn definition_is_valid() {
@@ -172,5 +184,26 @@ mod tests {
     #[test]
     fn fake_requires_path() {
         assert!(Cli::try_parse_from(["molt", "--fake"]).is_err());
+    }
+
+    #[test]
+    fn fake_script_path_left_out_is_an_error_with_the_usage() {
+        let error = with_usage(Cli::try_parse_from(["molt", "--fake"]).unwrap_err());
+        assert_eq!(error.kind(), ErrorKind::InvalidValue);
+        assert!(error.to_string().contains("Usage: molt"), "{error}");
+    }
+
+    #[test]
+    fn help_and_version_are_shown_unchanged_without_a_second_usage_line() {
+        // `molt profile` without its subcommand shows the help of `profile`.
+        for args in [
+            ["molt", "--help"],
+            ["molt", "--version"],
+            ["molt", "profile"],
+        ] {
+            let error = Cli::try_parse_from(args).unwrap_err();
+            let shown = error.to_string();
+            assert_eq!(with_usage(error).to_string(), shown, "{args:?}");
+        }
     }
 }
