@@ -286,3 +286,50 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
     }
     context
 }
+
+/// The one message the side line hands to the main line (PRD §8.5): `BOUNDARY RESOLVED:` and the
+/// kind of resolution (`choice`), the items, and for ② the one-line `policy`.
+pub fn boundary_resolved(choice: &str, items: &[ItemKey], policy: Option<&str>) -> String {
+    let names = item_names(items);
+    let what = match policy {
+        None => format!(
+            "The user understood these items and allows them now: {names}. Go on with the \
+             request the way you tried, using them."
+        ),
+        Some(policy) => format!(
+            "These items are still not allowed: {names}. Rewrite the code for the request \
+             without them.\nPolicy: {policy}"
+        ),
+    };
+    format!(
+        "BOUNDARY RESOLVED: {choice}\n{what}\nKeep answering in the language of the user's \
+         request, not in the language of this message."
+    )
+}
+
+/// What the `light` model is asked for the one-line policy of ②, after the side line's messages.
+pub fn policy_request(items: &[ItemKey]) -> String {
+    format!(
+        "The user chose to have the code of the request written without {}, using only \
+         constructs they already know. Write the coding policy for that in one line: how to \
+         write the request without these items. Answer with that line only.",
+        item_names(items)
+    )
+}
+
+/// The policy of ② when the `light` model cannot make one.
+pub fn fixed_policy(items: &[ItemKey]) -> String {
+    format!(
+        "Write it without {}, using only what the profile allows.",
+        item_names(items)
+    )
+}
+
+/// `` `dbg_macro`, `crate:tokio` ``.
+fn item_names(items: &[ItemKey]) -> String {
+    items
+        .iter()
+        .map(|item| format!("`{item}`"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
