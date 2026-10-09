@@ -61,6 +61,15 @@ impl Resolution {
     }
 }
 
+/// Why [`SubLine::resolve`] gave no [`Resolution`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Unresolved {
+    /// The choice is not one of [`SubLine::choices`].
+    NotOffered,
+    /// The user interrupted the wait for the policy of ② (Ctrl-C). Nothing changed.
+    Interrupted,
+}
+
 /// The side line opened at one boundary.
 pub struct SubLine<'a> {
     client: &'a dyn ChatClient,
@@ -128,23 +137,23 @@ impl<'a> SubLine<'a> {
         }
     }
 
-    /// The outcome of `choice` to hand back to the main line (PRD §8.5), or `None` when `choice`
-    /// is not one of [`SubLine::choices`]. For ② the `light` model makes the one-line policy from
-    /// the side line's message list; when it cannot, a fixed policy stands in, so ② never fails.
-    /// That request body goes to `log` (PRD §8.8).
-    pub fn resolve(&self, choice: Choice, log: &SessionLog) -> Option<Resolution> {
+    /// The outcome of `choice` to hand back to the main line (PRD §8.5). For ② the `light` model
+    /// makes the one-line policy from the side line's message list; when it cannot, a fixed policy
+    /// stands in, so ② fails only when the user interrupts the wait for the policy. That request
+    /// body goes to `log` (PRD §8.8).
+    pub fn resolve(&self, choice: Choice, log: &SessionLog) -> Result<Resolution, Unresolved> {
         if !self.choices().contains(&choice) {
-            return None;
+            return Err(Unresolved::NotOffered);
         }
         let items = self.boundary.items.clone();
         let policy = match choice {
             Choice::Unlock => None,
             Choice::Rewrite => Some(
-                self.policy(log)
+                self.policy(log)?
                     .unwrap_or_else(|| prompts::fixed_policy(&items)),
             ),
         };
-        Some(Resolution {
+        Ok(Resolution {
             choice,
             items,
             policy,
@@ -153,7 +162,7 @@ impl<'a> SubLine<'a> {
 
     /// Asks the `light` model for the one-line policy of ②. `None` when the request fails or the
     /// reply has no line of text.
-    fn policy(&self, log: &SessionLog) -> Option<String> {
+    fn policy(&self, log: &SessionLog) -> Result<Option<String>, Unresolved> {
         let mut messages = self.messages.clone();
         let instruction = prompts::policy_request(&self.boundary.items);
         let content = if self.explained() {
@@ -164,12 +173,18 @@ impl<'a> SubLine<'a> {
         messages.push(Message::User { content });
         let request = self.router.request(Role::Light, messages);
         log.record_request(&request);
-        let reply = self.client.chat(&request).ok()?.content?;
-        reply
-            .lines()
-            .map(str::trim)
-            .find(|line| !line.is_empty())
-            .map(str::to_owned)
+        let content = match self.client.chat(&request) {
+            Ok(response) => response.content,
+            Err(ChatError::Interrupted) => return Err(Unresolved::Interrupted),
+            Err(_) => None,
+        };
+        Ok(content.and_then(|reply| {
+            reply
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_owned)
+        }))
     }
 
     /// The `.rs` files and `Cargo.toml`s under the root when the side line opened, with their

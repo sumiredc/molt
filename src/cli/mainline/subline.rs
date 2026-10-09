@@ -633,5 +633,44 @@ mod open {
             assert_eq!(snapshot(dir.path()), before);
             assert!(cargo.calls().is_empty());
         }
+
+        #[test]
+        fn interrupting_the_policy_of_rewrite_changes_nothing_and_pauses_the_main_line() {
+            let client = stops_at_a_boundary_then(&["explanation"]);
+            client.push_chat(Err(ChatError::Interrupted));
+            let dir = project_with_a_profile();
+            let before = snapshot(dir.path());
+            let cargo = FakeCargo::new();
+
+            let (code, ui) = run_in(
+                &dir,
+                &client,
+                &cargo,
+                [
+                    input("debug 1"),
+                    input("/choose"),
+                    Step::Select(2),
+                    input("/side"),
+                    input("/abort"),
+                    input("/quit"),
+                ],
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(
+                ui.shown()[5..],
+                [
+                    LEAVE,
+                    PAUSED,
+                    ENTER,
+                    HINT_SHOWN,
+                    LEAVE,
+                    "Request withdrawn."
+                ]
+            );
+            assert_eq!(client.requests().len(), 4, "nothing sent after the policy");
+            assert_eq!(snapshot(dir.path()), before);
+            assert!(cargo.calls().is_empty());
+        }
     }
 }

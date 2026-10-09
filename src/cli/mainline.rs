@@ -14,7 +14,7 @@ use crate::agent::mainline::{
     AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
-use crate::agent::subline::{Choice, SubLine};
+use crate::agent::subline::{Resolution, Unresolved};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
@@ -291,13 +291,20 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 withdraw(ui, agent);
                 return None;
             }
-            Left::Chose(choice) => {
-                // When the turn went on to its end, the main line takes the next request (`None`).
-                // At another boundary, the side line opens there.
-                let boundary = resolve(ui, agent, &side, choice)?;
-                side = agent.side_line(boundary);
-                continue;
-            }
+            Left::Chose(choice) => match side.resolve(choice, agent.log()) {
+                Ok(resolution) => {
+                    // When the turn went on to its end, the main line takes the next request
+                    // (`None`). At another boundary, the side line opens there.
+                    let boundary = resolve(ui, agent, &resolution)?;
+                    side = agent.side_line(boundary);
+                    continue;
+                }
+                // Ctrl-C while waiting for the policy of ②: nothing changed, so the main line is
+                // paused at the boundary as after Ctrl-C on the side line.
+                Err(Unresolved::Interrupted) => show_log_error(ui, agent),
+                // `subline::run` offers only the choices of `side`.
+                Err(Unresolved::NotOffered) => return None,
+            },
             Left::Interrupted => {}
             Left::Eof => return Some(ExitCode::SUCCESS),
             Left::Failed => return Some(ExitCode::FAILURE),
@@ -322,17 +329,10 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
     }
 }
 
-/// Goes on with the turn held at the boundary of `side` as the user chose there (UC3, §8.5): shows
-/// how the profile changed, then the rest of the turn as any turn. Returns the next boundary when
-/// the turn stops at one again.
-fn resolve(
-    ui: &mut dyn Ui,
-    agent: &mut MainLine,
-    side: &SubLine,
-    choice: Choice,
-) -> Option<Boundary> {
-    // `subline::run` offers only the choices of `side`, so the resolution is there.
-    let resolution = side.resolve(choice, agent.log())?;
+/// Goes on with the turn held at the boundary as the user chose on the side line (UC3, §8.5):
+/// shows how the profile changed, then the rest of the turn as any turn. Returns the next boundary
+/// when the turn stops at one again.
+fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
     let names = resolution
         .items()
         .iter()
@@ -345,7 +345,7 @@ fn resolve(
             "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
         )),
     }
-    let resumed = agent.resolve(&resolution, &mut UiApprover::new(ui))?;
+    let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
     if let Err(error) = &resumed.saved {
         ui.show(&format!(
             "Could not save the profile: {error}. The change holds for this session only."

@@ -426,7 +426,10 @@ fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_stops_at_once_and_offer
     let side = main_line.side_line(again);
     assert!(side.is_recurrence());
     assert_eq!(side.choices(), [Choice::Unlock]);
-    assert_eq!(side.resolve(Choice::Rewrite, &SessionLog::disabled()), None);
+    assert_eq!(
+        side.resolve(Choice::Rewrite, &SessionLog::disabled()),
+        Err(Unresolved::NotOffered)
+    );
 }
 
 #[test]
