@@ -325,8 +325,7 @@ impl<'a> Tools<'a> {
     /// not UTF-8, and directories that cannot be read.
     pub(crate) fn checkable_files(&self) -> BTreeMap<String, String> {
         let mut paths = Vec::new();
-        // A directory that cannot be read leaves out its files; the rest are still taken.
-        let _ = self.walk(self.root.as_path(), &mut paths);
+        self.walk_readable(self.root.as_path(), &mut paths);
         paths
             .into_iter()
             .filter(|path| is_checkable(Path::new(path)))
@@ -371,6 +370,25 @@ impl<'a> Tools<'a> {
             }
         }
         Ok(())
+    }
+
+    /// Like `walk`, but an entry that cannot be read is left out and the rest are still taken.
+    fn walk_readable(&self, dir: &Path, files: &mut Vec<String>) {
+        let Ok(entries) = fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(kind) if kind.is_dir() => {
+                    if !self.is_skipped(&path) {
+                        self.walk_readable(&path, files);
+                    }
+                }
+                Ok(_) => files.push(self.relative(&path)),
+                Err(_) => {}
+            }
+        }
     }
 
     /// Whether `dir` is git's data or cargo's output, which are noise in a listing.
@@ -602,6 +620,30 @@ mod tests {
             panic!("not an object: {value}");
         };
         map
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn checkable_files_still_takes_the_files_beside_a_directory_that_cannot_be_read() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        for path in ["a/locked/x.rs", "a/y.rs", "b/z.rs", "Cargo.toml"] {
+            let path = dir.path().join(path);
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "").unwrap();
+        }
+        let locked = dir.path().join("a/locked");
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+
+        let files: Vec<String> = tools.checkable_files().into_keys().collect();
+
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o755)).unwrap();
+        for path in ["Cargo.toml", "a/y.rs", "b/z.rs"] {
+            assert!(files.iter().any(|file| file == path), "{path}: {files:?}");
+        }
     }
 
     /// A project root with a few files, including some under `.git` and `target`.
