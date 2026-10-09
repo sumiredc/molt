@@ -8,6 +8,8 @@
 //! An element built from other elements is reported together with them, one
 //! finding per element (PRD §11): `&[u8]` is both `shared_ref` and `slice`.
 
+mod names;
+
 use std::mem;
 
 use proc_macro2::Span;
@@ -16,9 +18,9 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    Attribute, Expr, ExprIndex, ExprReference, ExprUnary, ItemEnum, ItemMacro, ItemStruct,
-    ItemUnion, Macro, Meta, PatIdent, PatReference, Path, Receiver, ReceiverKind, Token,
-    TypeReference, TypeSlice, UnOp,
+    Attribute, Expr, ExprIndex, ExprMethodCall, ExprReference, ExprUnary, ItemEnum, ItemMacro,
+    ItemStruct, ItemUnion, ItemUse, Macro, Meta, PatIdent, PatReference, Path, Receiver,
+    ReceiverKind, Token, TypeReference, TypeSlice, UnOp, UseTree,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -95,6 +97,11 @@ impl Detector<'_> {
         }
     }
 
+    /// Reports `element` on the line where `span` starts. `span` is the token
+    /// that makes the element (`?`, a method name, `async`, `impl`), not the
+    /// expression around it: `check_file` reports a finding only when its line
+    /// changed, so a `?` added to the third line of an existing chain must be
+    /// on that line.
     fn push(&mut self, span: Span, element: Element, text: String) {
         self.findings.push(Finding {
             line: span.start().line,
@@ -269,9 +276,75 @@ impl<'ast> Visit<'ast> for Detector<'_> {
 
     fn visit_expr_index(&mut self, expr: &'ast ExprIndex) {
         if let Expr::Range(_) = &*expr.index {
-            self.mark(expr.span(), Element::Slice);
+            // On the line of `[`: the indexed expression may start lines above.
+            let text = self.snippet(expr.span());
+            self.push(expr.bracket_token.span.open(), Element::Slice, text);
         }
         visit::visit_expr_index(self, expr);
+    }
+
+    // Names: paths, imports and method calls
+
+    fn visit_path(&mut self, path: &'ast Path) {
+        let segments: Vec<String> = path.segments.iter().map(|s| s.ident.to_string()).collect();
+        let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+        for element in names::path_elements(&segments) {
+            self.push(path.span(), element, path_text(path));
+        }
+        visit::visit_path(self, path);
+    }
+
+    fn visit_item_use(&mut self, item: &'ast ItemUse) {
+        let mut imports = Vec::new();
+        imported_paths(&item.tree, &mut Vec::new(), &mut imports);
+        for (segments, span) in imports {
+            let segments: Vec<&str> = segments.iter().map(String::as_str).collect();
+            for element in names::path_elements(&segments) {
+                self.push(span, element, segments.join("::"));
+            }
+        }
+        visit::visit_item_use(self, item);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        let name = call.method.to_string();
+        let text = if call.args.is_empty() {
+            format!(".{name}()")
+        } else {
+            format!(".{name}(..)")
+        };
+        for element in names::method_elements(&name, call.args.len()) {
+            self.push(call.method.span(), element, text.clone());
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+}
+
+/// Every path a `use` tree imports, as its segments and the span of its last
+/// name. `self` in a group stands for the path before it, and a glob imports
+/// no name.
+fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<String>, Span)>) {
+    let mut leaf = |prefix: &[String], ident: &syn::Ident| {
+        let mut segments = prefix.to_vec();
+        if ident != "self" {
+            segments.push(ident.to_string());
+        }
+        out.push((segments, ident.span()));
+    };
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            imported_paths(&path.tree, prefix, out);
+            prefix.pop();
+        }
+        UseTree::Name(name) => leaf(prefix, &name.ident),
+        UseTree::Rename(rename) => leaf(prefix, &rename.ident),
+        UseTree::Glob(_) => {}
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                imported_paths(tree, prefix, out);
+            }
+        }
     }
 }
 
@@ -839,6 +912,69 @@ impl S {
     fn a_finding_on_several_lines_has_its_first_line_as_the_text() {
         let found = elements("fn f(v: Vec<u8>) -> u8 {\n    *v\n        .first()\n}\n");
         assert_eq!(found, [(2, Element::Deref, "*v ..".to_owned())]);
+    }
+
+    #[test]
+    fn an_index_by_a_range_is_on_the_line_of_its_bracket() {
+        let found = elements("fn f(v: Vec<u8>) -> usize {\n    v\n        [1..3].len()\n}\n");
+        let lines: Vec<usize> = found
+            .iter()
+            .filter(|(_, e, _)| *e == Element::Slice)
+            .map(|(line, _, _)| *line)
+            .collect();
+        assert_eq!(lines, [3]);
+    }
+
+    // ownership
+
+    #[test]
+    fn a_method_in_a_chain_is_on_the_line_of_its_name() {
+        let source = "fn f(s: String) -> String {\n    s\n        .trim()\n        .to_owned()\n        .clone()\n}\n";
+        assert_eq!(
+            elements(source),
+            [
+                (4, Element::ToOwned, ".to_owned()".to_owned()),
+                (5, Element::Clone, ".clone()".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_method_called_through_its_path_is_that_element() {
+        let found = only(
+            "fn f(a: A) -> A {\n    Clone::clone(a)\n}\nfn g(s: S) -> S {\n    S::to_owned(s)\n}\n",
+        );
+        assert_eq!(found, [Element::Clone, Element::ToOwned]);
+    }
+
+    #[test]
+    fn drop_is_the_bare_name_or_through_mem_and_not_a_function_of_another_module() {
+        let found = only(
+            "fn f(a: A, b: B, c: C) {\n    drop(a);\n    std::mem::drop(b);\n    pool::drop(c);\n}\n",
+        );
+        assert_eq!(found, [Element::Drop, Element::Drop]);
+    }
+
+    #[test]
+    fn a_function_imported_by_use_is_found_at_the_import() {
+        let source =
+            "use std::mem::{self, replace, swap as exchange};\nuse std::mem::take;\nuse std::*;\n";
+        assert_eq!(
+            elements(source),
+            [
+                (1, Element::MemReplace, "std::mem::replace".to_owned()),
+                (1, Element::MemSwap, "std::mem::swap".to_owned()),
+                (2, Element::MemTake, "std::mem::take".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_function_named_take_outside_mem_is_not_mem_take() {
+        assert_eq!(
+            only("fn f(r: R) {\n    io::take(r);\n    take(r);\n}\n"),
+            []
+        );
     }
 
     #[test]
