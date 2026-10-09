@@ -18,12 +18,13 @@ use syn::punctuated::Punctuated;
 use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
-    AngleBracketedGenericArguments, AssocType, Attribute, ConstParam, Constraint, Expr, ExprIndex,
-    ExprMethodCall, ExprReference, ExprUnary, Generics, ImplItem, ImplItemConst, ImplItemType,
-    Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias, ItemUnion, ItemUse,
-    Macro, Meta, PatIdent, PatReference, Path, PredicateType, QSelf, Receiver, ReceiverKind, Token,
-    TraitItem, TraitItemConst, TraitItemType, TypeImplTrait, TypeParam, TypeParamBound, TypePath,
-    TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
+    AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
+    Expr, ExprBreak, ExprContinue, ExprIndex, ExprMethodCall, ExprReference, ExprUnary, Generics,
+    ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct,
+    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
+    PatIdent, PatReference, Path, PredicateLifetime, PredicateType, QSelf, Receiver, ReceiverKind,
+    Token, TraitItem, TraitItemConst, TraitItemType, TypeImplTrait, TypeParam, TypeParamBound,
+    TypePath, TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -203,6 +204,15 @@ impl Detector<'_> {
         self.mark_from(token, node, Element::AssociatedType);
         if !generics.params.is_empty() {
             self.mark_from(token, node, Element::GenericAssociatedType);
+        }
+    }
+
+    /// A lifetime as a bound (`T: 'a`, `'a: 'b`): `lifetime_bound`, and
+    /// `static_lifetime` too for `'static`.
+    fn lifetime_bound(&mut self, lifetime: &Lifetime) {
+        self.mark(lifetime.span(), Element::LifetimeBound);
+        if lifetime.ident == "static" {
+            self.mark(lifetime.span(), Element::StaticLifetime);
         }
     }
 
@@ -402,12 +412,18 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     }
 
     fn visit_type_param_bound(&mut self, bound: &'ast TypeParamBound) {
-        if let TypeParamBound::Trait(trait_bound) = bound {
-            match self.bound_role {
+        match bound {
+            TypeParamBound::Trait(trait_bound) => match self.bound_role {
                 BoundRole::Bound => self.mark(trait_bound.span(), Element::TraitBound),
                 BoundRole::Supertrait => self.mark(trait_bound.span(), Element::Supertrait),
                 BoundRole::Plain => {}
+            },
+            // `T: 'a`, `impl Trait + 'a`: a bound, not a lifetime on a type.
+            TypeParamBound::Lifetime(lifetime) => {
+                self.lifetime_bound(lifetime);
+                return;
             }
+            _ => {}
         }
         visit::visit_type_param_bound(self, bound);
     }
@@ -485,6 +501,59 @@ impl<'ast> Visit<'ast> for Detector<'_> {
             Element::AssociatedConst,
         );
         visit::visit_trait_item_const(self, item);
+    }
+
+    // lifetimes
+
+    fn visit_lifetime(&mut self, lifetime: &'ast Lifetime) {
+        let element = match lifetime.ident.to_string().as_str() {
+            "static" => Element::StaticLifetime,
+            "_" => Element::AnonymousLifetime,
+            _ => Element::LifetimeAnnotation,
+        };
+        self.mark(lifetime.span(), element);
+    }
+
+    fn visit_lifetime_param(&mut self, param: &'ast LifetimeParam) {
+        for attr in &param.attrs {
+            self.visit_attribute(attr);
+        }
+        self.mark(param.lifetime.span(), Element::LifetimeParam);
+        for bound in &param.bounds {
+            self.lifetime_bound(bound);
+        }
+    }
+
+    fn visit_predicate_lifetime(&mut self, predicate: &'ast PredicateLifetime) {
+        for bound in &predicate.bounds {
+            self.lifetime_bound(bound);
+        }
+    }
+
+    fn visit_bound_lifetimes(&mut self, lifetimes: &'ast BoundLifetimes) {
+        // The lifetimes `for<'a>` declares are part of this element, not
+        // parameters of an item.
+        self.mark(lifetimes.span(), Element::HigherRankedBound);
+    }
+
+    // A label (`'outer: loop`, `break 'outer`) is written like a lifetime
+    // but is not one.
+
+    fn visit_label(&mut self, _label: &'ast Label) {}
+
+    fn visit_expr_break(&mut self, expr: &'ast ExprBreak) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(value) = &expr.expr {
+            self.visit_expr(value);
+        }
+    }
+
+    fn visit_expr_continue(&mut self, expr: &'ast ExprContinue) {
+        for attr in &expr.attrs {
+            self.visit_attribute(attr);
+        }
     }
 
     // Names: paths, imports and method calls
@@ -1264,6 +1333,48 @@ impl S { fn h() -> Self::Output {} }
     fn a_conversion_through_from_or_into_is_from_into() {
         let found = only("fn f(n: u8) -> u64 {\n    let a = u64::from(n);\n    n.into()\n}\n");
         assert_eq!(found, [Element::FromInto, Element::FromInto]);
+    }
+
+    // lifetimes
+
+    #[test]
+    fn a_label_is_not_a_lifetime() {
+        let source = "fn f() {\n    'outer: loop {\n        'inner: while true {\n            continue 'outer;\n        }\n        break 'outer;\n    }\n}\n";
+        assert_eq!(only(source), []);
+    }
+
+    #[test]
+    fn a_lifetime_in_a_bound_is_lifetime_bound_and_not_lifetime_annotation() {
+        let source = "fn f<'a, 'b: 'a, T: 'a>() where 'a: 'b {}\n";
+        let found = only(source);
+        assert_eq!(
+            found
+                .iter()
+                .filter(|&&e| e == Element::LifetimeBound)
+                .count(),
+            3,
+            "{found:?}"
+        );
+        assert!(!found.contains(&Element::LifetimeAnnotation), "{found:?}");
+    }
+
+    #[test]
+    fn static_as_a_bound_is_both_lifetime_bound_and_static_lifetime() {
+        let found = only("fn f<T: 'static>(t: T) {}\n");
+        assert!(found.contains(&Element::LifetimeBound), "{found:?}");
+        assert!(found.contains(&Element::StaticLifetime), "{found:?}");
+    }
+
+    #[test]
+    fn a_lifetime_on_a_type_is_annotation_static_or_anonymous_by_its_name() {
+        assert_eq!(
+            only("struct S {\n    a: Foo<'a>,\n    b: Foo<'static>,\n    c: Foo<'_>,\n}\n"),
+            [
+                Element::LifetimeAnnotation,
+                Element::StaticLifetime,
+                Element::AnonymousLifetime,
+            ]
+        );
     }
 
     #[test]
