@@ -37,6 +37,8 @@ pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
     // `Clone::clone(&x)`, `Rc::clone(&x)`, `str::to_owned(s)`: the method
     // called through its path.
     match last {
+        // Distinctive enough to count bare, as after `use std::mem::transmute`.
+        "transmute" | "transmute_copy" => found.push(Element::Transmute),
         "clone" if qualified => found.push(Element::Clone),
         "to_owned" if qualified => found.push(Element::ToOwned),
         // `String::from(s)`, `u64::from(n)`: a conversion through `From`.

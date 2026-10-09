@@ -1,9 +1,8 @@
 //! Parses content with syn and finds the syntax elements in it.
 //!
-//! Detected so far: the `macros` and `borrowing` categories, plus the
-//! elements whose syntax is a macro invocation or a `derive` (`panic`,
-//! `inline_asm`, `derive`), since telling them apart from `macro_call` and
-//! `custom_derive` happens here.
+//! Every element is detected here, from syntax alone: syn has no types and no
+//! name resolution, so elements told by a name (`Arc`, `.map(..)`) are
+//! decided by the rules in `names`.
 //!
 //! An element built from other elements is reported together with them, one
 //! finding per element (PRD §11): `&[u8]` is both `shared_ref` and `slice`.
@@ -20,13 +19,14 @@ use syn::visit::{self, Visit};
 use syn::{
     AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
     Expr, ExprAsync, ExprAwait, ExprBreak, ExprClosure, ExprContinue, ExprForLoop, ExprIndex,
-    ExprMethodCall, ExprRange, ExprReference, ExprTry, ExprUnary, GenericArgument, Generics,
-    ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct,
-    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
-    PatIdent, PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
-    ReceiverKind, Signature, Token, TraitItem, TraitItemConst, TraitItemType, Type, TypeFnPtr,
-    TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypeReference, TypeSlice, TypeTraitObject,
-    UnOp, UseTree, WhereClause,
+    ExprMethodCall, ExprRange, ExprRawAddr, ExprReference, ExprTry, ExprUnary, ExprUnsafe,
+    ForeignItemStatic, GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemType, Item,
+    ItemEnum, ItemForeignMod, ItemImpl, ItemMacro, ItemStatic, ItemStruct, ItemTrait,
+    ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta, PatIdent,
+    PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
+    ReceiverKind, Safety, Signature, StaticMutability, Token, TraitItem, TraitItemConst,
+    TraitItemType, Type, TypeFnPtr, TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypePtr,
+    TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -291,6 +291,7 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     }
 
     fn visit_item_union(&mut self, item: &'ast ItemUnion) {
+        self.mark_from(item.union_token.span(), item.span(), Element::Union);
         let allowed = has_custom_derive(&item.attrs);
         self.with_helpers_allowed(allowed, |v| visit::visit_item_union(v, item));
     }
@@ -390,6 +391,9 @@ impl<'ast> Visit<'ast> for Detector<'_> {
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        if let Some(unsafety) = &item.unsafety {
+            self.mark_from(unsafety.span(), item.span(), Element::UnsafeTrait);
+        }
         self.in_trait = true;
         self.with_bound_role(BoundRole::Supertrait, |v| visit::visit_item_trait(v, item));
     }
@@ -406,6 +410,9 @@ impl<'ast> Visit<'ast> for Detector<'_> {
             if let Some(element) = name.as_deref().and_then(implemented_trait) {
                 self.mark_from(item.impl_token.span(), item.span(), element);
             }
+        }
+        if let Some(unsafety) = &item.unsafety {
+            self.mark_from(unsafety.span(), item.span(), Element::UnsafeTrait);
         }
         self.in_trait = item.trait_.is_some();
         visit::visit_item_impl(self, item);
@@ -624,6 +631,12 @@ impl<'ast> Visit<'ast> for Detector<'_> {
 
     fn visit_type_fn_ptr(&mut self, ty: &'ast TypeFnPtr) {
         self.mark_from(ty.fn_token.span(), ty.span(), Element::FnPointer);
+        if let Some(unsafety) = &ty.unsafety {
+            self.mark_from(unsafety.span(), ty.span(), Element::UnsafeFn);
+        }
+        if let Some(abi) = &ty.abi {
+            self.mark_from(abi.extern_token.span(), ty.span(), Element::Extern);
+        }
         visit::visit_type_fn_ptr(self, ty);
     }
 
@@ -636,7 +649,49 @@ impl<'ast> Visit<'ast> for Detector<'_> {
                 self.mark_from(asyncness.span(), sig.span(), Element::AsyncFnInTrait);
             }
         }
+        if let Safety::Unsafe(unsafety) = &sig.safety {
+            self.mark_from(unsafety.span(), sig.span(), Element::UnsafeFn);
+        }
+        if let Some(abi) = &sig.abi {
+            self.mark_from(abi.extern_token.span(), sig.span(), Element::Extern);
+        }
         visit::visit_signature(self, sig);
+    }
+
+    // unsafe
+
+    fn visit_expr_unsafe(&mut self, expr: &'ast ExprUnsafe) {
+        self.mark_from(expr.unsafe_token.span(), expr.span(), Element::UnsafeBlock);
+        visit::visit_expr_unsafe(self, expr);
+    }
+
+    fn visit_type_ptr(&mut self, ty: &'ast TypePtr) {
+        self.mark(ty.span(), Element::RawPointer);
+        visit::visit_type_ptr(self, ty);
+    }
+
+    fn visit_expr_raw_addr(&mut self, expr: &'ast ExprRawAddr) {
+        self.mark(expr.span(), Element::RawPointer);
+        visit::visit_expr_raw_addr(self, expr);
+    }
+
+    fn visit_item_static(&mut self, item: &'ast ItemStatic) {
+        if let StaticMutability::Mut(_) = item.mutability {
+            self.mark_from(item.static_token.span(), item.span(), Element::StaticMut);
+        }
+        visit::visit_item_static(self, item);
+    }
+
+    fn visit_foreign_item_static(&mut self, item: &'ast ForeignItemStatic) {
+        if let StaticMutability::Mut(_) = item.mutability {
+            self.mark_from(item.static_token.span(), item.span(), Element::StaticMut);
+        }
+        visit::visit_foreign_item_static(self, item);
+    }
+
+    fn visit_item_foreign_mod(&mut self, item: &'ast ItemForeignMod) {
+        self.mark_from(item.abi.extern_token.span(), item.span(), Element::Extern);
+        visit::visit_item_foreign_mod(self, item);
     }
 
     fn visit_expr_await(&mut self, expr: &'ast ExprAwait) {
@@ -1681,6 +1736,46 @@ impl S {
             only("fn f() {\n    let g = async || 1;\n}\n"),
             [Element::Closure, Element::AsyncClosure]
         );
+    }
+
+    // unsafe
+
+    #[test]
+    fn extern_and_unsafe_on_a_function_or_a_function_pointer_are_extern_and_unsafe_fn() {
+        let source =
+            "extern \"C\" fn f() {}\nunsafe fn g() {}\ntype P = unsafe extern \"C\" fn();\n";
+        assert_eq!(
+            only(source),
+            [
+                Element::Extern,
+                Element::UnsafeFn,
+                Element::FnPointer,
+                Element::UnsafeFn,
+                Element::Extern,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_static_is_static_mut_only_when_mutable() {
+        assert_eq!(
+            elements("static A: u8 = 0;\nstatic mut B: u8 = 0;\n"),
+            [(2, Element::StaticMut, "static mut B: u8 = 0;".to_owned())]
+        );
+    }
+
+    #[test]
+    fn a_raw_borrow_is_raw_pointer() {
+        assert_eq!(
+            only("fn f(x: u8) {\n    let p = &raw const x;\n}\n"),
+            [Element::RawPointer]
+        );
+    }
+
+    #[test]
+    fn an_unsafe_impl_is_unsafe_trait() {
+        let found = only("unsafe impl Send for S {}\n");
+        assert!(found.contains(&Element::UnsafeTrait), "{found:?}");
     }
 
     #[test]
