@@ -327,7 +327,10 @@ mod tests {
         let new = "fn f() {\n    tokio::select! {\n        a => 1,\n    }\n}\n";
         assert_eq!(
             reported(&check(old, new)),
-            [(2, ItemKey::Element(Element::MacroCall))]
+            [
+                (2, ItemKey::Element(Element::MacroCall)),
+                (2, ItemKey::Crate("tokio".to_owned())),
+            ]
         );
     }
 

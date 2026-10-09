@@ -3,10 +3,12 @@
 //!
 //! A pure function over strings: no file, no environment variable, no network.
 
+mod crates;
 mod diff;
 pub mod finding;
 pub mod visitor;
 
+use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::profile::status::{ItemKey, Status};
@@ -16,28 +18,46 @@ pub use finding::{CheckContext, CheckReport, Finding, ParseError};
 /// Checks `new`, the content about to be written to `path`, against
 /// `ctx.profile`.
 ///
-/// An element is reported unless it is a base element or `known`, or it
-/// starts on a line unchanged from `old` (`old` is empty for a new file, and
-/// then the whole of `new` is checked). An element spanning several lines is
-/// judged by `Finding.line` alone, so that editing one line inside an
-/// existing `impl` does not report the whole `impl`; the visitor therefore
-/// puts `Finding.line` on the token that makes the element (the macro path,
-/// the `?`, the method name), not on the start of an enclosing expression.
-/// Content that syn cannot parse is `ParseError`, whatever else it contains
-/// and whichever lines changed.
+/// An element or crate is reported unless it is a base element or `known`.
+/// Content that does not parse (as Rust, or as TOML for a `Cargo.toml`) is
+/// `ParseError`, whatever else it contains and whichever lines changed.
 ///
-/// `path` and `ctx.own_modules` are not used yet.
-// TODO(#37): detect crates from the paths in `new` and, when `path` is a
-// `Cargo.toml`, from its dependency keys.
-pub fn check_file(_path: &Path, old: &str, new: &str, ctx: &CheckContext) -> CheckReport {
-    let detected = match visitor::detect(new) {
-        Ok(detected) => detected,
-        Err(error) => return CheckReport::ParseError(error),
+/// A `Cargo.toml` is checked for the dependency keys it gains over `old`
+/// (`crates::in_manifest`); that comparison of keys is its whole filter.
+///
+/// Any other file is checked as Rust, for its elements and for the crates its
+/// paths start from (`crates::in_source`). A crate is reported there even
+/// when `Cargo.toml` already depends on it. An item is reported only when it
+/// starts on a line changed from `old` (`old` is empty for a new file, and
+/// then the whole of `new` is checked), so a crate is reported on each new
+/// line that uses it, and not where existing code uses it. An item spanning
+/// several lines is judged by `Finding.line` alone, so that editing one line
+/// inside an existing `impl` does not report the whole `impl`; the detectors
+/// therefore put `Finding.line` on the token that makes the item (the macro
+/// path, the `?`, the method name, the first segment of a path), not on the
+/// start of an enclosing expression.
+pub fn check_file(path: &Path, old: &str, new: &str, ctx: &CheckContext) -> CheckReport {
+    let findings: Vec<Finding> = if path.file_name() == Some(OsStr::new("Cargo.toml")) {
+        match crates::in_manifest(old, new) {
+            Ok(detected) => detected,
+            Err(error) => return CheckReport::ParseError(error),
+        }
+    } else {
+        let mut detected = match visitor::detect(new) {
+            Ok(detected) => detected,
+            Err(error) => return CheckReport::ParseError(error),
+        };
+        detected.extend(crates::in_source(new, ctx.own_modules));
+        detected.sort_by_key(|finding| finding.line);
+        let changed = diff::changed_lines(old, new);
+        detected
+            .into_iter()
+            .filter(|finding| changed.contains(finding.line))
+            .collect()
     };
-    let changed = diff::changed_lines(old, new);
-    let findings: Vec<Finding> = detected
+    let findings: Vec<Finding> = findings
         .into_iter()
-        .filter(|finding| changed.contains(finding.line) && !is_allowed(finding, ctx))
+        .filter(|finding| !is_allowed(finding, ctx))
         .collect();
     if findings.is_empty() {
         CheckReport::Clean
@@ -46,13 +66,28 @@ pub fn check_file(_path: &Path, old: &str, new: &str, ctx: &CheckContext) -> Che
     }
 }
 
-/// Whether the content may use the item: a base element, or `known`.
+/// Whether the content may use the item: a base element, or `known`. A crate
+/// is looked up under every spelling `crates::crate_key` takes to its key
+/// (`crate:serde-json` for `serde_json`), and is `known` when one of them is
+/// and none is anything else: a spelling the user made `seen` or `unknown`
+/// still stops it.
 fn is_allowed(finding: &Finding, ctx: &CheckContext) -> bool {
-    let base = match finding.key {
-        ItemKey::Element(element) => ctx.profile.is_base(element),
-        ItemKey::Crate(_) => false,
-    };
-    base || ctx.profile.status(&finding.key) == Status::Known
+    match &finding.key {
+        ItemKey::Element(element) => {
+            ctx.profile.is_base(*element) || ctx.profile.status(&finding.key) == Status::Known
+        }
+        ItemKey::Crate(_) => {
+            let mut statuses = ctx
+                .profile
+                .entries()
+                .filter(|(key, _)| {
+                    matches!(key, ItemKey::Crate(name) if crates::crate_key(name) == finding.key)
+                })
+                .map(|(_, entry)| entry.status())
+                .peekable();
+            statuses.peek().is_some() && statuses.all(|status| status == Status::Known)
+        }
+    }
 }
 
 #[cfg(test)]
