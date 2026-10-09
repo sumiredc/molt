@@ -401,10 +401,13 @@ mod tests {
     }
 
     /// A tiny binary crate made by `cargo init`, so the real runner has something to build.
-    fn project(main_rs: &str) -> (tempfile::TempDir, Cargo) {
+    ///
+    /// Give each test its own `name`: under a shared `CARGO_TARGET_DIR`, crates of the same name
+    /// share one fingerprint, so cargo may take one test's crate as already checked for another.
+    fn project(name: &str, main_rs: &str) -> (tempfile::TempDir, Cargo) {
         let dir = tempfile::tempdir().unwrap();
         let status = Command::new("cargo")
-            .args(["init", "--quiet", "--vcs", "none", "--name", "probe"])
+            .args(["init", "--quiet", "--vcs", "none", "--name", name])
             .current_dir(dir.path())
             .status()
             .unwrap();
@@ -416,7 +419,7 @@ mod tests {
 
     #[test]
     fn real_cargo_check_succeeds_on_a_crate_that_compiles() {
-        let (_dir, cargo) = project("fn main() {}\n");
+        let (_dir, cargo) = project("probe_compiles", "fn main() {}\n");
 
         let output = cargo.run(Subcommand::Check).unwrap();
 
@@ -425,7 +428,10 @@ mod tests {
 
     #[test]
     fn real_cargo_check_reports_the_compile_error_on_a_crate_that_does_not_compile() {
-        let (_dir, cargo) = project("fn main() { let x: u8 = \"no\"; }\n");
+        let (_dir, cargo) = project(
+            "probe_does_not_compile",
+            "fn main() { let x: u8 = \"no\"; }\n",
+        );
 
         let output = cargo.run(Subcommand::Check).unwrap();
 
@@ -439,7 +445,7 @@ mod tests {
 
     #[test]
     fn real_cargo_runs_in_the_project_root() {
-        let (dir, cargo) = project("fn main(){}\n");
+        let (dir, cargo) = project("probe_fmt", "fn main(){}\n");
 
         let output = cargo.run(Subcommand::Fmt).unwrap();
 
