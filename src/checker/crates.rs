@@ -63,6 +63,19 @@ pub fn in_manifest(old: &str, new: &str) -> Result<Vec<Finding>, ParseError> {
     Ok(findings)
 }
 
+/// The keys of every dependency table of `manifest`, as crate keys: the names source code
+/// spells the dependencies by. A manifest that is not TOML declares nothing.
+pub fn declared(manifest: &str) -> BTreeSet<ItemKey> {
+    Document::parse(manifest)
+        .map(|doc| {
+            dependencies(doc.as_table())
+                .iter()
+                .map(|dep| crate_key(&dep.key))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// One key of a dependency table, as written.
 struct Dependency {
     key: String,

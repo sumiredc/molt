@@ -20,7 +20,9 @@ use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
 use crate::profile::store::Profile;
 use crate::workspace::approve;
-use crate::workspace::cargo::{CargoError, CargoRequest, CargoRunner, CrateName, RequestError};
+use crate::workspace::cargo::{
+    CargoError, CargoOutput, CargoRequest, CargoRunner, CrateName, RequestError, Subcommand,
+};
 use crate::workspace::git::{DiffScope, Git, GitError, GitOutput};
 use crate::workspace::modules::ModuleScope;
 use crate::workspace::path::{PathError, Root};
@@ -250,6 +252,73 @@ impl<'a> Tools<'a> {
         Ok(WriteOutcome::Written)
     }
 
+    /// Runs `cargo check` in the project, as the loop does at the end of a turn that wrote
+    /// (PRD §8.4).
+    pub(crate) fn cargo_check(&self) -> Result<CargoOutput, CargoError> {
+        self.cargo.run(Subcommand::Check)
+    }
+
+    /// Runs `cargo add crate_name` if `approver` approves it (PRD §8.4).
+    pub(crate) fn add_crate(
+        &self,
+        crate_name: &CrateName,
+        approver: &mut dyn Approver,
+    ) -> Result<CargoOutput, ToolError> {
+        if !approver.confirm(&ApprovalRequest::CargoAdd(crate_name.clone())) {
+            return Err(ToolError::NotApproved);
+        }
+        Ok(self.cargo.add(crate_name, approve())?)
+    }
+
+    /// The crates the Rust files `paths` use that `profile` allows but the `Cargo.toml` at the
+    /// root does not declare (PRD UC2), each once, in the order first used. Files that cannot be
+    /// read, and files that are not Rust, use none.
+    pub(crate) fn undeclared_known_crates(
+        &self,
+        paths: &[String],
+        profile: &Profile,
+    ) -> Vec<String> {
+        let manifest = self.read("Cargo.toml").unwrap_or_default();
+        let mut names: Vec<String> = Vec::new();
+        for path in paths {
+            let Ok(resolved) = self.root.resolve_read(path) else {
+                continue;
+            };
+            if resolved.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(&resolved) else {
+                continue;
+            };
+            let own_modules = ModuleScope::of(&resolved).own_modules();
+            let ctx = CheckContext {
+                profile,
+                own_modules: &own_modules,
+            };
+            for name in checker::undeclared_known_crates(&source, &manifest, &ctx) {
+                if !names.contains(&name) {
+                    names.push(name);
+                }
+            }
+        }
+        names
+    }
+
+    /// Whether `a` and `b` name the same file under the root for writing (`./Cargo.toml` and
+    /// `Cargo.toml`). Paths that cannot be written are no file.
+    pub(crate) fn same_file(&self, a: &str, b: &str) -> bool {
+        match (self.root.resolve_write(a), self.root.resolve_write(b)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => false,
+        }
+    }
+
+    /// The content of `path` in the project, or `None` when it cannot be read.
+    pub(crate) fn read(&self, path: &str) -> Option<String> {
+        let resolved = self.root.resolve_read(path).ok()?;
+        fs::read_to_string(resolved).ok()
+    }
+
     /// Resolves `path` for writing, if the checker can check it: a `.rs` file or a `Cargo.toml`.
     fn resolve_checkable(&self, path: &str) -> Result<PathBuf, ToolError> {
         let resolved = self.root.resolve_write(path)?;
@@ -328,12 +397,7 @@ impl<'a> Tools<'a> {
     ) -> Result<String, ToolError> {
         let output = match CargoRequest::parse(&args.subcommand, &args.args)? {
             CargoRequest::Run(subcommand) => self.cargo.run(subcommand)?,
-            CargoRequest::Add(crate_name) => {
-                if !approver.confirm(&ApprovalRequest::CargoAdd(crate_name.clone())) {
-                    return Err(ToolError::NotApproved);
-                }
-                self.cargo.add(&crate_name, approve())?
-            }
+            CargoRequest::Add(crate_name) => self.add_crate(&crate_name, approver)?,
         };
         Ok(process_result(
             output.success,

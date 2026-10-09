@@ -3,18 +3,20 @@
 //!
 //! A turn ends when the model calls `finish` or answers without calling a tool, when it asks
 //! for more tool calls than the budget (PRD §8.4), when its arguments still do not parse after
-//! the one resend (PRD §11), when the chat API fails (UC2's exception flow), or at a boundary
-//! (the write path, in `write`).
+//! the one resend (PRD §11), when the chat API fails (UC2's exception flow), at a boundary
+//! (the write path, in `write`), or when the code still does not build after the compile fixes
+//! of the budget. If anything was written, the turn ends with `cargo check` (`turn_end`).
 
+mod turn_end;
 mod write;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
-use super::tools::{Approver, Tools};
+use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
     ChatClient, ChatError, ChatRequest, InvalidArguments, Message, Role, Router, ToolCall,
@@ -22,10 +24,15 @@ use crate::llm::{
 };
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
+use crate::workspace::cargo::{CargoError, CargoOutput};
 
 /// Tool calls per turn (PRD §8.4). Every call counts, `finish` too, so that no call the model
 /// repeats can keep a turn going.
 pub const TOOL_CALL_BUDGET: usize = 40;
+
+/// Compile fixes per turn (PRD §8.4): how many times the model is asked to fix content that does
+/// not parse or a project that `cargo check` fails on.
+pub const COMPILE_FIX_BUDGET: usize = 3;
 
 /// The tool that ends the turn. It is handled by the loop, not by [`Tools`].
 const FINISH: &str = "finish";
@@ -37,6 +44,12 @@ const EDIT_FILE: &str = "edit_file";
 /// The tool with which the model stops at a boundary itself. It is handled by the loop.
 const REQUEST_BOUNDARY: &str = "request_boundary";
 
+/// The manifest at the project root, which `cargo add` changes.
+const MANIFEST: &str = "Cargo.toml";
+
+/// The tool that runs cargo. `run_cargo add` changes `Cargo.toml`.
+const RUN_CARGO: &str = "run_cargo";
+
 /// The main line on one project.
 pub struct MainLine<'a> {
     client: &'a dyn ChatClient,
@@ -45,6 +58,28 @@ pub struct MainLine<'a> {
     profile: Profile,
     definitions: Vec<ToolDefinition>,
     messages: Vec<Message>,
+    /// The `cargo check` calls molt has put in the message list in its own name, so that each
+    /// gets an id of its own.
+    molt_checks: usize,
+    /// What a turn stopped at a boundary left unchecked, until the request is withdrawn
+    /// ([`MainLine::withdraw`]) or the next turn starts.
+    held: Option<Held>,
+}
+
+/// The changes of a turn held at a boundary, and whether they still need `cargo check`.
+#[derive(Debug)]
+struct Held {
+    changes: Vec<Change>,
+    unchecked: bool,
+    manifest_before: Option<String>,
+}
+
+/// What withdrawing a request held at a boundary showed: the files the turn changed before the
+/// boundary and the `cargo check` molt ran on them, when there were any.
+#[derive(Debug)]
+pub struct Withdrawal {
+    pub changes: Vec<Change>,
+    pub check: Option<Result<CargoOutput, CargoError>>,
 }
 
 /// How one turn went.
@@ -59,9 +94,48 @@ pub struct Turn {
     /// The files written in this turn, as the model named them, each once, in the order first
     /// written.
     pub written: Vec<String>,
-    /// The compile fixes the model was asked for in this turn (PRD §8.4): so far, once for
-    /// each write whose content did not parse.
+    /// The compile fixes the model was asked for in this turn (PRD §8.4): once for each write
+    /// whose content did not parse, and once for each `cargo check` at the end of the turn that
+    /// failed. At most [`COMPILE_FIX_BUDGET`].
     pub compile_fixes: usize,
+    /// The files molt changed in this turn, in the order first changed: those written, and the
+    /// `Cargo.toml` at the project root when `cargo add` changed it.
+    pub changes: Vec<Change>,
+    /// The crates molt asked the user to add in this turn, in order (PRD UC2).
+    pub crate_adds: Vec<CrateAdd>,
+    /// The last `cargo check` molt ran at the end of the turn, if it ran one: only when something
+    /// was written, and never at a boundary.
+    pub check: Option<Result<CargoOutput, CargoError>>,
+}
+
+/// A file molt changed in a turn.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Change {
+    /// The path as the model named it.
+    pub path: String,
+    /// The content when the turn first changed it, or `None` for a file the turn created.
+    pub before: Option<String>,
+    /// The content at the end of the turn.
+    pub after: String,
+}
+
+/// A crate the content written uses that the profile allows (`known`) but the project's
+/// `Cargo.toml` does not declare, and what came of asking the user to add it.
+#[derive(Debug)]
+pub struct CrateAdd {
+    pub name: String,
+    pub outcome: AddOutcome,
+}
+
+/// What came of asking to `cargo add` a crate.
+#[derive(Debug)]
+pub enum AddOutcome {
+    /// The user approved, and cargo ran. It may still have failed: see `success`.
+    Ran(CargoOutput),
+    /// The user did not approve.
+    NotApproved,
+    /// The name is not one `cargo add` takes, or cargo could not be run.
+    Failed(String),
 }
 
 /// Where the main line stopped because the request needs items the profile does not allow
@@ -100,6 +174,9 @@ pub enum TurnEnd {
     ApiFailed(ChatError),
     /// The request needs items the profile does not allow.
     Boundary(Boundary),
+    /// The content did not parse, or `cargo check` failed, once more after the model had been
+    /// asked for [`COMPILE_FIX_BUDGET`] fixes. It was not asked again.
+    CompileFixesExhausted,
 }
 
 /// What to do after one tool call.
@@ -121,6 +198,15 @@ struct Progress {
     /// The items rejected in the response being run. Calls in one response are made before the
     /// model sees any of their results, so these count only from the next response on.
     rejected_now: BTreeSet<ItemKey>,
+    /// Whether something was written, or a crate added, since the last `cargo check` at the end
+    /// of the turn.
+    unchecked: bool,
+    /// The project's `Cargo.toml` when the turn started, to show what `cargo add` changed.
+    manifest_before: Option<String>,
+    /// The crates asked about in this turn and not added (the user said no, or `cargo add`
+    /// failed), with `-` spelled `_`, and the note for the model on each. They are not asked
+    /// about again.
+    not_added: BTreeMap<String, String>,
 }
 
 impl<'a> MainLine<'a> {
@@ -141,6 +227,8 @@ impl<'a> MainLine<'a> {
             messages: vec![Message::System {
                 content: prompts::MAIN_LINE_SYSTEM.to_owned(),
             }],
+            molt_checks: 0,
+            held: None,
         }
     }
 
@@ -156,6 +244,7 @@ impl<'a> MainLine<'a> {
     /// Whatever ends the turn, every tool call of the model gets a tool result in the message
     /// list, so the next turn can be sent as it is.
     pub fn turn(&mut self, input: &str, approver: &mut dyn Approver) -> Turn {
+        self.held = None;
         self.messages.push(Message::User {
             content: input.to_owned(),
         });
@@ -165,15 +254,42 @@ impl<'a> MainLine<'a> {
             reply: None,
             written: Vec::new(),
             compile_fixes: 0,
+            changes: Vec::new(),
+            crate_adds: Vec::new(),
+            check: None,
         };
-        let mut progress = Progress::default();
+        let mut progress = Progress {
+            manifest_before: self.tools.read(MANIFEST),
+            ..Progress::default()
+        };
+        loop {
+            let end = self.converse(&mut turn, &mut progress, approver);
+            if let Some(end) = self.end_turn(end, &mut turn, &mut progress, approver) {
+                if matches!(end, TurnEnd::Boundary(_)) {
+                    self.held = Some(Held {
+                        changes: turn.changes.clone(),
+                        unchecked: progress.unchecked,
+                        manifest_before: progress.manifest_before.clone(),
+                    });
+                }
+                turn.end = end;
+                return turn;
+            }
+        }
+    }
+
+    /// Sends the message list and runs the tools the model calls, until the model is done or the
+    /// turn stops. Returns why.
+    fn converse(
+        &mut self,
+        turn: &mut Turn,
+        progress: &mut Progress,
+        approver: &mut dyn Approver,
+    ) -> TurnEnd {
         loop {
             let response = match self.client.chat(&self.request()) {
                 Ok(response) => response,
-                Err(error) => {
-                    turn.end = TurnEnd::ApiFailed(error);
-                    return turn;
-                }
+                Err(error) => return TurnEnd::ApiFailed(error),
             };
             if let Some(content) = response.content.as_ref().filter(|c| !c.trim().is_empty()) {
                 turn.reply = Some(content.clone());
@@ -183,7 +299,7 @@ impl<'a> MainLine<'a> {
                 tool_calls: response.tool_calls.clone(),
             });
             if response.tool_calls.is_empty() {
-                return turn;
+                return TurnEnd::Finished;
             }
 
             let mut stop = None;
@@ -192,7 +308,7 @@ impl<'a> MainLine<'a> {
                 let result = if stop.is_some() {
                     prompts::NOT_RUN.to_owned()
                 } else {
-                    let (result, next) = self.run_call(call, &mut turn, &mut progress, approver);
+                    let (result, next) = self.run_call(call, turn, progress, approver);
                     if let Next::Stop(end) = next {
                         stop = Some(end);
                     }
@@ -203,13 +319,13 @@ impl<'a> MainLine<'a> {
                     content: result,
                 });
             }
-            if let Some(end) = stop {
-                turn.end = end;
-                return turn;
-            }
+            // Carried over before a stop too: after `finish`, a failed check goes on with the turn.
             progress.resend_asked = progress.broken;
             let rejected_now = std::mem::take(&mut progress.rejected_now);
             progress.rejected.extend(rejected_now);
+            if let Some(end) = stop {
+                return end;
+            }
         }
     }
 
@@ -263,8 +379,37 @@ impl<'a> MainLine<'a> {
             };
         }
         let result = match self.tools.dispatch(&call.name, &arguments, approver) {
-            Ok(output) => output,
-            Err(error) => prompts::tool_error(error),
+            Ok(output) => {
+                if call.name == RUN_CARGO
+                    && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+                    && subcommand == "add"
+                    && let [name] = &args[..]
+                {
+                    // `cargo add` may have changed `Cargo.toml`, so the build is to be checked
+                    // again. A crate it failed on is not asked about again at the end of the turn.
+                    progress.unchecked = true;
+                    if output.starts_with("failed") {
+                        progress.not_added.insert(
+                            name.replace('-', "_"),
+                            prompts::crate_not_added(name, "see the result of `run_cargo add`"),
+                        );
+                    }
+                }
+                output
+            }
+            Err(error) => {
+                // A crate the user said no to is not asked about again at the end of the turn.
+                if matches!(error, ToolError::NotApproved)
+                    && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+                    && subcommand == "add"
+                    && let [name] = &args[..]
+                {
+                    progress
+                        .not_added
+                        .insert(name.replace('-', "_"), prompts::crate_not_approved(name));
+                }
+                prompts::tool_error(error)
+            }
         };
         (result, Next::Continue)
     }
@@ -275,6 +420,11 @@ impl<'a> MainLine<'a> {
         request.tool_choice = Some(ToolChoice::Auto);
         request
     }
+}
+
+/// The arguments of a `run_cargo` call, if they fit.
+fn cargo_args(arguments: &serde_json::Map<String, Value>) -> Option<RunCargoArgs> {
+    serde_json::from_value(Value::Object(arguments.clone())).ok()
 }
 
 /// `finish`: ends the turn.

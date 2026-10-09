@@ -62,6 +62,60 @@ fn changed_lines_within(old: &str, new: &str, max_edits: usize) -> ChangedLines 
     ChangedLines { changed }
 }
 
+/// One line of [`line_diff`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiffLine<'a> {
+    /// In both contents.
+    Same(&'a str),
+    /// Only in the old content.
+    Removed(&'a str),
+    /// Only in the new content.
+    Added(&'a str),
+}
+
+/// The lines of `old` and `new` in order, each marked as kept, removed or added, by the same
+/// edit script as [`changed_lines`]. Between two kept lines, the removed lines come before the
+/// added ones.
+pub fn line_diff<'a>(old: &'a str, new: &'a str) -> Vec<DiffLine<'a>> {
+    let old: Vec<&str> = old.lines().collect();
+    let new: Vec<&str> = new.lines().collect();
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let old_middle = &old[head..old.len() - tail];
+    let new_middle = &new[head..new.len() - tail];
+
+    let mut lines: Vec<DiffLine> = old[..head].iter().map(|l| DiffLine::Same(l)).collect();
+    let kept = kept_lines(old_middle, new_middle, MAX_EDITS)
+        .unwrap_or_else(|| vec![false; new_middle.len()]);
+    // The kept lines of `new` are a subsequence of `old`, so matching each to the first equal
+    // line of `old` after the previous match always finds one.
+    let mut rest = old_middle.iter();
+    let mut added: Vec<DiffLine> = Vec::new();
+    for (line, kept) in new_middle.iter().zip(kept) {
+        if !kept {
+            added.push(DiffLine::Added(line));
+            continue;
+        }
+        for removed in rest.by_ref() {
+            if removed == line {
+                break;
+            }
+            lines.push(DiffLine::Removed(removed));
+        }
+        lines.append(&mut added);
+        lines.push(DiffLine::Same(line));
+    }
+    lines.extend(rest.map(|l| DiffLine::Removed(l)));
+    lines.append(&mut added);
+    lines.extend(old[old.len() - tail..].iter().map(|l| DiffLine::Same(l)));
+    lines
+}
+
 /// For each line of `new`, whether the shortest edit script from `old` keeps
 /// it. `None` when the script needs more than `max_edits` edits.
 ///
@@ -275,6 +329,58 @@ mod tests {
                 "kept lines are not a subsequence of old: {old:?} -> {new:?}"
             );
         }
+    }
+
+    #[test]
+    fn line_diff_gives_back_both_contents_and_keeps_a_longest_common_subsequence() {
+        let mut seed: u64 = 7;
+        let mut next = move |bound: u64| {
+            seed = seed.wrapping_mul(6364136223846793005).wrapping_add(1);
+            (seed >> 33) % bound
+        };
+        let letters = ["a", "b", "c"];
+        for _ in 0..500 {
+            let old: Vec<&str> = (0..next(9)).map(|_| letters[next(3) as usize]).collect();
+            let new: Vec<&str> = (0..next(9)).map(|_| letters[next(3) as usize]).collect();
+            let (old_text, new_text) = (old.join("\n"), new.join("\n"));
+            let diff = line_diff(&old_text, &new_text);
+            let from_old: Vec<&str> = diff
+                .iter()
+                .filter_map(|l| match *l {
+                    DiffLine::Same(s) | DiffLine::Removed(s) => Some(s),
+                    DiffLine::Added(_) => None,
+                })
+                .collect();
+            let from_new: Vec<&str> = diff
+                .iter()
+                .filter_map(|l| match *l {
+                    DiffLine::Same(s) | DiffLine::Added(s) => Some(s),
+                    DiffLine::Removed(_) => None,
+                })
+                .collect();
+            let same = diff
+                .iter()
+                .filter(|l| matches!(l, DiffLine::Same(_)))
+                .count();
+            assert_eq!(from_old, old, "{old:?} -> {new:?}");
+            assert_eq!(from_new, new, "{old:?} -> {new:?}");
+            assert_eq!(same, lcs_len(&old, &new), "{old:?} -> {new:?}");
+        }
+    }
+
+    #[test]
+    fn line_diff_puts_the_removed_lines_before_the_added_ones() {
+        assert_eq!(
+            line_diff("a\nx\nb\nc\n", "a\ny\nb\nc\nz\n"),
+            [
+                DiffLine::Same("a"),
+                DiffLine::Removed("x"),
+                DiffLine::Added("y"),
+                DiffLine::Same("b"),
+                DiffLine::Same("c"),
+                DiffLine::Added("z"),
+            ]
+        );
     }
 
     #[test]
