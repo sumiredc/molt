@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod doctor;
 mod profile;
 
 /// A Rust coding agent that writes code only in the ways its user can understand.
@@ -63,6 +64,12 @@ pub fn run() -> ExitCode {
     let cli = Cli::parse();
     match &cli.command {
         Some(Command::Profile(command)) => profile::run(cli.common.profile.as_deref(), command),
+        // --fake の台本はまだ読めない。黙って実際の接続先に送らないよう、受けずに止める
+        Some(Command::Doctor) if cli.common.fake.is_some() => {
+            eprintln!("doctor does not support --fake yet");
+            ExitCode::FAILURE
+        }
+        Some(Command::Doctor) => doctor::main(),
         _ => {
             eprintln!("not implemented yet");
             ExitCode::FAILURE
