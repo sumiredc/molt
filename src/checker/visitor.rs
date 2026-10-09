@@ -19,14 +19,14 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
-    Expr, ExprBreak, ExprClosure, ExprContinue, ExprForLoop, ExprIndex, ExprMethodCall, ExprRange,
-    ExprReference, ExprTry, ExprUnary, GenericArgument, Generics, ImplItem, ImplItemConst,
-    ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias,
-    ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta, PatIdent, PatReference, Path,
-    PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver, ReceiverKind, Token,
-    TraitItem, TraitItemConst, TraitItemType, Type, TypeFnPtr, TypeImplTrait, TypeParam,
-    TypeParamBound, TypePath, TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree,
-    WhereClause,
+    Expr, ExprAsync, ExprAwait, ExprBreak, ExprClosure, ExprContinue, ExprForLoop, ExprIndex,
+    ExprMethodCall, ExprRange, ExprReference, ExprTry, ExprUnary, GenericArgument, Generics,
+    ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct,
+    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
+    PatIdent, PatReference, Path, PathArguments, PredicateLifetime, PredicateType, QSelf, Receiver,
+    ReceiverKind, Signature, Token, TraitItem, TraitItemConst, TraitItemType, Type, TypeFnPtr,
+    TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypeReference, TypeSlice, TypeTraitObject,
+    UnOp, UseTree, WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -90,6 +90,9 @@ struct Detector<'s> {
     type_params: Vec<String>,
     /// What a trait in the bound list being visited is.
     bound_role: BoundRole,
+    /// Whether the functions being visited are items of a trait or of a trait
+    /// impl, where `async fn` is `async_fn_in_trait`.
+    in_trait: bool,
 }
 
 /// What a trait in a list of bounds stands for: a bound (`T: Trait`), a
@@ -227,8 +230,10 @@ impl Detector<'_> {
     /// Visits an item, and forgets the type parameters it declared after it.
     fn scoped(&mut self, visit: impl FnOnce(&mut Self)) {
         let outer = self.type_params.len();
+        let in_trait = self.in_trait;
         visit(self);
         self.type_params.truncate(outer);
+        self.in_trait = in_trait;
     }
 
     fn with_helpers_allowed(&mut self, allowed: bool, visit: impl FnOnce(&mut Self)) {
@@ -368,7 +373,11 @@ impl<'ast> Visit<'ast> for Detector<'_> {
     // traits_generics
 
     fn visit_item(&mut self, item: &'ast Item) {
-        self.scoped(|v| visit::visit_item(v, item));
+        self.scoped(|v| {
+            // A trait or a trait impl sets it again for its own items.
+            v.in_trait = false;
+            visit::visit_item(v, item)
+        });
     }
 
     fn visit_impl_item(&mut self, item: &'ast ImplItem) {
@@ -381,6 +390,7 @@ impl<'ast> Visit<'ast> for Detector<'_> {
 
     fn visit_item_trait(&mut self, item: &'ast ItemTrait) {
         self.mark_from(item.trait_token.span(), item.span(), Element::TraitDef);
+        self.in_trait = true;
         self.with_bound_role(BoundRole::Supertrait, |v| visit::visit_item_trait(v, item));
     }
 
@@ -397,6 +407,7 @@ impl<'ast> Visit<'ast> for Detector<'_> {
                 self.mark_from(item.impl_token.span(), item.span(), element);
             }
         }
+        self.in_trait = item.trait_.is_some();
         visit::visit_item_impl(self, item);
     }
 
@@ -605,12 +616,37 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         if let Some(capture) = &expr.capture {
             self.mark_from(capture.span(), expr.span(), Element::MoveClosure);
         }
+        if let Some(asyncness) = &expr.asyncness {
+            self.mark_from(asyncness.span(), expr.span(), Element::AsyncClosure);
+        }
         visit::visit_expr_closure(self, expr);
     }
 
     fn visit_type_fn_ptr(&mut self, ty: &'ast TypeFnPtr) {
         self.mark_from(ty.fn_token.span(), ty.span(), Element::FnPointer);
         visit::visit_type_fn_ptr(self, ty);
+    }
+
+    // async (and the parts of a signature that belong to unsafe)
+
+    fn visit_signature(&mut self, sig: &'ast Signature) {
+        if let Some(asyncness) = &sig.asyncness {
+            self.mark_from(asyncness.span(), sig.span(), Element::AsyncFn);
+            if self.in_trait {
+                self.mark_from(asyncness.span(), sig.span(), Element::AsyncFnInTrait);
+            }
+        }
+        visit::visit_signature(self, sig);
+    }
+
+    fn visit_expr_await(&mut self, expr: &'ast ExprAwait) {
+        self.push(expr.await_token.span(), Element::Await, ".await".to_owned());
+        visit::visit_expr_await(self, expr);
+    }
+
+    fn visit_expr_async(&mut self, expr: &'ast ExprAsync) {
+        self.mark_from(expr.async_token.span(), expr.span(), Element::AsyncBlock);
+        visit::visit_expr_async(self, expr);
     }
 
     // Names: paths, imports and method calls
@@ -1120,7 +1156,7 @@ fn g() {}
     #[test]
     fn an_attribute_that_is_not_built_in_is_attribute_macro() {
         assert_eq!(
-            elements("#[tokio::main]\nasync fn main() {}\n\n#[my_attr]\nfn f() {}\n"),
+            elements("#[tokio::main]\nfn main() {}\n\n#[my_attr]\nfn f() {}\n"),
             [
                 (1, Element::AttributeMacro, "tokio::main".to_owned()),
                 (4, Element::AttributeMacro, "my_attr".to_owned()),
@@ -1199,7 +1235,7 @@ enum E {
 #[cfg_attr(feature = \"serde\", derive(Debug, Serialize))]
 struct S;
 #[cfg_attr(all(), cfg_attr(test, tokio::main), inline)]
-async fn main() {}
+fn main() {}
 ";
         assert_eq!(
             elements(source),
@@ -1597,6 +1633,53 @@ fn f(g: MutexGuard<u8>, a: AtomicUsize) -> Arc<u8> {
         assert_eq!(
             only("fn f() {\n    let g = move || 1;\n}\n"),
             [Element::Closure, Element::MoveClosure]
+        );
+    }
+
+    // async
+
+    fn async_fn_lines(source: &str) -> Vec<(usize, Element)> {
+        elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| matches!(e, Element::AsyncFn | Element::AsyncFnInTrait))
+            .map(|(line, e, _)| (line, e))
+            .collect()
+    }
+
+    #[test]
+    fn async_fn_in_a_trait_or_a_trait_impl_is_async_fn_in_trait_and_elsewhere_is_not() {
+        let source = "\
+impl Store for S {
+    async fn load(&self) {
+        async fn inner() {}
+    }
+}
+impl S {
+    async fn save(&self) {}
+}
+";
+        assert_eq!(
+            async_fn_lines(source),
+            [
+                (2, Element::AsyncFn),
+                (2, Element::AsyncFnInTrait),
+                (3, Element::AsyncFn),
+                (7, Element::AsyncFn),
+            ]
+        );
+    }
+
+    #[test]
+    fn an_await_in_a_chain_is_on_the_line_of_await() {
+        let found = elements("async fn f() {\n    fetch()\n        .await;\n}\n");
+        assert_eq!(found[1..], [(3, Element::Await, ".await".to_owned())]);
+    }
+
+    #[test]
+    fn an_async_closure_is_both_async_closure_and_closure() {
+        assert_eq!(
+            only("fn f() {\n    let g = async || 1;\n}\n"),
+            [Element::Closure, Element::AsyncClosure]
         );
     }
 

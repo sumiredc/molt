@@ -30,6 +30,8 @@ pub(super) fn path_elements(segments: &[&str]) -> Vec<Element> {
         (Some("mem"), "drop") | (None, "drop") => found.push(Element::Drop),
         (Some("thread"), "spawn") => found.push(Element::ThreadSpawn),
         (Some("thread"), "scope") => found.push(Element::ThreadScope),
+        // `Box::pin(x)` makes a `Pin<Box<_>>`.
+        (Some("Box"), "pin") => found.push(Element::Pin),
         _ => {}
     }
     // `Clone::clone(&x)`, `Rc::clone(&x)`, `str::to_owned(s)`: the method
@@ -68,6 +70,8 @@ fn type_name(segment: &str) -> Option<Element> {
         "Result" | "Ok" | "Err" => Element::Result,
         "Option" | "Some" | "None" => Element::Option,
         "Fn" | "FnMut" | "FnOnce" => Element::FnTrait,
+        "Future" | "IntoFuture" => Element::Future,
+        "Pin" => Element::Pin,
         _ => return None,
     };
     Some(element)
