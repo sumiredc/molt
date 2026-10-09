@@ -78,6 +78,10 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),
+        None if cli.common.fake.is_some() => {
+            eprintln!("the main line does not support --fake yet");
+            ExitCode::FAILURE
+        }
         None => mainline::run(
             cli.common.profile.as_deref(),
             cli.common.ui_script.as_deref(),
