@@ -99,6 +99,8 @@ pub enum ChatError {
     Status { status: u16, body: String },
     /// 応答の本文が chat API の形として読めない。
     InvalidResponse(String),
+    /// 応答を待つ間に利用者が中断した（Ctrl-C）。応答は届いても使わない。
+    Interrupted,
 }
 
 impl fmt::Display for ChatError {
@@ -120,6 +122,7 @@ impl fmt::Display for ChatError {
             Self::InvalidResponse(reason) => {
                 write!(f, "the chat API returned an unexpected response: {reason}")
             }
+            Self::Interrupted => write!(f, "the request to the model was interrupted"),
         }
     }
 }
