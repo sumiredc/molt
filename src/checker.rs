@@ -4,7 +4,7 @@
 //! A pure function over strings: no file, no environment variable, no network.
 
 mod crates;
-mod diff;
+pub(crate) mod diff;
 pub mod finding;
 mod macro_args;
 pub mod visitor;

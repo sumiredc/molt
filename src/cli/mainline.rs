@@ -1,20 +1,23 @@
 //! `molt` without a subcommand: checks UC2's preconditions, then opens the main line in the cargo
 //! project at cwd (PRD §8.6).
 
+mod diff;
+
 use std::path::Path;
 use std::process::ExitCode;
 
 use super::profile;
 use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
 use crate::agent::mainline::{
-    Boundary, BoundaryCause, COMPILE_FIX_BUDGET, MainLine, TOOL_CALL_BUDGET, Turn, TurnEnd,
+    AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
+    TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{OpenAiClient, Router};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
-use crate::workspace::cargo::Cargo;
+use crate::workspace::cargo::{Cargo, CargoError, CargoOutput};
 use crate::workspace::path::Root;
 
 /// The main-line prompt (PRD §8.6).
@@ -92,7 +95,7 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
                 let turn = agent.turn(&line, &mut UiApprover::new(ui));
                 show_turn(ui, &turn);
                 if matches!(turn.end, TurnEnd::Boundary(_))
-                    && let Some(code) = at_boundary(ui)
+                    && let Some(code) = at_boundary(ui, agent)
                 {
                     return code;
                 }
@@ -108,11 +111,21 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
 }
 
 /// Shows what the model said last. When the turn stopped instead of finishing, also shows why,
-/// the tool calls and the files written so far.
+/// the tool calls and the files written so far. Then the diff of each file molt changed and the
+/// result of `cargo check` (PRD §3 Verification).
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     if let Some(reply) = &turn.reply {
         ui.show(reply);
     }
+    show_stop(ui, turn);
+    // At a boundary the turn is held for the user's choice, not done: nothing was checked yet.
+    if !matches!(turn.end, TurnEnd::Boundary(_)) {
+        show_changes(ui, turn);
+    }
+}
+
+/// Why the turn stopped, the tool calls and the files written so far, unless the model finished.
+fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
     let stopped = match &turn.end {
         TurnEnd::Finished => return,
         TurnEnd::OverBudget => {
@@ -143,6 +156,55 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     }
 }
 
+/// The crates molt could not add, the diff of each file molt changed, and the result of the
+/// `cargo check` molt ran at the end of the turn.
+fn show_changes(ui: &mut dyn Ui, turn: &Turn) {
+    show_crate_adds(ui, &turn.crate_adds);
+    show_diffs_and_check(ui, &turn.changes, turn.check.as_ref());
+}
+
+fn show_crate_adds(ui: &mut dyn Ui, crate_adds: &[CrateAdd]) {
+    for add in crate_adds {
+        match &add.outcome {
+            AddOutcome::Ran(output) if output.success => {}
+            AddOutcome::Ran(output) => ui.show(&format!(
+                "cargo add {} failed:\n{}",
+                add.name,
+                output.stderr.trim_end()
+            )),
+            AddOutcome::NotApproved => ui.show(&format!("Not added: the crate `{}`.", add.name)),
+            AddOutcome::Failed(why) => ui.show(&format!("cargo add {} failed: {why}", add.name)),
+        }
+    }
+}
+
+/// The diff of each file in `changes`, then the result of `check`, if one ran.
+fn show_diffs_and_check(
+    ui: &mut dyn Ui,
+    changes: &[Change],
+    check: Option<&Result<CargoOutput, CargoError>>,
+) {
+    for change in changes {
+        let diff = diff::unified(&change.path, change.before.as_deref(), &change.after);
+        if !diff.is_empty() {
+            ui.show(&diff);
+        }
+    }
+    match check {
+        None => {}
+        Some(Ok(output)) if output.success => ui.show("cargo check passed."),
+        Some(Ok(output)) => {
+            let printed = [output.stdout.trim_end(), output.stderr.trim_end()]
+                .into_iter()
+                .filter(|text| !text.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n");
+            ui.show(&format!("cargo check failed:\n{printed}"));
+        }
+        Some(Err(error)) => ui.show(&format!("cargo check could not run: {error}")),
+    }
+}
+
 /// Why the turn stopped at `boundary`, and what the user can do there.
 fn boundary_text(boundary: &Boundary) -> String {
     let items = boundary
@@ -169,14 +231,17 @@ fn boundary_text(boundary: &Boundary) -> String {
 const AT_BOUNDARY: &str = "Type /abort to withdraw the request.";
 
 /// Reads lines at a boundary until `/abort`, which withdraws the request: nothing more is
-/// changed, and the main line waits for the next request. Any other line is not accepted. Ctrl-D
-/// and Ctrl-C end the main line as at the prompt, and their exit code is returned.
-fn at_boundary(ui: &mut dyn Ui) -> Option<ExitCode> {
+/// changed, what was written before the boundary is shown with its `cargo check`, and the main
+/// line waits for the next request. Any other line is not accepted. Ctrl-D and Ctrl-C end the
+/// main line as at the prompt, and their exit code is returned.
+fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine) -> Option<ExitCode> {
     ui.show(AT_BOUNDARY);
     loop {
         match ui.read_line(PROMPT) {
             Ok(Input::Line(line)) if line.trim() == "/abort" => {
+                let withdrawal = agent.withdraw();
                 ui.show("Request withdrawn.");
+                show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
                 return None;
             }
             Ok(Input::Line(_)) => ui.show(AT_BOUNDARY),
@@ -631,7 +696,14 @@ mod write {
         client.push_chat(Ok(reply("Printed 1.")));
         let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
 
-        assert_eq!(ui.shown(), ["Printed 1."]);
+        assert_eq!(ui.shown()[0], "Printed 1.");
+        assert!(
+            ui.shown()
+                .iter()
+                .all(|text| !text.contains("rejected") && !text.contains("dbg")),
+            "{:?}",
+            ui.shown()
+        );
         assert!(
             fs::read_to_string(dir.path().join("src/main.rs"))
                 .unwrap()
@@ -683,6 +755,40 @@ mod write {
     }
 
     #[test]
+    fn abort_shows_the_diff_and_the_check_of_what_was_written_before_the_boundary() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "lib".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/lib.rs", "content": "pub fn f() {}\n" })
+                    .to_string(),
+            }],
+        }));
+        client.push_chat(Ok(write_main("first", WITH_DBG)));
+        client.push_chat(Ok(write_main("second", WITH_DBG)));
+        let (_, ui, _dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
+
+        let shown = ui.shown();
+        let at = shown
+            .iter()
+            .position(|text| text == "Request withdrawn.")
+            .unwrap();
+        assert_eq!(
+            shown[at + 1..],
+            [
+                "--- /dev/null\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn f() {}",
+                "cargo check could not run: the fake cargo has no more queued results",
+            ]
+        );
+        assert!(
+            shown[..at].iter().all(|text| !text.starts_with("---")),
+            "no diff at the boundary itself: {shown:?}"
+        );
+    }
+
+    #[test]
     fn ctrl_d_at_a_boundary_ends_the_main_line_with_success() {
         let client = rejected_twice_then("unused");
         let (code, _, _dir) = run(&client, [input("debug 1"), Step::Eof]);
@@ -694,5 +800,222 @@ mod write {
         let client = rejected_twice_then("unused");
         let (code, _, _dir) = run(&client, [input("debug 1"), Step::Interrupt]);
         assert_eq!(code, ExitCode::from(INTERRUPTED));
+    }
+}
+
+/// How the end of a turn that wrote shows on the main line: the diff of each file molt changed,
+/// the result of `cargo check`, and the approval of `cargo add`. Named so that
+/// `cargo test mainline::turn_end` selects them.
+#[cfg(test)]
+mod turn_end {
+    use std::fs;
+
+    use serde_json::json;
+
+    use super::tests::{input, project, reply};
+    use super::*;
+    use crate::cli::ui::Step;
+    use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::profile::status::{Provenance, Status};
+    use crate::profile::store::Timestamp;
+    use crate::workspace::cargo::{CargoCall, CargoOutput, CrateName, FakeCargo, Subcommand};
+
+    fn write_main(id: &str, content: &str) -> ChatResponse {
+        ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/main.rs", "content": content }).to_string(),
+            }],
+        }
+    }
+
+    fn output(success: bool, stderr: &str) -> CargoOutput {
+        CargoOutput {
+            success,
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+        }
+    }
+
+    /// Runs the main line on `steps` in a project with `src/main.rs`.
+    fn run(
+        client: &FakeChatClient,
+        cargo: &FakeCargo,
+        profile: Profile,
+        steps: impl IntoIterator<Item = Step>,
+    ) -> ScriptedUi {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), cargo);
+        let mut agent = MainLine::new(client, Router::new(&Config::default()), tools, profile);
+        let mut ui = ScriptedUi::new(steps);
+        main_line(&mut ui, &mut agent);
+        ui
+    }
+
+    const PRINT_1: &str = "fn main() {\n    println!(\"1\");\n}\n";
+    const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,3 @@\n-fn main() {}\n+fn main() {\n+    println!(\"1\");\n+}";
+
+    #[test]
+    fn the_diff_of_the_written_file_and_the_passed_check_are_shown_after_the_reply() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", PRINT_1)));
+        client.push_chat(Ok(reply("Printed 1.")));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(true, "")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(ui.shown(), ["Printed 1.", DIFF, "cargo check passed."]);
+    }
+
+    #[test]
+    fn a_failed_check_is_shown_with_its_errors() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", PRINT_1)));
+        client.push_chat(Ok(reply("Printed 1.")));
+        client.push_chat(Ok(reply("I could not fix it.")));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(false, "error[E0308]: mismatched types\n")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(
+            ui.shown(),
+            [
+                "I could not fix it.",
+                DIFF,
+                "cargo check failed:\nerror[E0308]: mismatched types"
+            ]
+        );
+    }
+
+    #[test]
+    fn going_over_the_compile_fixes_shows_the_stop_the_state_and_the_last_errors() {
+        let client = FakeChatClient::new();
+        let cargo = FakeCargo::new();
+        for i in 0..=COMPILE_FIX_BUDGET {
+            client.push_chat(Ok(write_main(&format!("w{i}"), PRINT_1)));
+            client.push_chat(Ok(reply("done")));
+            cargo.push(Ok(output(false, &format!("error: attempt {i}\n"))));
+        }
+
+        let ui = run(
+            &client,
+            &cargo,
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(
+            ui.shown(),
+            [
+                "done",
+                "Stopped: the code still does not build after 3 compile fixes in this turn.",
+                "Tool calls in this turn: write_file (4)",
+                "Files written in this turn: src/main.rs",
+                DIFF,
+                "cargo check failed:\nerror: attempt 3",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_check_that_cannot_run_is_shown() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", PRINT_1)));
+        client.push_chat(Ok(reply("Printed 1.")));
+
+        let ui = run(
+            &client,
+            &FakeCargo::new(),
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(
+            ui.shown().last().unwrap(),
+            "cargo check could not run: the fake cargo has no more queued results"
+        );
+    }
+
+    fn known_serde_json() -> Profile {
+        let mut profile = Profile::new();
+        profile
+            .transition(
+                ItemKey::Crate("serde_json".to_owned()),
+                Status::Known,
+                Provenance::Manual,
+                Timestamp::from_unix_seconds(0),
+                None,
+            )
+            .unwrap();
+        profile
+    }
+
+    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::to_string(&1);\n}\n";
+
+    #[test]
+    fn approving_a_known_crate_missing_from_cargo_toml_adds_it() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", USES_SERDE_JSON)));
+        client.push_chat(Ok(reply("done")));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(true, "")));
+        cargo.push(Ok(output(true, "")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            known_serde_json(),
+            [input("serialize 1"), Step::Confirm(true), input("/quit")],
+        );
+
+        assert_eq!(
+            cargo.calls(),
+            [
+                CargoCall::Add(CrateName::new("serde_json").unwrap()),
+                CargoCall::Run(Subcommand::Check),
+            ]
+        );
+        assert!(ui.asked()[1].contains("`serde_json`"), "{:?}", ui.asked());
+    }
+
+    #[test]
+    fn refusing_a_known_crate_missing_from_cargo_toml_does_not_add_it() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", USES_SERDE_JSON)));
+        client.push_chat(Ok(reply("done")));
+        client.push_chat(Ok(reply("serde_json is not a dependency")));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(false, "error[E0433]: unresolved crate\n")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            known_serde_json(),
+            [input("serialize 1"), Step::Confirm(false), input("/quit")],
+        );
+
+        assert_eq!(cargo.calls(), [CargoCall::Run(Subcommand::Check)]);
+        assert!(
+            ui.shown()
+                .contains(&"Not added: the crate `serde_json`.".to_owned()),
+            "{:?}",
+            ui.shown()
+        );
     }
 }
