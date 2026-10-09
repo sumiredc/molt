@@ -30,6 +30,7 @@ use syn::{
 };
 
 use crate::checker::finding::{Finding, ParseError};
+use crate::checker::macro_args::{self, MacroArgs};
 use crate::profile::element::Element;
 use crate::profile::status::ItemKey;
 use names::PathUse;
@@ -257,13 +258,19 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         let element = std_name(&mac.path)
             .and_then(|name| std_macro(&name))
             .unwrap_or(Element::MacroCall);
-        self.push(
-            mac.path.span(),
-            element,
-            format!("{}!", path_text(&mac.path)),
-        );
+        let text = format!("{}!", path_text(&mac.path));
+        let args = macro_args::read(mac);
+        if matches!(args, MacroArgs::Unparsed) {
+            // A std macro whose inside cannot be seen is checked like any
+            // other macro: as a call.
+            self.push(mac.path.span(), Element::MacroCall, text.clone());
+        }
+        self.push(mac.path.span(), element, text);
         self.path_use = Some((&mac.path as *const Path, PathUse::NotACall));
         visit::visit_macro(self, mac);
+        if let MacroArgs::Parsed(args) = &args {
+            macro_args::visit(args, self);
+        }
     }
 
     fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
@@ -843,6 +850,12 @@ struct Imports {
 }
 
 impl<'ast> Visit<'ast> for Imports {
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        if let MacroArgs::Parsed(args) = macro_args::read(mac) {
+            macro_args::visit(&args, self);
+        }
+    }
+
     fn visit_item_use(&mut self, item: &'ast ItemUse) {
         let mut imports = Vec::new();
         imported_paths(&item.tree, &mut Vec::new(), &mut imports);
@@ -1010,7 +1023,7 @@ fn has_custom_derive(attrs: &[Attribute]) -> bool {
 /// The name `path` gives to something of std: the last segment when the path
 /// is a bare name or starts with `std`, `core` or `alloc`. `None` for a path
 /// into any other crate or module (`my_crate::vec`), which cannot be std.
-fn std_name(path: &Path) -> Option<String> {
+pub(in crate::checker) fn std_name(path: &Path) -> Option<String> {
     let first = path.segments.first()?;
     let last = path.segments.last()?;
     let bare = path.leading_colon.is_none() && path.segments.len() == 1;
@@ -1228,7 +1241,9 @@ mod tests {
             ("asm", Element::InlineAsm),
         ];
         for (name, element) in cases {
-            let source = format!("fn f() {{\n    {name}!();\n}}\n");
+            // `a, b` parse in the shape of each of them (`matches!()` would
+            // not, and would also be a `macro_call`).
+            let source = format!("fn f() {{\n    {name}!(a, b);\n}}\n");
             assert_eq!(
                 elements(&source),
                 [(2, element, format!("{name}!"))],

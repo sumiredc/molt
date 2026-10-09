@@ -6,6 +6,7 @@
 mod crates;
 mod diff;
 pub mod finding;
+mod macro_args;
 pub mod visitor;
 
 use std::ffi::OsStr;
@@ -36,6 +37,12 @@ pub use finding::{CheckContext, CheckReport, Finding, ParseError};
 /// therefore put `Finding.line` on the token that makes the item (the macro
 /// path, the `?`, the method name, the first segment of a path), not on the
 /// start of an enclosing expression.
+///
+/// The arguments of the std macros that take Rust expressions (`println!`,
+/// `vec!`, `matches!` and the like) are checked like the code around them
+/// (`macro_args`); such a macro whose arguments do not parse in its shape is
+/// also a `macro_call`. The inside of any other macro is not seen, and its
+/// call is itself a finding.
 pub fn check_file(path: &Path, old: &str, new: &str, ctx: &CheckContext) -> CheckReport {
     let findings: Vec<Finding> = if path.file_name() == Some(OsStr::new("Cargo.toml")) {
         match crates::in_manifest(old, new) {
