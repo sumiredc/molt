@@ -312,7 +312,12 @@ fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
 /// That the session log could not be written, the first time it happens to a file. The main line
 /// goes on without it.
 fn show_log_error(ui: &mut dyn Ui, agent: &MainLine) {
-    if let Some((path, error)) = agent.log().take_error() {
+    show_error_of(ui, agent.log());
+}
+
+/// That `log` could not be written, the first time it happens to a file.
+fn show_error_of(ui: &mut dyn Ui, log: &SessionLog) {
+    if let Some((path, error)) = log.take_error() {
         ui.show(&format!(
             "Could not write the session log {}: {error}. The session goes on without it.",
             path.display()

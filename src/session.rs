@@ -123,6 +123,20 @@ impl SessionLog {
         }
     }
 
+    /// A log that records no events and whose request bodies go to `path`, an existing file
+    /// opened read-only, so that every write of a request body fails.
+    #[cfg(test)]
+    pub(crate) fn unwritable_requests(path: &Path) -> Self {
+        Self {
+            events: None,
+            requests: Some(Sink {
+                path: path.to_owned(),
+                file: RefCell::new(Some(File::open(path).unwrap())),
+                error: RefCell::new(None),
+            }),
+        }
+    }
+
     /// Creates the log of a new session in `dir`, creating `dir` when it does not exist:
     /// `<time>-<pid>.jsonl`, and `<time>-<pid>.requests.jsonl` for the request bodies when
     /// `request_bodies` is true. `<time>` is UTC, such as `20261010T123456Z`.

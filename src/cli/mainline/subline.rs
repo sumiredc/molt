@@ -1,6 +1,7 @@
 //! The side line on the terminal (PRD UC3, §8.6): a ruled banner on entering and leaving, its own
 //! prompt `molt [sub: arc, mutex]> `, and its output indented by 2 spaces.
 
+use super::show_error_of;
 use crate::agent::subline::SubLine;
 use crate::cli::ui::{Input, Ui};
 use crate::profile::status::ItemKey;
@@ -38,6 +39,7 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
             Ok(explanation) => ui.show(&indent(&explanation)),
             Err(error) => ui.show(&indent(&format!("Could not get the explanation: {error}"))),
         }
+        show_error_of(ui, log);
     }
     ui.show(&indent(HINT));
     let prompt = prompt(&side.boundary().items);
@@ -57,6 +59,7 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
                             ui.show(&indent(&format!("Could not get an answer: {error}")))
                         }
                     }
+                    show_error_of(ui, log);
                 }
             }
             Ok(Input::Interrupted) => break Left::Interrupted,
@@ -442,6 +445,44 @@ mod open {
         let client = stops_at_a_boundary_then(&["explanation"]);
         let (code, _) = run(&client, [input("debug 1"), Step::Interrupt, Step::Eof]);
         assert_eq!(code, ExitCode::SUCCESS);
+    }
+
+    #[test]
+    fn a_session_log_that_cannot_be_written_on_the_side_line_is_shown_once_right_away() {
+        let dir = project_with_a_profile();
+        let logs = tempfile::tempdir().unwrap();
+        let path = logs.path().join("read-only.jsonl");
+        fs::write(&path, "").unwrap();
+        let client = stops_at_a_boundary_then(&["explanation", "answer"]);
+        let cargo = FakeCargo::new();
+        let profile = Profile::load(&dir.path().join("profile.toml")).unwrap();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+        let crate::agent::mainline::TurnEnd::Boundary(boundary) = agent
+            .turn(
+                "debug 1",
+                &mut crate::cli::ui::UiApprover::new(&mut ScriptedUi::new([])),
+            )
+            .end
+        else {
+            panic!("the turn did not stop at a boundary");
+        };
+        let mut side = agent.side_line(boundary);
+        let log = SessionLog::unwritable_requests(&path);
+        let mut ui = ScriptedUi::new([input("why?"), Step::Eof]);
+
+        assert_eq!(super::run(&mut ui, &mut side, &log), Left::Eof);
+
+        let warning = format!("Could not write the session log {}: ", path.display());
+        let shown = ui.shown();
+        let warnings: Vec<usize> = shown
+            .iter()
+            .enumerate()
+            .filter(|(_, text)| text.starts_with(&warning))
+            .map(|(at, _)| at)
+            .collect();
+        assert_eq!(warnings.len(), 1, "{shown:?}");
+        assert_eq!(shown[warnings[0] - 1], "  explanation", "{shown:?}");
     }
 
     #[test]
