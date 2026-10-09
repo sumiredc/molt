@@ -63,6 +63,8 @@ fn type_name(segment: &str) -> Option<Element> {
         "Cow" => Element::Cow,
         "mpsc" => Element::Channel,
         "Send" | "Sync" => Element::SendSync,
+        "Result" | "Ok" | "Err" => Element::Result,
+        "Option" | "Some" | "None" => Element::Option,
         _ => return None,
     };
     Some(element)
@@ -70,12 +72,51 @@ fn type_name(segment: &str) -> Option<Element> {
 
 /// The elements a method call names, from the method's name and its number
 /// of arguments.
-pub(super) fn method_elements(name: &str, _args: usize) -> Vec<Element> {
+pub(super) fn method_elements(name: &str, args: usize) -> Vec<Element> {
     let element = match name {
         "clone" => Element::Clone,
         "to_owned" => Element::ToOwned,
         "into" => Element::FromInto,
+        "unwrap" => Element::Unwrap,
+        "expect" if args == 1 => Element::Expect,
+        name if RESULT_COMBINATORS.contains(&name) => Element::ResultCombinator,
         _ => return Vec::new(),
     };
     vec![element]
 }
+
+/// Methods of `Result` / `Option` that no iterator has. The ones an iterator
+/// also has (`map`, `filter`, ..) are told apart by the receiver.
+const RESULT_COMBINATORS: &[&str] = &[
+    "map_err",
+    "ok_or",
+    "ok_or_else",
+    "and_then",
+    "or_else",
+    "and",
+    "or",
+    "xor",
+    "unwrap_or",
+    "unwrap_or_else",
+    "unwrap_or_default",
+    "map_or",
+    "map_or_else",
+    "ok",
+    "err",
+    "is_some",
+    "is_none",
+    "is_ok",
+    "is_err",
+    "is_some_and",
+    "is_none_or",
+    "is_ok_and",
+    "is_err_and",
+    "as_deref",
+    "as_deref_mut",
+    "transpose",
+    "get_or_insert",
+    "get_or_insert_with",
+    "unwrap_err",
+    "expect_err",
+    "inspect_err",
+];

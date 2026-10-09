@@ -8,9 +8,10 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use molt::checker::visitor;
+use molt::checker::{CheckContext, CheckReport, check_file, visitor};
 use molt::profile::element::Element;
-use molt::profile::status::ItemKey;
+use molt::profile::status::{ItemKey, Provenance, Status};
+use molt::profile::store::{Profile, Timestamp};
 
 const EXPECT: &str = "// expect:";
 
@@ -103,6 +104,36 @@ fn every_element_fixture_is_named_after_an_element_it_expects() {
             path.display()
         );
     }
+}
+
+#[test]
+fn a_question_mark_added_to_a_later_line_of_an_existing_chain_is_reported_on_that_line() {
+    // `?` is a base element; deny it so that the check reports it.
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            ItemKey::Element(Element::QuestionMark),
+            Status::Unknown,
+            Provenance::Manual,
+            Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let own_modules = BTreeSet::new();
+    let ctx = CheckContext {
+        profile: &profile,
+        own_modules: &own_modules,
+    };
+    let old = "fn f(s: S) -> R {\n    let n = s\n        .first()\n        .second();\n}\n";
+    let new = "fn f(s: S) -> R {\n    let n = s\n        .first()?\n        .second();\n}\n";
+
+    let report = check_file(Path::new("src/lib.rs"), old, new, &ctx);
+
+    let CheckReport::OutOfProfile(findings) = report else {
+        panic!("expected OutOfProfile, got {report:?}");
+    };
+    let reported: Vec<(usize, ItemKey)> = findings.into_iter().map(|f| (f.line, f.key)).collect();
+    assert_eq!(reported, [(3, ItemKey::Element(Element::QuestionMark))]);
 }
 
 #[test]

@@ -19,12 +19,13 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 use syn::{
     AngleBracketedGenericArguments, AssocType, Attribute, BoundLifetimes, ConstParam, Constraint,
-    Expr, ExprBreak, ExprContinue, ExprIndex, ExprMethodCall, ExprReference, ExprUnary, Generics,
-    ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl, ItemMacro, ItemStruct,
-    ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime, LifetimeParam, Macro, Meta,
-    PatIdent, PatReference, Path, PredicateLifetime, PredicateType, QSelf, Receiver, ReceiverKind,
-    Token, TraitItem, TraitItemConst, TraitItemType, TypeImplTrait, TypeParam, TypeParamBound,
-    TypePath, TypeReference, TypeSlice, TypeTraitObject, UnOp, UseTree, WhereClause,
+    Expr, ExprBreak, ExprContinue, ExprIndex, ExprMethodCall, ExprReference, ExprTry, ExprUnary,
+    GenericArgument, Generics, ImplItem, ImplItemConst, ImplItemType, Item, ItemEnum, ItemImpl,
+    ItemMacro, ItemStruct, ItemTrait, ItemTraitAlias, ItemUnion, ItemUse, Label, Lifetime,
+    LifetimeParam, Macro, Meta, PatIdent, PatReference, Path, PathArguments, PredicateLifetime,
+    PredicateType, QSelf, Receiver, ReceiverKind, Token, TraitItem, TraitItemConst, TraitItemType,
+    Type, TypeImplTrait, TypeParam, TypeParamBound, TypePath, TypeReference, TypeSlice,
+    TypeTraitObject, UnOp, UseTree, WhereClause,
 };
 
 use crate::checker::finding::{Finding, ParseError};
@@ -331,7 +332,22 @@ impl<'ast> Visit<'ast> for Detector<'_> {
         if pat.by_ref.is_some() {
             self.mark(pat.span(), Element::RefPattern);
         }
+        // syn reads `None` in a pattern as a binding named `None`.
+        if pat.ident == "None" && pat.by_ref.is_none() && pat.subpat.is_none() {
+            self.mark(pat.span(), Element::Option);
+        }
         visit::visit_pat_ident(self, pat);
+    }
+
+    // error_handling
+
+    fn visit_expr_try(&mut self, expr: &'ast ExprTry) {
+        self.push(
+            expr.question_token.span(),
+            Element::QuestionMark,
+            "?".to_owned(),
+        );
+        visit::visit_expr_try(self, expr);
     }
 
     fn visit_type_slice(&mut self, ty: &'ast TypeSlice) {
@@ -470,6 +486,9 @@ impl<'ast> Visit<'ast> for Detector<'_> {
             && first.is_some_and(|first| first == "Self" || self.type_params.contains(&first));
         if ty.qself.is_some() || from_param {
             self.mark(ty.span(), Element::AssociatedType);
+        }
+        if is_box_dyn_error(ty) {
+            self.mark(ty.span(), Element::BoxDynError);
         }
         visit::visit_type_path(self, ty);
     }
@@ -625,12 +644,34 @@ fn imported_paths(tree: &UseTree, prefix: &mut Vec<String>, out: &mut Vec<(Vec<S
     }
 }
 
+/// `Box<dyn Error>`, also with more bounds (`Box<dyn Error + Send + Sync>`)
+/// or a path to the trait (`Box<dyn std::error::Error>`).
+fn is_box_dyn_error(ty: &TypePath) -> bool {
+    let Some(last) = ty.path.segments.last() else {
+        return false;
+    };
+    let PathArguments::AngleBracketed(args) = &last.arguments else {
+        return false;
+    };
+    last.ident == "Box"
+        && args.args.iter().any(|arg| {
+            let GenericArgument::Type(Type::TraitObject(object)) = arg else {
+                return false;
+            };
+            object.bounds.iter().any(|bound| {
+                matches!(bound, TypeParamBound::Trait(t)
+                    if t.path.segments.last().is_some_and(|s| s.ident == "Error"))
+            })
+        })
+}
+
 /// The element of implementing a trait, by the trait's last name, besides
 /// `trait_impl`.
 fn implemented_trait(name: &str) -> Option<Element> {
     let element = match name {
         "Deref" | "DerefMut" => Element::ImplDeref,
         "Drop" => Element::ImplDrop,
+        "Error" => Element::ImplError,
         _ => return None,
     };
     Some(element)
@@ -1424,6 +1465,43 @@ fn f(g: MutexGuard<u8>, a: AtomicUsize) -> Arc<u8> {
     fn spawn_and_scope_are_thread_elements_only_through_thread() {
         let source = "fn f() {\n    thread::spawn(g);\n    std::thread::scope(g);\n    tokio::spawn(g);\n    spawn(g);\n}\n";
         assert_eq!(only(source), [Element::ThreadSpawn, Element::ThreadScope]);
+    }
+
+    // error_handling
+
+    #[test]
+    fn a_question_mark_in_a_chain_is_on_its_own_line() {
+        let source =
+            "fn f(s: S) -> R {\n    let n = s\n        .first()?\n        .second()?;\n}\n";
+        let lines: Vec<usize> = elements(source)
+            .into_iter()
+            .filter(|(_, e, _)| *e == Element::QuestionMark)
+            .map(|(line, _, _)| line)
+            .collect();
+        assert_eq!(lines, [3, 4]);
+    }
+
+    #[test]
+    fn none_in_a_pattern_is_option_and_a_binding_with_another_name_is_not() {
+        let source =
+            "fn f(x: X) {\n    match x {\n        None => {}\n        none => {}\n    }\n}\n";
+        assert_eq!(elements(source), [(3, Element::Option, "None".to_owned())]);
+    }
+
+    #[test]
+    fn expect_with_a_message_is_expect_and_a_method_of_another_arity_is_not() {
+        assert_eq!(
+            only("fn f(x: X) {\n    x.expect(\"msg\");\n    x.expect();\n}\n"),
+            [Element::Expect]
+        );
+    }
+
+    #[test]
+    fn a_box_of_a_dyn_error_with_more_bounds_is_box_dyn_error() {
+        let found = only("fn f() -> Box<dyn std::error::Error + Send + Sync> {}\n");
+        assert!(found.contains(&Element::BoxDynError), "{found:?}");
+        let other = only("fn f() -> Box<dyn Display> {}\n");
+        assert!(!other.contains(&Element::BoxDynError), "{other:?}");
     }
 
     #[test]
