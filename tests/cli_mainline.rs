@@ -231,6 +231,20 @@ fn a_fake_script_that_runs_out_stops_the_turn_and_the_prompt_comes_back() {
 }
 
 #[test]
+fn fake_without_a_fake_script_path_shows_the_usage_and_exits() {
+    let setup = setup_without_a_key();
+    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
+    let output = molt_with_fake(&setup, &script, &["--fake".as_ref()]);
+    assert_eq!(output.status.code(), Some(2));
+    assert!(
+        stderr(&output).contains("Usage: molt"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "", "the main line must not open");
+}
+
+#[test]
 fn an_unreadable_fake_script_is_reported_before_the_main_line_opens() {
     let setup = setup_without_a_key();
     let missing = setup.dir.path().join("missing.toml");
