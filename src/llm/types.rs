@@ -88,6 +88,9 @@ pub enum ChatError {
     FakeExhausted,
     /// `[api]` の `api_key_env` に名前があるのに、その環境変数が未設定か空。値ではなく名前だけを持つ。
     MissingApiKey { env: String },
+    /// API キーを TLS 無しの `http://` で loopback 以外のホストへ送ろうとした（PRD §3）。
+    /// `env` は `api_key_env` の名前、`host` は `base_url` の `host:port`。キーの値は持たない。
+    ApiKeyOverPlainHttp { env: String, host: String },
     /// エンドポイントに届かない、タイムアウトした、応答を受け取り切れなかった。
     /// クライアントを作れなかった（TLS の初期化など）ときも、まれにこれになる。
     /// `molt doctor` が機能の欠落と分けて「接続の失敗」として報告するのに使う。
@@ -105,6 +108,11 @@ impl fmt::Display for ChatError {
             Self::MissingApiKey { env } => {
                 write!(f, "the API key environment variable `{env}` is not set")
             }
+            Self::ApiKeyOverPlainHttp { env, host } => write!(
+                f,
+                "refusing to send the API key from `{env}` over plain HTTP to `{host}`; \
+                 use https, or set `api_key_env = \"\"` if the endpoint needs no API key"
+            ),
             Self::Request(source) => write!(f, "request to the chat API failed: {source}"),
             Self::Status { status, body } => {
                 write!(f, "the chat API returned HTTP {status}: {body}")

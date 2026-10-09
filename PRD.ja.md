@@ -84,7 +84,7 @@ molt が書く行に `known` でない要素が入らないこと、境界では
 | 検証 | molt が書き込んだ後は `cargo check` を実行し、その結果（通らなければエラー）を利用者に見せる |
 | 冪等 | 同じ要素が同じセッション内で何度出ても、`known` になった後は再び境界にならない |
 | 言語 | 解説・質問・回答は利用者の直近の入力言語で返す。UI の固定文字列は英語 |
-| セキュリティ | API キーは環境変数から読み、ファイル・ログ・セッションの記録に書かない |
+| セキュリティ | API キーは環境変数から読み、ファイル・ログ・セッションの記録に書かない。TLS 無しの `http://` でキーを送るのは loopback のホストだけで、loopback 以外のホストへの `http://` ではクライアントを作らない |
 
 ---
 
@@ -411,7 +411,7 @@ molt doctor               設定したエンドポイントとモデルの対応
 | reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | 境界の判断、プロファイル内の代替案、解説、副線の質疑応答、質問の生成 |
 
 `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` は light の代替候補。既定値の正は `config.toml` を読むコード。
-設定は `config.toml`（`[api]` `[models]` `[reasoning_effort]` `[capabilities]`）。`[api]` はエンドポイントを指す。API キーが要るかはエンドポイントごとに違い、キーは環境変数から読む（3 節）。`[capabilities]` は `molt doctor` が書く。
+設定は `config.toml`（`[api]` `[models]` `[reasoning_effort]` `[capabilities]`）。`[api]` はエンドポイントを指す。API キーが要るかはエンドポイントごとに違い、キーは環境変数から読む（3 節）。キーの要らないエンドポイントは `api_key_env = ""` にする。キーがあり、`base_url` が loopback（`localhost`・`127.0.0.0/8`・`::1`）以外のホストへの `http://` なら、クライアントを作らない。キーを平文で機械の外に出さないため。`[capabilities]` は `molt doctor` が書く。
 `molt doctor` は各役割のモデルに対し、ID の存在、素の chat、`tool_choice: required` でのツール呼び出し、`response_format: json_schema` の遵守、`reasoning_effort` の挙動を確かめて表にする。`json_schema` が使えないモデルでは、`json_object` ＋ プロンプトにスキーマ ＋ serde 検証 ＋ 1 回修復に切り替える。
 
 エージェントをモデルに対して確かめる層は 3 つあり、どれも他の代わりにならない。
@@ -444,7 +444,7 @@ molt doctor               設定したエンドポイントとモデルの対応
 |---|---|
 | checker | `tests/fixtures/elements/*.rs` の先頭 `// expect: …` と検出集合の完全一致。`fixtures/negative/*.rs` は基本要素以外 0 件。全 `Element` に fixture があることをテストで強制。変更行フィルタ（旧↔新）で既存の要素が出ないこと |
 | profile | toml 往復、遷移で履歴が増える、未記載 = unknown、allow / deny、存在しない要素名・無効な状態の拒否 |
-| llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` で、`[api]` が指すエンドポイントに対して走らせる（8.7） |
+| llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` で、`[api]` が指すエンドポイントに対して走らせる（8.7）。キーがあり loopback 以外への `http://` ならクライアントを作らず、loopback・`https://`・キー無しなら作る |
 | agent（本線） | `FakeCargo` + tempdir。Clean → ディスクに書かれる。却下 → ディスクは変わらず、書き直しで通る。2 回却下で境界。`request_boundary` で境界。予算超過で止まる |
 | agent（副線） | ① で known、② で seen、③ で利用者が書いた行の要素が known。③ で `cargo check` が失敗したらプロファイルは変わらない。① の後、同じ要素で再び境界にならない。本線のリクエスト履歴に副線のメッセージが無い。`/abort` で何も変わらない |
 | agent（git） | tempdir の git リポジトリで、承認なし → コミットが増えない。承認 → molt が変えたファイルだけがコミットされ、push は呼ばれない |

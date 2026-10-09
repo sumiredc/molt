@@ -3,6 +3,7 @@
 //! wire 形式（JSON）への変換はここだけが持つ。形は `tests/fixtures/llm/*.json` で固めてある。
 
 use std::fmt;
+use std::net::IpAddr;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -39,6 +40,8 @@ impl OpenAiClient {
     /// API キーは `api.api_key_env` の名前の環境変数から `var` で読む。名前が空なら
     /// キーを要らないエンドポイント（ローカルのモデルなど）とみなし、Authorization ヘッダを送らない。
     /// 名前があるのに値が無い（未設定・空）ときは [`ChatError::MissingApiKey`]。
+    /// キーがあり、`base_url` が TLS 無しの `http://` で loopback 以外のホストを指すときは
+    /// [`ChatError::ApiKeyOverPlainHttp`]（キーを平文で機械の外に出さない。PRD §3）。
     /// 呼び出し側は `|name| std::env::var(name).ok()` を渡す。
     pub fn new(api: &Api, var: impl Fn(&str) -> Option<String>) -> Result<Self, ChatError> {
         let api_key = if api.api_key_env.is_empty() {
@@ -51,6 +54,14 @@ impl OpenAiClient {
                 })?;
             Some(ApiKey(key))
         };
+        if api_key.is_some()
+            && let Some(host) = plain_http_host_off_this_machine(&api.base_url)
+        {
+            return Err(ChatError::ApiKeyOverPlainHttp {
+                env: api.api_key_env.clone(),
+                host,
+            });
+        }
 
         // reqwest は rustls の暗号実装を同梱しない features で入れている（ビルド時間とディスクのため、
         // aws-lc-rs の代わりに ring を使う）。既に入っていれば Err が返るだけなので無視する。
@@ -104,6 +115,33 @@ impl OpenAiClient {
             None => text,
         }
     }
+}
+
+/// `base_url` が TLS 無しの `http://` で loopback 以外のホストを指すなら、その `host:port` を返す。
+///
+/// URL として読めないときは `None`（検査せず、送るときの [`ChatError::Request`] に任せる）。
+fn plain_http_host_off_this_machine(base_url: &str) -> Option<String> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    if url.scheme() != "http" {
+        return None;
+    }
+    // IPv6 は `[::1]` の形で返る。IP アドレスとして読めなければホスト名
+    let host = url.host_str()?;
+    let loopback = match host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .parse::<IpAddr>()
+    {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
+    };
+    if loopback {
+        return None;
+    }
+    Some(match url.port_or_known_default() {
+        Some(port) => format!("{host}:{port}"),
+        None => host.to_owned(),
+    })
 }
 
 impl ChatClient for OpenAiClient {
@@ -573,6 +611,89 @@ mod tests {
                 "{error:?}"
             );
         }
+    }
+
+    // --- 平文の HTTP で機械の外へキーを送らない（PRD §3） ---
+
+    #[test]
+    fn api_key_over_plain_http_to_a_non_loopback_host_is_refused() {
+        let error = OpenAiClient::new(
+            &api("http://192.0.2.1:8000/v1", "TEST_API_KEY", 5),
+            with_key,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &error,
+                ChatError::ApiKeyOverPlainHttp { env, host }
+                    if env == "TEST_API_KEY" && host == "192.0.2.1:8000"
+            ),
+            "{error:?}"
+        );
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(display.contains("https"), "{display}");
+        assert!(display.contains("api_key_env"), "{display}");
+        assert!(!display.contains(KEY), "{display}");
+        assert!(!debug.contains(KEY), "{debug}");
+    }
+
+    #[test]
+    fn api_key_over_plain_http_to_a_host_name_is_refused() {
+        let error = OpenAiClient::new(&api("http://gpu-box.lan/v1", "TEST_API_KEY", 5), with_key)
+            .unwrap_err();
+        assert!(
+            matches!(&error, ChatError::ApiKeyOverPlainHttp { host, .. } if host == "gpu-box.lan:80"),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn userinfo_in_base_url_does_not_appear_in_the_refusal() {
+        let error = OpenAiClient::new(
+            &api("http://user:secret@192.0.2.1:8000/v1", "TEST_API_KEY", 5),
+            with_key,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(&error, ChatError::ApiKeyOverPlainHttp { host, .. } if host == "192.0.2.1:8000"),
+            "{error:?}"
+        );
+        let display = error.to_string();
+        let debug = format!("{error:?}");
+        assert!(!display.contains("secret"), "{display}");
+        assert!(!debug.contains("secret"), "{debug}");
+    }
+
+    #[test]
+    fn api_key_over_plain_http_to_loopback_is_allowed() {
+        for base_url in [
+            "http://localhost:8000/v1",
+            "http://127.0.0.1:8000/v1",
+            "http://127.0.0.2:8000/v1",
+            "http://[::1]:8000/v1",
+        ] {
+            let result = OpenAiClient::new(&api(base_url, "TEST_API_KEY", 5), with_key);
+            assert!(result.is_ok(), "{base_url}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn plain_http_to_a_non_loopback_host_is_allowed_without_an_api_key() {
+        let result = OpenAiClient::new(&api("http://192.0.2.1:8000/v1", "", 5), with_key);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn unparsable_base_url_is_left_to_the_request_error() {
+        let result = OpenAiClient::new(&api("not a url", "TEST_API_KEY", 5), with_key);
+        assert!(result.is_ok(), "{result:?}");
+    }
+
+    #[test]
+    fn api_key_over_https_to_a_non_loopback_host_is_allowed() {
+        let result = OpenAiClient::new(&api("https://example.com/v1", "TEST_API_KEY", 5), with_key);
+        assert!(result.is_ok(), "{result:?}");
     }
 
     // --- API キーを漏らさない（#18 の条件 6 の一部） ---
