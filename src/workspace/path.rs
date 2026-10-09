@@ -41,6 +41,11 @@ impl Root {
         Ok(Self { path: canonical })
     }
 
+    /// The canonical root, e.g. the working directory for the commands run in the project.
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
+
     /// Resolves `path` (relative to the root, or absolute) to a canonical path under the root.
     pub fn resolve_read(&self, path: impl AsRef<Path>) -> Result<PathBuf, PathError> {
         self.resolve(path.as_ref()).map(|(resolved, _)| resolved)
