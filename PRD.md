@@ -391,7 +391,14 @@ molt check [PATHS..]      Run the checker alone and print findings (exit 1 if an
 molt doctor               Check what the configured endpoint and models support
 ```
 
-Common flags: `--profile PATH`, `--fake` (offline run with `FakeChatClient` and a script).
+Common flags:
+
+| Flag | What it replaces | Why |
+|---|---|---|
+| `--profile PATH` | Where the profile is read from and written to | Try a different profile without touching the one in the config directory |
+| `--fake` | The model's responses, with a script and `FakeChatClient` | Run offline, without a model |
+| `--ui-script PATH` | The user's inputs, choices, approvals, and interrupts, with a script file and `ScriptedUi`; output goes to stdout | Let a coding agent (not a person) drive one pass against a real model without a terminal |
+
 The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces.
 "Language" in section 3 is met by holding fixed UI strings in English and instructing the model to "answer in the language of the user's latest input" (there is no language-detection code).
 
@@ -412,7 +419,7 @@ Three things verify the agent against a model, and none replaces another.
 | Layer | Endpoint | What it verifies | Where it runs |
 |---|---|---|---|
 | `--fake` | `FakeChatClient` with a script | The control flow and the guarantees in section 3, deterministically | CI and local tests |
-| Local model | A local OpenAI-compatible endpoint, with any model that passes `doctor` | That the prompts actually elicit tool calls, rewrites, boundary judgements, and explanations, without spending credits | By hand and the `#[ignore]` tests, during development |
+| Local model | A local OpenAI-compatible endpoint, with any model that passes `doctor` | That the prompts actually elicit tool calls, rewrites, boundary judgements, and explanations, without spending credits | By hand or with `--ui-script`, and the `#[ignore]` tests, during development |
 | Nemotron | Nebius Token Factory | That the configuration for submission passes `doctor` and the one pass in section 10 | By hand, before submission |
 
 ### 8.8 Persistence
@@ -473,7 +480,7 @@ flowchart TB
   classDef ok fill:#ecfdf5,stroke:#059669,color:#065f46
 ```
 
-What to read from the figure: the checker, the LLM client, and the Workspace do not depend on each other, so before the main-line loop they can be built in any order. The point where one pass runs from the main line through to a git commit is the measure of whether the product stands. The same pass is then tried by hand against a real model (8.7); that does not replace the `--fake` pass, which is what CI runs.
+What to read from the figure: the checker, the LLM client, and the Workspace do not depend on each other, so before the main-line loop they can be built in any order. The point where one pass runs from the main line through to a git commit is the measure of whether the product stands. The same pass is then tried against a real model, by hand or with `--ui-script` (8.7); that does not replace the `--fake` pass, which is what CI runs.
 
 ---
 
