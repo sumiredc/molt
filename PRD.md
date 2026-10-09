@@ -298,7 +298,7 @@ What to read from the figure: there is no path to `known` by molt's judgement al
 | Parsing | syn 3 (`full` + `visit` + `extra-traits`), `proc-macro2` with `span-locations` | The check runs on the complete file before it is written. Anything syn cannot parse would not pass cargo either, so tree-sitter's strength in partial parsing brings nothing. No C toolchain needed |
 | LLM client | Hand-written on reqwest + serde_json (behind the `ChatClient` trait) | Want control over Nemotron-specific response fields and over what is sent |
 | git | Shell out to the `git` command (fixed argv) | Only the 4 operations status / diff / add / commit |
-| Input | clap + rustyline (history, editing; approvals and choices are typed as lines too) | Raw stdin has no history and is hard to use. A single input path gives Ctrl-C one meaning at every question (no answer, never ending molt by itself); dialoguer's dialogs raise SIGINT on Ctrl-C |
+| Input | clap + rustyline (history, editing; approvals and choices are typed as lines too) | Raw stdin has no history and is hard to use. With a single input path, Ctrl-C while molt reads input is always rustyline's interruption, so at an approval or a choice it is no answer instead of ending molt; dialoguer's dialogs raise SIGINT on Ctrl-C. Ctrl-C while waiting for the model still ends molt |
 | Where the check hooks in | The content received by `write_file` / `edit_file` is checked as a string before it is written to disk | Keeps "content that fails the check never lands on disk" by structure. The check becomes a pure function over strings |
 | Scope of the check | Only the changed lines | So that code the user already had does not stop unrelated edits (section 4) |
 | Separating the main and side lines | Separate message lists for the main line and the side line | Keeps "the side line never appears in the main line's transcript" by structure |
@@ -400,7 +400,7 @@ Common flags:
 | `--fake PATH` | The model's responses, with a script file and `FakeChatClient` | Run offline, without a model |
 | `--ui-script PATH` | The user's inputs, choices, approvals, and interrupts, with a script file and `ScriptedUi`; output goes to stdout | Let a coding agent (not a person) drive one pass against a real model without a terminal |
 
-The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces. While the main line is paused at a boundary, it takes only `/side` and `/abort` (UC3).
+The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces. While the main line is paused at a boundary, it takes only `/side` and `/abort` (UC3); Ctrl-C or Ctrl-D there, and Ctrl-D on the side line, end molt as at the main-line prompt. The side line does not send a line starting with `/` that is not one of its commands to the model. If the explanation cannot be got, the side line says so and still takes questions.
 "Language" in section 3 is met by holding fixed UI strings in English and instructing the model to "answer in the language of the user's latest input" (there is no language-detection code).
 
 ### 8.7 Model roles and configuration

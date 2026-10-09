@@ -22,11 +22,7 @@ impl TerminalUi {
     /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
     /// Ctrl-D: the user did not answer.
     fn read_answer(&mut self, prompt: &str) -> Result<Option<String>, UiError> {
-        match self.editor.readline(prompt) {
-            Ok(line) => Ok(Some(line)),
-            Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(None),
-            Err(error) => Err(terminal_error(error)),
-        }
+        answer(self.editor.readline(prompt))
     }
 }
 
@@ -94,6 +90,16 @@ impl Ui for TerminalUi {
     }
 }
 
+/// The line read for an answer. Ctrl-C and Ctrl-D are no answer; any other failure is a terminal
+/// error.
+fn answer(read: Result<String, ReadlineError>) -> Result<Option<String>, UiError> {
+    match read {
+        Ok(line) => Ok(Some(line)),
+        Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(None),
+        Err(error) => Err(terminal_error(error)),
+    }
+}
+
 /// `y` or `yes` is true, `n` or `no` is false, in any case and with spaces around. Anything else
 /// is no answer.
 fn confirm_answer(line: &str) -> Option<bool> {
@@ -120,6 +126,26 @@ fn terminal_error(error: ReadlineError) -> UiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ctrl_c_and_ctrl_d_at_a_confirmation_or_a_choice_are_no_answer() {
+        assert_eq!(answer(Err(ReadlineError::Interrupted)).unwrap(), None);
+        assert_eq!(answer(Err(ReadlineError::Eof)).unwrap(), None);
+    }
+
+    #[test]
+    fn a_line_read_for_an_answer_is_the_answer() {
+        assert_eq!(answer(Ok("y".to_owned())).unwrap().as_deref(), Some("y"));
+    }
+
+    #[test]
+    fn other_failures_reading_an_answer_are_terminal_errors() {
+        let failed = io::Error::new(io::ErrorKind::BrokenPipe, "closed");
+        assert!(matches!(
+            answer(Err(ReadlineError::Io(failed))),
+            Err(UiError::Terminal(error)) if error.kind() == io::ErrorKind::BrokenPipe
+        ));
+    }
 
     #[test]
     fn yes_and_no_in_any_case_answer_a_confirmation() {
