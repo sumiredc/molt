@@ -75,7 +75,7 @@ struct Held {
 }
 
 /// What withdrawing a request held at a boundary showed: the files the turn changed before the
-/// boundary and the `cargo check` molt ran on them, if any was left to run.
+/// boundary and the `cargo check` molt ran on them, when there were any.
 #[derive(Debug)]
 pub struct Withdrawal {
     pub changes: Vec<Change>,
@@ -380,9 +380,20 @@ impl<'a> MainLine<'a> {
         }
         let result = match self.tools.dispatch(&call.name, &arguments, approver) {
             Ok(output) => {
-                // `cargo add` changed `Cargo.toml`, so the build is to be checked again.
-                if call.name == RUN_CARGO && arguments.get("subcommand") == Some(&json!("add")) {
+                if call.name == RUN_CARGO
+                    && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+                    && subcommand == "add"
+                    && let [name] = &args[..]
+                {
+                    // `cargo add` may have changed `Cargo.toml`, so the build is to be checked
+                    // again. A crate it failed on is not asked about again at the end of the turn.
                     progress.unchecked = true;
+                    if output.starts_with("failed") {
+                        progress.not_added.insert(
+                            name.replace('-', "_"),
+                            prompts::crate_not_added(name, "see the result of `run_cargo add`"),
+                        );
+                    }
                 }
                 output
             }

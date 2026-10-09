@@ -595,6 +595,34 @@ fn a_crate_the_model_was_refused_is_not_asked_about_again_at_the_end_of_the_turn
 }
 
 #[test]
+fn a_crate_the_model_failed_to_add_is_not_asked_about_again_at_the_end_of_the_turn() {
+    let dir = project();
+    let (client, cargo) = (FakeChatClient::new(), FakeCargo::new());
+    client.push_chat(Ok(call(
+        "a",
+        "run_cargo",
+        json!({ "subcommand": "add", "args": ["serde_json"] }),
+    )));
+    client.push_chat(Ok(write_file("w", "src/main.rs", USES_SERDE_JSON)));
+    client.push_chat(Ok(finish("f")));
+    cargo.push(failed("error: no network"));
+    cargo.push(passed());
+    let mut main_line = main_line(&client, &cargo, &dir, known_crate("serde_json"));
+    let mut approver = Answer::yes();
+
+    main_line.turn("serialize 1", &mut approver);
+
+    assert_eq!(approver.asked.len(), 1, "{:?}", approver.asked);
+    assert_eq!(
+        cargo.calls(),
+        [
+            CargoCall::Add(CrateName::new("serde_json").unwrap()),
+            CargoCall::Run(Subcommand::Check)
+        ]
+    );
+}
+
+#[test]
 fn a_crate_cargo_toml_declares_is_not_asked_about() {
     let dir = project();
     fs::write(
