@@ -1,10 +1,12 @@
 //! The boundary between molt and its user (PRD §8.2): reading a line, showing text, choosing one
 //! of several items and approving an operation.
 //!
-//! [`ScriptedUi`] answers from a script, so tests and `--ui-script` (PRD §8.6) run without a
-//! terminal.
+//! `TerminalUi` talks to a person through rustyline (lines, with history and editing) and
+//! dialoguer (choices and approvals) (PRD §8.1). [`ScriptedUi`] answers from a script instead, so
+//! tests and `--ui-script` (PRD §8.6) run without a terminal.
 
 mod scripted;
+mod terminal;
 
 use std::error::Error;
 use std::fmt;
@@ -13,6 +15,7 @@ use std::io;
 use crate::agent::tools::{ApprovalRequest, Approver};
 
 pub use scripted::{ScriptError, ScriptedUi, Step};
+pub(crate) use terminal::TerminalUi;
 
 /// What the user gave at a line prompt.
 #[derive(Debug, Clone, PartialEq, Eq)]

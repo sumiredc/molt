@@ -51,7 +51,7 @@ pub(super) fn profile_path(profile_flag: Option<&Path>) -> Result<PathBuf, Strin
 
 /// Reads the profile, turning a missing file into the prompt for `molt init`
 /// (UC5's exception flow).
-fn load(path: &Path) -> Result<Profile, String> {
+pub(super) fn load(path: &Path) -> Result<Profile, String> {
     Profile::load(path).map_err(|error| match error {
         StoreError::NotFound { path } => format!(
             "no profile at {}\nrun `molt init` to create one",
