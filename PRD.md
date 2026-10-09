@@ -84,7 +84,7 @@ molt guarantees that no line it writes contains an element that is not `known`, 
 | Verification | After molt writes, it runs `cargo check` and shows the user the result (the errors, if it fails) |
 | Idempotence | However many times the same element appears within a session, it never becomes a boundary again once it is `known` |
 | Language | Explanations, questions, and answers are returned in the language of the user's latest input. Fixed UI strings are English |
-| Security | The API key is read from an environment variable and is never written to files, logs, or the session log |
+| Security | The API key is read from an environment variable and is never written to files, logs, or the session log. It is sent over plain `http://` (no TLS) only to a loopback host; for plain `http://` to any other host, the client is not created |
 
 ---
 
@@ -411,7 +411,7 @@ The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex
 | reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | Boundary judgement, alternatives within the profile, explanations, side-line Q&A, question generation |
 
 `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` is an alternative candidate for light. The source of truth for the defaults is the code that reads `config.toml`.
-Configuration is `config.toml` (`[api]` `[models]` `[reasoning_effort]` `[capabilities]`). `[api]` points at the endpoint; whether it needs an API key differs per endpoint, and the key is read from an environment variable (section 3). `[capabilities]` is written by `molt doctor`.
+Configuration is `config.toml` (`[api]` `[models]` `[reasoning_effort]` `[capabilities]`). `[api]` points at the endpoint; whether it needs an API key differs per endpoint, and the key is read from an environment variable (section 3). For an endpoint that needs no key, set `api_key_env = ""`. When there is a key and `base_url` is `http://` to a host other than loopback (`localhost`, `127.0.0.0/8`, `::1`), the client is not created, so the key never leaves the machine in plain text. `[capabilities]` is written by `molt doctor`.
 `molt doctor` checks, for the model of each role, that the ID exists, plain chat, a tool call with `tool_choice: required`, adherence to `response_format: json_schema`, and the behaviour of `reasoning_effort`, and prints a table. For a model that cannot use `json_schema`, it switches to `json_object` + the schema in the prompt + serde validation + 1 repair attempt.
 
 Three things verify the agent against a model, and none replaces another.
@@ -444,7 +444,7 @@ The guarantees in section 3 are verified without a network.
 |---|---|
 | checker | Exact match between the leading `// expect: …` in `tests/fixtures/elements/*.rs` and the detected set. `fixtures/negative/*.rs` yields 0 findings other than base elements. A test enforces that every `Element` has a fixture. The changed-line filter (old↔new) does not report existing elements |
 | profile | toml round trip, a transition grows the history, no entry = unknown, allow / deny, rejection of non-existent element names and invalid statuses |
-| llm | `FakeChatClient` (a response queue + a record of sent requests). The wire format is compared with JSON fixtures. The real API is `#[ignore]` and runs against whatever endpoint `[api]` points at (8.7) |
+| llm | `FakeChatClient` (a response queue + a record of sent requests). The wire format is compared with JSON fixtures. The real API is `#[ignore]` and runs against whatever endpoint `[api]` points at (8.7). The client refuses to be created with a key for plain `http://` to a non-loopback host, and is created for loopback, `https://`, or no key |
 | agent (main line) | `FakeCargo` + tempdir. Clean → written to disk. Rejected → disk unchanged, and the rewrite passes. 2 rejections → boundary. `request_boundary` → boundary. Stops when the budget is exceeded |
 | agent (side line) | ① → known, ② → seen, ③ → the elements in the user's lines are known. If `cargo check` fails in ③, the profile is unchanged. After ①, the same element is not a boundary again. The main line's request history has no side-line messages. `/abort` changes nothing |
 | agent (git) | In a tempdir git repository: without approval → no new commit. With approval → only the files molt changed are committed, and push is not called |

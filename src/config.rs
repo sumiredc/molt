@@ -31,6 +31,7 @@ pub struct Api {
     /// `/chat/completions` の手前までの URL。
     pub base_url: String,
     /// API キーを読む環境変数の名前。キーそのものは設定ファイルに書かない（PRD §3）。
+    /// キーの要らないエンドポイント（ローカルのモデルなど）では空にする。空なら Authorization を送らない。
     pub api_key_env: String,
     /// 1 リクエストのタイムアウト（秒）。
     pub timeout_secs: u64,

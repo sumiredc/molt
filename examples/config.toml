@@ -37,7 +37,14 @@ tool_choice_required = false
 json_schema = false
 reasoning_effort = false
 
-# ローカルの OpenAI 互換エンドポイントを使うときは、上の [api] の base_url を次のように書き換え、
-# <local-endpoint> を実際のホストとポートにする。[models] にはそのエンドポイントのモデル ID を書く。
+# ローカルの OpenAI 互換エンドポイントを使うときは、上の [api] の base_url と api_key_env の 2 行を
+# 次のようにセットで書き換え、<local-endpoint> を実際のホストとポートにする。
+# [models] にはそのエンドポイントのモデル ID を書く。
 #
 # base_url = "http://<local-endpoint>/v1"
+# api_key_env = ""
+#
+# - api_key_env を空にしないと、既定の NEBIUS_API_KEY のキーがそのエンドポイントに送られる
+# - キーがあるとき、loopback（localhost・127.0.0.0/8・::1）以外のホストへの http:// には
+#   キーを送らず、クライアントを作らずにエラーを返す。キーを送るなら https にする
+# - そのエンドポイントがキーを要求するなら、専用の環境変数の名前を書く（例: api_key_env = "LOCAL_API_KEY"）
