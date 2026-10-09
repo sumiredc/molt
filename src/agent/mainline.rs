@@ -318,10 +318,36 @@ impl<'a> MainLine<'a> {
             Choice::Rewrite => Status::Seen,
         };
         let at = Timestamp::now();
-        for item in resolution.items() {
+        let mut items: Vec<ItemKey> = resolution.items().to_vec();
+        if to == Status::Known {
+            // The check allows a crate only when every spelling of it in the profile (`-` or `_`)
+            // is `known`, so ① unlocks each of them, or the same boundary would come again. Both
+            // sides are compared as the check does, with every `-` turned into `_`.
+            let checked_as = |name: &str| name.replace('-', "_");
+            let crates: Vec<String> = items
+                .iter()
+                .filter_map(|item| match item {
+                    ItemKey::Crate(name) => Some(checked_as(name)),
+                    ItemKey::Element(_) => None,
+                })
+                .collect();
+            let spellings: Vec<ItemKey> = self
+                .profile
+                .entries()
+                .map(|(key, _)| key)
+                .filter(|spelling| match spelling {
+                    ItemKey::Crate(name) => {
+                        !items.contains(spelling) && crates.contains(&checked_as(name))
+                    }
+                    ItemKey::Element(_) => false,
+                })
+                .cloned()
+                .collect();
+            items.extend(spellings);
+        }
+        for item in &items {
             // Only these are changes, and PRD §7 allows each with `side_line`, so none is refused.
-            // ② leaves a `seen` item as it is. A `known` item is never at a boundary: its writes
-            // pass the check, and `request_boundary` does not stop on it.
+            // ② leaves a `seen` item as it is, and ① a `known` one.
             if matches!(
                 (self.profile.status(item), to),
                 (Status::Unknown, _) | (Status::Seen, Status::Known)

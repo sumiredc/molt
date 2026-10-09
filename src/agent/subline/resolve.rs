@@ -555,6 +555,102 @@ fn rewrite_leaves_an_item_already_seen_as_it_is_and_adds_no_history() {
 }
 
 #[test]
+fn unlock_of_a_crate_unlocks_its_other_spelling_too_so_the_boundary_does_not_come_again() {
+    const WITH_SERDE_JSON: &str = "fn f(_: serde_json::Value) {}\n\nfn main() {}\n";
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            "crate:serde-json".parse().unwrap(),
+            Status::Seen,
+            Provenance::SelfReport,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+    client.push_chat(Ok(write_main("first", WITH_SERDE_JSON)));
+    client.push_chat(Ok(write_main("second", WITH_SERDE_JSON)));
+    let TurnEnd::Boundary(boundary) = main_line.turn("use serde_json", &mut Refuse).end else {
+        panic!("the turn did not stop at a boundary");
+    };
+    assert_eq!(boundary.items, ["crate:serde_json".parse().unwrap()]);
+    let side = main_line.side_line(boundary);
+    let resolution = side
+        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write_main("third", WITH_SERDE_JSON)));
+    client.push_chat(Ok(reply("done")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert!(
+        matches!(resumed.turn.end, TurnEnd::Finished),
+        "{:?}",
+        resumed.turn.end
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        WITH_SERDE_JSON
+    );
+}
+
+#[test]
+fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too() {
+    const WITH_SERDE_JSON: &str = "fn f(_: serde_json::Value) {}\n\nfn main() {}\n";
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            "crate:serde_json".parse().unwrap(),
+            Status::Seen,
+            Provenance::SelfReport,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "asked".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["crate:serde-json"], "reason": "it parses JSON" })
+                .to_string(),
+        }],
+    }));
+    let TurnEnd::Boundary(boundary) = main_line.turn("parse JSON", &mut Refuse).end else {
+        panic!("the turn did not stop at a boundary");
+    };
+    assert_eq!(boundary.items, ["crate:serde-json".parse().unwrap()]);
+    let side = main_line.side_line(boundary);
+    let resolution = side
+        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write_main("w1", WITH_SERDE_JSON)));
+    client.push_chat(Ok(write_main("w2", WITH_SERDE_JSON)));
+    client.push_chat(Ok(reply("done")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert!(
+        matches!(resumed.turn.end, TurnEnd::Finished),
+        "{:?}",
+        resumed.turn.end
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        WITH_SERDE_JSON
+    );
+}
+
+#[test]
 fn unlock_makes_an_item_already_seen_known() {
     let dir = project();
     let client = FakeChatClient::new();
