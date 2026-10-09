@@ -1,0 +1,12 @@
+{
+  "id": "chatcmpl-0",
+  "object": "chat.completion",
+  "model": "nvidia/Nemotron-3_5-Lightning",
+  "choices": [
+    {
+      "index": 0,
+      "message": {"role": "assistant", "content": "Hello."},
+      "finish_reason": "stop"
+    }
+  ]
+}
