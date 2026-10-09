@@ -3,6 +3,8 @@ use std::process::ExitCode;
 
 use clap::{Args, Parser, Subcommand};
 
+mod profile;
+
 /// A Rust coding agent that writes code only in the ways its user can understand.
 #[derive(Debug, Parser)]
 #[command(name = "molt", version)]
@@ -58,9 +60,14 @@ pub(crate) enum ProfileCommand {
 }
 
 pub fn run() -> ExitCode {
-    let _cli = Cli::parse();
-    eprintln!("not implemented yet");
-    ExitCode::FAILURE
+    let cli = Cli::parse();
+    match &cli.command {
+        Some(Command::Profile(command)) => profile::run(cli.common.profile.as_deref(), command),
+        _ => {
+            eprintln!("not implemented yet");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 #[cfg(test)]
