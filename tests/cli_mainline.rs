@@ -2,9 +2,11 @@
 //! the binary without a terminal: stdin is closed and the user's side comes from `--ui-script`.
 
 use std::fs;
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Output;
+use std::thread::{self, JoinHandle};
 
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::TempDir;
@@ -76,6 +78,7 @@ fn molt(setup: &Setup, cwd: &Path, profile: &Path, script: &Path) -> Output {
         .env("MOLT_HOME", setup.home())
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
+        .env_remove("MOLT_LOG")
         .arg("--profile")
         .arg(profile)
         .arg("--ui-script")
@@ -274,4 +277,167 @@ fn a_ui_script_that_runs_out_before_quit_ends_with_failure() {
         "{}",
         stderr(&output)
     );
+}
+
+/// The files in the session log directory of `setup`, by name.
+fn session_files(setup: &Setup) -> Vec<(String, String)> {
+    let mut files: Vec<(String, String)> = fs::read_dir(setup.home().join("sessions"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            let name = path.file_name().unwrap().to_str().unwrap().to_owned();
+            (name, fs::read_to_string(&path).unwrap())
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+#[test]
+fn the_session_log_is_one_jsonl_file_in_the_molt_directory_and_without_molt_log_nothing_else() {
+    let setup = Setup::new();
+    let script = setup.script(r#"steps = [{ input = "hello" }, { input = "/quit" }]"#);
+    let output = molt(&setup, &setup.project(), &setup.profile(), &script);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let files = session_files(&setup);
+    assert_eq!(files.len(), 1, "{files:?}");
+    assert!(files[0].0.ends_with(".jsonl"), "{files:?}");
+    assert!(!files[0].0.ends_with(".requests.jsonl"), "{files:?}");
+    assert_eq!(fs::read_dir(setup.project()).unwrap().count(), 1);
+}
+
+#[test]
+fn when_the_session_log_cannot_be_created_the_main_line_does_not_open() {
+    let setup = Setup::new();
+    // A file where the directory of the session logs would be.
+    fs::write(setup.home().join("sessions"), "").unwrap();
+    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
+    let output = molt(&setup, &setup.project(), &setup.profile(), &script);
+    assert_eq!(output.status.code(), Some(1));
+    assert!(
+        stderr(&output).contains("cannot create the session log in "),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(stdout(&output), "");
+}
+
+/// A chat API on a loopback port that answers each request with the next of `responses`
+/// (status, body), and hands back the `authorization` header of each request.
+fn serve(responses: Vec<(u16, String)>) -> (String, JoinHandle<Vec<Option<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let handle = thread::spawn(move || {
+        let mut authorizations = Vec::new();
+        for (status, body) in responses {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let (mut length, mut authorization) = (0, None);
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                let (key, value) = line.split_once(':').unwrap();
+                match key.trim().to_lowercase().as_str() {
+                    "content-length" => length = value.trim().parse().unwrap(),
+                    "authorization" => authorization = Some(value.trim().to_owned()),
+                    _ => {}
+                }
+            }
+            reader.read_exact(&mut vec![0; length]).unwrap();
+            let mut stream = stream;
+            write!(
+                stream,
+                "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            )
+            .unwrap();
+            authorizations.push(authorization);
+        }
+        authorizations
+    });
+    (base_url, handle)
+}
+
+/// A response of the chat API with a `write_file` call of `content` to `src/main.rs`.
+fn write_main(id: &str, content: &str) -> (u16, String) {
+    let arguments = serde_json::json!({ "path": "src/main.rs", "content": content }).to_string();
+    let body = serde_json::json!({
+        "choices": [{
+            "index": 0,
+            "message": {
+                "role": "assistant",
+                "content": null,
+                "tool_calls": [{
+                    "id": id,
+                    "type": "function",
+                    "function": { "name": "write_file", "arguments": arguments },
+                }],
+            },
+            "finish_reason": "tool_calls",
+        }],
+    });
+    (200, body.to_string())
+}
+
+#[test]
+fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout() {
+    const KEY: &str = "sk-molt-session-test-4f9c2e";
+    // `dbg!` twice stops the first request at a boundary. The model writes the key back in the
+    // content of both, which the log records as the arguments of the tool call and the rejected
+    // content. The next request is refused by an endpoint that writes the key back in its body.
+    let with_dbg = format!("fn main() {{\n    dbg!(\"{KEY}\");\n}}\n");
+    let (base_url, server) = serve(vec![
+        write_main("first", &with_dbg),
+        write_main("second", &with_dbg),
+        (401, format!(r#"{{"error":"invalid api key {KEY}"}}"#)),
+    ]);
+    let setup = Setup::with_api(&format!(
+        "base_url = \"{base_url}\"\napi_key_env = \"MOLT_TEST_SESSION_API_KEY\"\n"
+    ));
+    let script = setup.script(
+        r#"steps = [{ input = "debug 1" }, { input = "/abort" }, { input = "next" }, { input = "/quit" }]"#,
+    );
+    let output = cargo_bin_cmd!("molt")
+        .current_dir(setup.project())
+        .env("MOLT_HOME", setup.home())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env("MOLT_TEST_SESSION_API_KEY", KEY)
+        .env("MOLT_LOG", "1")
+        .arg("--profile")
+        .arg(setup.profile())
+        .arg("--ui-script")
+        .arg(&script)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    // The key was in play: every request carried it.
+    let authorizations = server.join().unwrap();
+    assert_eq!(authorizations, vec![Some(format!("Bearer {KEY}")); 3]);
+    let stdout = stdout(&output);
+    assert!(stdout.contains("Stopped at a boundary"), "{stdout}");
+    assert!(stdout.contains("HTTP 401"), "{stdout}");
+    assert!(!stdout.contains(KEY), "{stdout}");
+    assert!(!stderr(&output).contains(KEY));
+    let files = session_files(&setup);
+    let names: Vec<&str> = files.iter().map(|(name, _)| name.as_str()).collect();
+    assert_eq!(names.len(), 2, "{names:?}");
+    assert!(names[0].ends_with(".jsonl") && !names[0].ends_with(".requests.jsonl"));
+    assert!(names[1].ends_with(".requests.jsonl"), "{names:?}");
+    let (events, requests) = (&files[0].1, &files[1].1);
+    assert!(events.contains(r#""event":"rejected""#), "{events}");
+    // What the model wrote back is in the log, with the key hidden.
+    assert!(events.contains(r#"dbg!(\"<redacted>\")"#), "{events}");
+    assert_eq!(requests.lines().count(), 3, "{requests}");
+    for (name, content) in &files {
+        assert!(!content.contains(KEY), "{name}: {content}");
+    }
 }
