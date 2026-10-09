@@ -8,8 +8,8 @@ pub mod types;
 pub use fake::FakeChatClient;
 pub use router::{JsonError, Role, Router};
 pub use types::{
-    ChatError, ChatRequest, ChatResponse, Message, ResponseFormat, ToolCall, ToolChoice,
-    ToolDefinition, UnknownTool,
+    ChatError, ChatRequest, ChatResponse, InvalidArguments, Message, ResponseFormat, ToolCall,
+    ToolChoice, ToolDefinition, UnknownTool,
 };
 
 /// chat API のエンドポイント。
