@@ -1033,7 +1033,7 @@ pub(in crate::checker) fn std_name(path: &Path) -> Option<String> {
 }
 
 /// The element of a std macro that has one of its own.
-fn std_macro(name: &str) -> Option<Element> {
+pub(in crate::checker) fn std_macro(name: &str) -> Option<Element> {
     let element = match name {
         "print" | "println" | "eprint" | "eprintln" => Element::PrintMacro,
         "format" | "write" | "writeln" => Element::FormatMacro,

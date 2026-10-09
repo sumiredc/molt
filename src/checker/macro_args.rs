@@ -12,7 +12,8 @@ use syn::punctuated::Punctuated;
 use syn::visit::Visit;
 use syn::{Expr, Ident, Macro, Pat, Token};
 
-use crate::checker::visitor::std_name;
+use crate::checker::visitor::{std_macro, std_name};
+use crate::profile::element::Element;
 
 /// What `mac`'s arguments are to the checker.
 pub enum MacroArgs {
@@ -51,7 +52,10 @@ enum Shape {
 
 /// Reads `mac`'s arguments.
 pub fn read(mac: &Macro) -> MacroArgs {
-    let Some(shape) = std_name(&mac.path).and_then(|name| shape(&name)) else {
+    let Some(shape) = std_name(&mac.path)
+        .and_then(|name| std_macro(&name))
+        .and_then(shape)
+    else {
         return MacroArgs::NotRead;
     };
     let parsed = match shape {
@@ -75,15 +79,19 @@ pub fn visit<'a, V: Visit<'a>>(args: &'a Args, visitor: &mut V) {
     }
 }
 
-/// The shape of the arguments of the std macro `name`, or `None` when they
-/// are not read.
-fn shape(name: &str) -> Option<Shape> {
-    let shape = match name {
-        "print" | "println" | "eprint" | "eprintln" | "format" | "write" | "writeln" | "assert"
-        | "assert_eq" | "assert_ne" | "debug_assert" | "debug_assert_eq" | "debug_assert_ne"
-        | "panic" | "unreachable" | "todo" | "unimplemented" | "dbg" => Shape::Format,
-        "vec" => Shape::Vec,
-        "matches" => Shape::Matches,
+/// The shape of the arguments of a std macro, from the element `std_macro`
+/// gives it, so that a name added to a family there is read here too.
+/// `None` for `asm!` (`inline_asm`), whose arguments are not read. An element
+/// added to `std_macro` needs its shape here, or its arguments go unread.
+fn shape(element: Element) -> Option<Shape> {
+    let shape = match element {
+        Element::PrintMacro
+        | Element::FormatMacro
+        | Element::AssertMacro
+        | Element::DbgMacro
+        | Element::Panic => Shape::Format,
+        Element::VecMacro => Shape::Vec,
+        Element::MatchesMacro => Shape::Matches,
         _ => return None,
     };
     Some(shape)
@@ -291,7 +299,11 @@ mod tests {
     fn the_arguments_of_each_family_of_std_macros_are_checked() {
         let cases = [
             "print!(\"{}\", x.clone());",
+            "eprint!(\"{}\", x.clone());",
             "eprintln!(\"{}\", x.clone());",
+            "assert_ne!(x.clone(), y);",
+            "debug_assert!(x.clone() == y);",
+            "debug_assert_eq!(x.clone(), y);",
             "let _ = writeln!(out, \"{}\", x.clone());",
             "assert!(x.clone() == y);",
             "debug_assert_ne!(x.clone(), y, \"{}\", z);",
