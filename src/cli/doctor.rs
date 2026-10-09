@@ -62,12 +62,7 @@ fn fail(error: &Error) -> ExitCode {
 /// `config` の役割ごとに確かめ、結果を `out` に書き、`path` の `[capabilities]` を書き換える。
 ///
 /// 接続に失敗したか設定が誤っていたら、その旨を書いて `Ok(false)` を返し、`path` には触れない。
-pub(crate) fn run(
-    path: &Path,
-    config: &Config,
-    client: &dyn ChatClient,
-    out: &mut dyn Write,
-) -> Result<bool> {
+fn run(path: &Path, config: &Config, client: &dyn ChatClient, out: &mut dyn Write) -> Result<bool> {
     let io_error = |source| Error::Io {
         path: PathBuf::from("<stdout>"),
         source,
@@ -79,7 +74,7 @@ pub(crate) fn run(
         }
         Ok(reports) => {
             write!(out, "{}", render(&reports)).map_err(io_error)?;
-            write_capabilities(path, &capabilities(&reports))?;
+            write_capabilities(path, config, &capabilities(&reports))?;
             writeln!(out, "wrote [capabilities] to {}", path.display()).map_err(io_error)?;
             Ok(true)
         }
@@ -441,20 +436,30 @@ fn render(reports: &[RoleReport]) -> String {
 
 /// `path` の `[capabilities]` を `capabilities` に書き換える。ほかの節・キー・コメントはそのまま残す。
 ///
-/// 書き込む前にファイル全体が `config.toml` として読めることを確かめ、読めなければ何も変えない。
+/// 書き込む前にファイル全体が `config.toml` として読めることと、`[api]`・`[models]`・
+/// `[reasoning_effort]` が確かめたとき（`checked`）と同じであることを確かめ、どちらかが崩れていれば何も変えない。
+/// 確かめている間に利用者が接続先やモデルを書き換えると、別のモデルの結果を記録してしまうため。
 /// 書き込みは同じディレクトリの一時ファイルに書いてから rename するので、途中で失敗しても
 /// 元のファイルは壊れない。内容が変わらなければ書き込まない。
-fn write_capabilities(path: &Path, capabilities: &Capabilities) -> Result<()> {
-    // config.toml がリンクなら、リンクを一時ファイルで置き換えないよう、指す先に書く
+fn write_capabilities(path: &Path, checked: &Config, capabilities: &Capabilities) -> Result<()> {
+    let path_error = |source| Error::Io {
+        path: path.to_owned(),
+        source,
+    };
+    // config.toml がリンクなら、リンクを一時ファイルで置き換えないよう、指す先に書く。
+    // 指す先が無いリンクは、置き換えてしまわないよう止める
     let target = match fs::canonicalize(path) {
         Ok(target) => target,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => path.to_owned(),
-        Err(source) => {
-            return Err(Error::Io {
-                path: path.to_owned(),
-                source,
-            });
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(path_error(io::Error::new(
+                    io::ErrorKind::NotFound,
+                    "config.toml is a symbolic link to a missing file",
+                )));
+            }
+            path.to_owned()
         }
+        Err(source) => return Err(path_error(source)),
     };
     let io_error = |source| Error::Io {
         path: target.clone(),
@@ -466,10 +471,17 @@ fn write_capabilities(path: &Path, capabilities: &Capabilities) -> Result<()> {
         Err(source) => return Err(io_error(source)),
     };
     let text = original.as_deref().unwrap_or("");
-    toml::from_str::<Config>(text).map_err(|source| Error::ConfigParse {
+    let current = toml::from_str::<Config>(text).map_err(|source| Error::ConfigParse {
         path: target.clone(),
         source,
     })?;
+    if (&current.api, &current.models, &current.reasoning_effort)
+        != (&checked.api, &checked.models, &checked.reasoning_effort)
+    {
+        return Err(io_error(io::Error::other(
+            "[api], [models] or [reasoning_effort] changed while doctor was running; run doctor again",
+        )));
+    }
     let mut document: DocumentMut = text.parse().map_err(|e: toml_edit::TomlError| {
         io_error(io::Error::new(io::ErrorKind::InvalidData, e.to_string()))
     })?;
@@ -492,8 +504,9 @@ fn write_capabilities(path: &Path, capabilities: &Capabilities) -> Result<()> {
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
     let temporary = target.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    // 同じ名前のファイルが既にあれば、自分のものではないので消さずに止める
+    let mut file = fs::File::create_new(&temporary).map_err(io_error)?;
     let written = (|| {
-        let mut file = fs::File::create_new(&temporary)?;
         file.write_all(updated.as_bytes())?;
         if original.is_some() {
             // API キーを書かないファイルでも、利用者が絞った権限は保つ
@@ -1164,33 +1177,77 @@ reasoning_effort = false
         assert_eq!(fs::read_to_string(&env.path).unwrap(), broken);
     }
 
-    // --- API キー ---
-
     #[test]
-    fn doctor_writes_the_api_key_to_neither_config_toml_nor_the_output() {
-        // doctor はキーを受け取らない（キーは OpenAiClient の中にだけある）。ここでは、doctor が
-        // 書き出すものがキーの環境変数の名前と、[capabilities] の真偽だけであることを確かめる
-        let key = "sk-molt-doctor-secret";
+    fn doctor_does_not_write_when_models_or_api_changed_while_checking() {
         let env = env_with(Some(CONFIG));
-        let fake = fake_with([
-            passing(),
-            Replies {
-                tool_choice: Err(status(400)),
-                ..passing()
-            },
-            passing(),
-        ]);
+        // 確かめたときの light のモデルと、書き戻すときのファイルの [models] が違う
+        let mut checked = Config::load(&env.path).unwrap();
+        checked.models.light = "another-model".to_owned();
+        let fake = FakeChatClient::new();
+        fake.push_models(Ok(vec![
+            "another-model".to_owned(),
+            "generate-model".to_owned(),
+            "reason-model".to_owned(),
+        ]));
+        for _ in 0..3 {
+            push(&fake, passing());
+        }
+        let mut out = Vec::new();
 
-        let (_, output) = run_doctor(&env, &fake);
+        let result = run(&env.path, &checked, &fake, &mut out);
 
-        let text = fs::read_to_string(&env.path).unwrap();
-        assert!(!text.contains(key) && !output.contains(key));
-        assert!(!text.contains("api_key ="), "{text}");
+        assert!(matches!(result, Err(Error::Io { .. })), "{result:?}");
+        assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_keeps_the_permissions_of_config_toml() {
+        use std::os::unix::fs::PermissionsExt;
+        let env = env_with(Some(CONFIG));
+        fs::set_permissions(&env.path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        run_doctor(&env, &fake_with([passing(), passing(), passing()]));
+
+        let mode = fs::metadata(&env.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
+        assert!(written(&env).capabilities.light.json_schema);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_writes_through_a_symlinked_config_toml_and_keeps_the_link() {
+        let env = env_with(None);
+        let real = env.path.with_file_name("real.toml");
+        fs::write(&real, CONFIG).unwrap();
+        std::os::unix::fs::symlink(&real, &env.path).unwrap();
+
+        run_doctor(&env, &fake_with([passing(), passing(), passing()]));
+
         assert!(
-            text.contains("api_key_env = \"MOLT_DOCTOR_TEST_KEY\""),
-            "{text}"
+            fs::symlink_metadata(&env.path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
         );
-        // base_url に認証情報を埋め込む書き方もあるので、出力に接続先を出さない
-        assert!(!output.contains("localhost"), "{output}");
+        assert!(
+            fs::read_to_string(&real)
+                .unwrap()
+                .contains("json_schema = true")
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn doctor_does_not_rewrite_config_toml_when_nothing_changes() {
+        use std::os::unix::fs::MetadataExt;
+        let env = env_with(Some(CONFIG));
+        run_doctor(&env, &fake_with([passing(), passing(), passing()]));
+        let first = fs::metadata(&env.path).unwrap().ino();
+
+        run_doctor(&env, &fake_with([passing(), passing(), passing()]));
+
+        // rename で置き換えていれば inode が変わる
+        assert_eq!(fs::metadata(&env.path).unwrap().ino(), first);
     }
 }
