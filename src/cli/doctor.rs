@@ -40,10 +40,10 @@ pub(crate) fn main() -> ExitCode {
     };
     let client = match OpenAiClient::new(&config.api, |name| std::env::var(name).ok()) {
         Ok(client) => client,
-        Err(e) => {
+        Err(error) => {
             // クライアントを作れない（API キーの環境変数が無いなど）ときも、確かめられていないので書き換えない
-            eprintln!("connection failed: {e}");
-            eprintln!("{}", not_changed(&path));
+            let unchecked = Unchecked { role: None, error };
+            let _ = report_unchecked(&path, &unchecked, &mut io::stderr().lock());
             return ExitCode::FAILURE;
         }
     };
@@ -61,7 +61,7 @@ fn fail(error: &Error) -> ExitCode {
 
 /// `config` の役割ごとに確かめ、結果を `out` に書き、`path` の `[capabilities]` を書き換える。
 ///
-/// 接続に失敗したら、その旨を書いて `Ok(false)` を返し、`path` には触れない。
+/// 接続に失敗したか設定が誤っていたら、その旨を書いて `Ok(false)` を返し、`path` には触れない。
 pub(crate) fn run(
     path: &Path,
     config: &Config,
@@ -73,9 +73,8 @@ pub(crate) fn run(
         source,
     };
     match diagnose(config, client) {
-        Err(failure) => {
-            writeln!(out, "{failure}").map_err(io_error)?;
-            writeln!(out, "{}", not_changed(path)).map_err(io_error)?;
+        Err(unchecked) => {
+            report_unchecked(path, &unchecked, out).map_err(io_error)?;
             Ok(false)
         }
         Ok(reports) => {
@@ -87,8 +86,10 @@ pub(crate) fn run(
     }
 }
 
-fn not_changed(path: &Path) -> String {
-    format!("[capabilities] in {} was not changed", path.display())
+/// 確かめられなかった理由と、`[capabilities]` を書き換えていないことを書く。
+fn report_unchecked(path: &Path, unchecked: &Unchecked, out: &mut dyn Write) -> io::Result<()> {
+    writeln!(out, "{unchecked}")?;
+    writeln!(out, "[capabilities] in {} was not changed", path.display())
 }
 
 /// 1 項目の結果。
@@ -121,15 +122,20 @@ struct RoleReport {
     reasoning_effort: Check,
 }
 
-/// 接続の失敗。どの役割を確かめている途中か（`models()` なら `None`）と、エラー。
+/// 確かめを続けられなかった理由（接続の失敗か設定の誤り）。どの役割を確かめている途中か
+/// （クライアントの作成と `models()` なら `None`）と、エラー。
 #[derive(Debug)]
-struct ConnectionFailure {
+struct Unchecked {
     role: Option<Role>,
     error: ChatError,
 }
 
-impl std::fmt::Display for ConnectionFailure {
+impl std::fmt::Display for Unchecked {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if is_configuration_error(&self.error) {
+            // 接続先が落ちているのではなく、利用者が config.toml か環境変数を直すものなので分けて出す
+            return write!(f, "configuration error: {}", self.error);
+        }
         match self.role {
             None => write!(f, "connection failed: {}", self.error),
             Some(role) => write!(
@@ -142,7 +148,16 @@ impl std::fmt::Display for ConnectionFailure {
     }
 }
 
-/// 機能の欠落ではなく、接続の失敗とみなすエラーか。
+/// API キーの環境変数が無い、キーを平文の HTTP で外に送ることになる、のように、
+/// 接続先ではなく利用者の設定を直すべきエラーか。
+fn is_configuration_error(error: &ChatError) -> bool {
+    matches!(
+        error,
+        ChatError::MissingApiKey { .. } | ChatError::ApiKeyOverPlainHttp { .. }
+    )
+}
+
+/// 機能の欠落ではなく、確かめを止めるエラー（接続の失敗か設定の誤り）か。
 ///
 /// 届かない・タイムアウト（`Request`）、認証の拒否（401・403）、混雑（408・429）、
 /// エンドポイント側の障害（5xx）は、モデルが機能を持つかと関係なく起きるので、機能の判定に使わない。
@@ -159,14 +174,14 @@ fn is_connection_failure(error: &ChatError) -> bool {
 }
 
 /// 役割ごとに 5 項目を確かめる。`models()` が返らないか、確かめる途中で接続に失敗したら、
-/// それまでの結果を捨てて [`ConnectionFailure`] を返す。
+/// それまでの結果を捨てて [`Unchecked`] を返す。
 fn diagnose(
     config: &Config,
     client: &dyn ChatClient,
-) -> std::result::Result<Vec<RoleReport>, ConnectionFailure> {
+) -> std::result::Result<Vec<RoleReport>, Unchecked> {
     let available = client
         .models()
-        .map_err(|error| ConnectionFailure { role: None, error })?;
+        .map_err(|error| Unchecked { role: None, error })?;
     let router = Router::new(config);
     ROLES
         .iter()
@@ -178,7 +193,7 @@ fn diagnose(
                 effort(config, role),
                 &available,
             )
-            .map_err(|error| ConnectionFailure {
+            .map_err(|error| Unchecked {
                 role: Some(role),
                 error,
             })
@@ -715,6 +730,24 @@ reasoning_effort = false
 
         assert!(!ok);
         assert!(!env.path.exists());
+    }
+
+    #[test]
+    fn doctor_reports_an_api_key_over_plain_http_as_a_configuration_error_and_leaves_config_untouched()
+     {
+        let env = env_with(Some(CONFIG));
+        let fake = FakeChatClient::new();
+        fake.push_models(Err(ChatError::ApiKeyOverPlainHttp {
+            env: "MOLT_DOCTOR_TEST_KEY".to_owned(),
+            host: "gpu-box.lan:80".to_owned(),
+        }));
+
+        let (ok, output) = run_doctor(&env, &fake);
+
+        assert!(!ok);
+        assert!(output.starts_with("configuration error: "), "{output}");
+        assert!(!output.contains("connection failed"), "{output}");
+        assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
     }
 
     #[test]
