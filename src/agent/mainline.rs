@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
+use super::subline::SubLine;
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
@@ -245,6 +246,27 @@ impl<'a> MainLine<'a> {
     /// Where the main line records its events.
     pub(crate) fn log(&self) -> &SessionLog {
         &self.log
+    }
+
+    /// Opens the side line (PRD UC3) at `boundary`, where this main line stopped. It gets the
+    /// boundary and the user's latest request, and nothing else of the main line's message list;
+    /// what is said on it does not come back here.
+    pub fn side_line(&self, boundary: Boundary) -> SubLine<'a> {
+        let request = self
+            .messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { content } => Some(content.as_str()),
+                _ => None,
+            });
+        SubLine::open(
+            self.client,
+            self.router.clone(),
+            &self.tools,
+            boundary,
+            request,
+        )
     }
 
     /// The message list so far, starting with the system prompt.

@@ -7,6 +7,7 @@
 
 mod args;
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -319,14 +320,24 @@ impl<'a> Tools<'a> {
         fs::read_to_string(resolved).ok()
     }
 
+    /// The files under the root that the checker can check (`.rs` files and `Cargo.toml`s), with
+    /// their content, by path relative to the root. Skips what `list_files` skips, files that are
+    /// not UTF-8, and directories that cannot be read.
+    pub(crate) fn checkable_files(&self) -> BTreeMap<String, String> {
+        let mut paths = Vec::new();
+        // A directory that cannot be read leaves out its files; the rest are still taken.
+        let _ = self.walk(self.root.as_path(), &mut paths);
+        paths
+            .into_iter()
+            .filter(|path| is_checkable(Path::new(path)))
+            .filter_map(|path| self.read(&path).map(|content| (path, content)))
+            .collect()
+    }
+
     /// Resolves `path` for writing, if the checker can check it: a `.rs` file or a `Cargo.toml`.
     fn resolve_checkable(&self, path: &str) -> Result<PathBuf, ToolError> {
         let resolved = self.root.resolve_write(path)?;
-        let checkable = resolved.extension().is_some_and(|ext| ext == "rs")
-            || resolved
-                .file_name()
-                .is_some_and(|name| name == "Cargo.toml");
-        if !checkable {
+        if !is_checkable(&resolved) {
             return Err(ToolError::NotCheckable {
                 path: path.to_owned(),
             });
@@ -446,6 +457,12 @@ fn replace_once(content: &str, old: &str, new: &str) -> Result<String, usize> {
     replaced.push_str(new);
     replaced.push_str(&content[start + old.len()..]);
     Ok(replaced)
+}
+
+/// Whether the checker can check the file at `path`: a `.rs` file or a `Cargo.toml`.
+fn is_checkable(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext == "rs")
+        || path.file_name().is_some_and(|name| name == "Cargo.toml")
 }
 
 fn io_error(path: &str, source: io::Error) -> ToolError {

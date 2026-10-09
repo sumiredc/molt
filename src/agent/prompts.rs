@@ -5,6 +5,7 @@
 
 use std::fmt::Display;
 
+use super::mainline::{Boundary, BoundaryCause};
 use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
 
@@ -228,4 +229,56 @@ pub fn crate_not_added(name: &str, why: &str) -> String {
         "note: `cargo add {name}` failed: {why}\nDo not call `run_cargo add` for it: write the \
          code without it, or call `finish` and tell the user."
     )
+}
+
+/// The system prompt of the side line (PRD UC3). The side line has a message list of its own, so
+/// none of it reaches the main line.
+pub const SIDE_LINE_SYSTEM: &str = "\
+You are molt's side line. A request of the user stopped at a boundary: the code for it needs Rust syntax elements or crates that the user's comprehension profile does not allow yet, because the user does not understand them yet.
+Your job is to help the user understand them. Do not write the code of the request, and do not decide how the request goes on: the user does.
+First explain the idea of the items: what problem they solve and how they work, in one paragraph of plain prose. Do not compare ways to write it, and do not list alternatives.
+Then answer the user's questions about them, briefly and concretely. Short code examples are fine when they help.
+Answer in the language of the user's latest input.";
+
+/// What the side line tells the model about `boundary` to get the explanation: the items, what the
+/// main line tried, and the user's request on the main line, whose language the explanation is
+/// to follow.
+pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
+    let items = boundary
+        .items
+        .iter()
+        .map(|item| match item {
+            ItemKey::Element(element) => format!("- `{item}` ({})", element.category().name()),
+            ItemKey::Crate(_) => format!("- `{item}` (a crate)"),
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut context = format!(
+        "The request needs these items, which the user's profile does not allow:\n{items}\n\n"
+    );
+    match &boundary.cause {
+        BoundaryCause::RejectedTwice { path, content } => context.push_str(&format!(
+            "The main line tried to write this to `{path}`, and it was rejected:\n```rust\n{}\n```",
+            content.trim_end()
+        )),
+        BoundaryCause::Requested {
+            reason,
+            proposed_code,
+        } => {
+            context.push_str(&format!(
+                "The main line asked the user for them, because: {reason}"
+            ));
+            if let Some(code) = proposed_code {
+                context.push_str(&format!(
+                    "\nIt proposed this code:\n```rust\n{}\n```",
+                    code.trim_end()
+                ));
+            }
+        }
+    }
+    if let Some(request) = request {
+        context.push_str(&format!("\n\nThe user's request was:\n{request}"));
+    }
+    context.push_str("\n\nExplain the idea of these items in one paragraph.");
+    context
 }
