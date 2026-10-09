@@ -370,7 +370,7 @@ What to read from the figure: only content judged Clean reaches the disk. Reject
 Tools: `list_files` `read_file` `write_file` `edit_file` `run_cargo` `git_status` `git_diff` `git_commit` (approval required) `request_boundary(items, reason, proposed_code)` `finish`.
 `write_file` / `edit_file` write only Rust source (`.rs`) and `Cargo.toml`, the files the check can read. Any other file is refused, since its content could reach the build unchecked (`#[path]`, `.cargo/config.toml`).
 `run_cargo` accepts only `check` `test` `clippy` `build` `fmt` `add` (`add` requires approval; `run` and arbitrary subcommands are not accepted).
-Budget per turn: 2 rejections of the same element, 3 compile fixes, 40 tool calls. Budget for the Q&A (UC1): 1 question per category, plus at most 1 follow-up question.
+Budget per turn: 2 rejections of the same element, 3 compile fixes, 40 tool calls. A rejection counts toward the 2 from the next model response on, once the model has seen it; writes in one response are each a first rejection. Budget for the Q&A (UC1): 1 question per category, plus at most 1 follow-up question.
 
 ### 8.5 What the side line hands to the main line
 
