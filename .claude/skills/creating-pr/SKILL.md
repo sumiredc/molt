@@ -1,12 +1,13 @@
 ---
 name: creating-pr
-description: このリポジトリで実装を PR にするときの手順。PR 作成前に別のサブエージェントのレビューを通し、レビューの結果を本文に残して `gh pr create` し、CI の結果を確かめてから完了を報告する。CI の失敗を直した変更もレビューに戻す。Use when opening a pull request in this repository, or fixing a CI failure on one.
+description: このリポジトリで実装を PR にするときの手順。PR 作成前に別のサブエージェントのレビューを通し、レビューの結果を本文に残して `gh pr create` し、CI の結果を確かめてから完了を報告する。CI の失敗を直した変更もレビューに戻す。マージは、複数の issue を続けて実装するループの中か、ユーザーがその PR を対象に含むマージの指示をしたときだけ行う。Use when opening a pull request in this repository, fixing a CI failure on one, or deciding whether to merge one.
 ---
 
 # creating-pr — 実装を PR にする手順
 
 実装は、別のサブエージェントのレビューを通過してから PR にし、CI の結果を確かめてから完了と報告する。
 書いた側の前提を持たない読み手でないと、抜けや食い違いを見つけられず、PR を作っただけでは動くかが分からないため。
+マージは、ループ中かユーザーの指示があるときだけ行う（手順 7）。
 
 ```mermaid
 flowchart LR
@@ -20,7 +21,9 @@ flowchart LR
   H -->|通過しない| F
   H -->|通過| I[レビュー節を更新して push]
   I --> E
-  E -->|通過| G[完了を報告]
+  E -->|通過| K{ループ中か、マージの指示があるか}
+  K -->|はい| L[gh pr merge] --> G[完了を報告]
+  K -->|いいえ| G
   E -->|CI 未設定| J[「CI 未設定のため未確認」と報告]
 ```
 
@@ -29,6 +32,7 @@ flowchart LR
 1. レビューを通過するまで `gh pr create` を実行しない。CI の修正も、レビューを通過するまで push しない
 2. PR を作っただけで完了と報告しない。CI の結果を確かめてから報告する
 3. CI がまだ無いうちは「CI 未設定のため未確認」と報告し、通過したとは書かない
+4. マージは、複数の issue を続けて実装するループの中か、ユーザーがその PR を対象に含むマージの指示（個別でも包括でも）をしたときだけ行う。どちらでもなければ PR を作って報告し、マージはユーザーに任せる。CI が通っていない PR と、CI 未設定で確かめられない PR はマージしない
 
 ## 1. 実装する
 
@@ -86,7 +90,7 @@ gh pr checks <PR 番号> --watch
 
 | 結果 | 次にやること |
 |---|---|
-| すべて通過 | 完了を報告する |
+| すべて通過 | 7 に進む |
 | 失敗がある | 6 に進む |
 | `no checks reported on the '<ブランチ>' branch` と出る | 下のとおり、CI 未設定かを確かめる |
 
@@ -115,3 +119,25 @@ gh run view <run ID> --log-failed
    ```
 
 4. push して、5 に戻る
+
+## 7. マージする
+
+CI が通ったあと、次のどちらかのときだけマージする。どちらでもなければ、PR の URL を伝えて完了を報告し、マージはユーザーに任せる。
+
+| マージしてよいとき | 理由 |
+|---|---|
+| 複数の issue を続けて実装するループの中 | 次の issue は前の PR のマージを前提にするので、待つとループが止まる。ユーザーがループの指示でマージを許可している |
+| ユーザーがその PR を対象に含むマージの指示（個別でも包括でも）をしたとき | 指示そのものが承認 |
+
+ループ中とは、今のセッションでユーザーから受けた指示か、ループの仕組みが毎回渡してくるプロンプトが、複数の issue を順に実装するよう求めているとき（「#A〜#B を loop で実装する」「issue を 3 つ続けて実装して」など）。会話の中にその指示が見つからなければループ中ではないとみなし、マージせず報告する。
+
+```sh
+gh pr merge <PR 番号> --merge --delete-branch
+git checkout main && git pull --ff-only
+```
+
+- `--merge`: このリポジトリの履歴は `Merge pull request #N` の merge commit で揃えていて、squash はブランチの履歴を捨てるため
+- `--delete-branch`: remote は GitHub の設定で消えるが、ローカルのブランチも消して main に戻るため
+- 2 行目: PR ブランチにいるときは gh が main の checkout と `pull --ff-only` まで行う。PR ブランチにいないときと、gh の pull が警告だけで終わったときのために置く。git worktree の中では飛ばし、本体の worktree で行う
+
+マージしたら、完了の報告に PR の URL と「マージ済み」を書く。ループ中は次の issue に進む。
