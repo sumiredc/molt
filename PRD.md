@@ -1,29 +1,31 @@
-# PRD.md — molt の要件と設計
+# PRD.md — molt requirements and design
 
-molt（利用者が理解できる範囲の書き方でしかコードを書かない Rust コーディングエージェント）の要件と設計の正。
-何のために作るか、何を保証するか、利用者は何をしたいか、それをどう組むかを書く。
-進め方と今どの段階かは issue、起動方法は README、個々の API・設定・プロファイルの形はコードが持つ。
-ハッカソン（Nebius x NVIDIA Global AI Hackathon）への応募作品だが、デモと提出物は本文書の対象外で、まずプロダクトとして成立させる。
+[日本語版](PRD.ja.md)
+
+The source of truth for the requirements and design of molt, a Rust coding agent that writes code only in the ways its user can understand.
+It states why molt exists, what it guarantees, what the user wants to do, and how it is put together.
+Progress and the current stage live in issues, how to start lives in the README, and the shape of each API, config, and profile lives in the code.
+molt is an entry for a hackathon (Nebius x NVIDIA Global AI Hackathon), but the demo and the submission are out of scope here; first it has to stand as a product.
 
 ---
 
-## 1. 目的
+## 1. Purpose
 
-AI でコードを大量に作れるようになった一方で、エンジニアは生成されたコードの中身を理解できず、開発しているのに経験が身につかない。
-今のコーディングエージェントは、利用者がまだ書いたことのない書き方（例：`Arc<Mutex<T>>`）を断りなく使い、利用者は「読めないが動くコード」を自分のリポジトリに抱えることになる。
+AI can now produce code in bulk, yet engineers cannot understand what was generated, so they develop without gaining experience.
+Today's coding agents use constructs the user has never written (for example `Arc<Mutex<T>>`) without a word, and the user ends up holding "code that works but cannot be read" in their own repository.
 
-molt は、利用者が書ける範囲の書き方でだけコードを書き、その範囲を超えるときは本線を止めて利用者に選ばせる。
-これで、開発を止めずに「理解できないコードが自分のリポジトリに入る」ことをなくす。学習はその結果であり、主役は開発。molt は先生ではなく、理解に合わせて書く同僚。
+molt writes code only in the ways the user can write, and when a request goes beyond that range it pauses the main line and lets the user choose.
+This removes "code I do not understand landing in my repository" without stopping development. Learning is a by-product; development is the main act. molt is not a teacher but a colleague who writes at the user's level of understanding.
 
 ```mermaid
 flowchart LR
-  subgraph now["今のエージェント"]
-    A1["依頼"] --> A2["理解を超えた書き方で生成"] --> A3["読めないが動くコード<br/>が溜まる"]:::bad
+  subgraph now["Today's agents"]
+    A1["Request"] --> A2["Generate beyond<br/>the user's understanding"] --> A3["Code that works but<br/>cannot be read piles up"]:::bad
   end
   subgraph molt["molt"]
-    B1["依頼"] --> B2{"プロファイル内で<br/>書けるか"}
-    B2 -- "書ける" --> B3["生成して書き込む"]:::ok
-    B2 -- "超える" --> B4["本線を止めて<br/>利用者が選ぶ"]:::warn
+    B1["Request"] --> B2{"Writable within<br/>the profile?"}
+    B2 -- "Yes" --> B3["Generate and write"]:::ok
+    B2 -- "Beyond it" --> B4["Pause the main line<br/>and let the user choose"]:::warn
     B4 --> B3
   end
   classDef ok   fill:#ecfdf5,stroke:#059669,color:#065f46
@@ -31,288 +33,288 @@ flowchart LR
   classDef bad  fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
 ```
 
-図から読み取ること：molt が変えるのは「理解を超えるとき」の 1 点で、超えない限りは普通のコーディングエージェントとして動く。
+What to read from the figure: the one point molt changes is "when the request goes beyond the user's understanding"; as long as it does not, molt behaves as an ordinary coding agent.
 
-設計の考え方は認知負荷理論に沿う。減らすのは本質と関係ない負荷（理解を超えた書き方、一度に大量の差分）、残すのは理解を作る負荷（判断する、自分で書く、質問する）。
-根拠に使う研究は Anthropic の RCT（AI 支援群の理解度クイズ平均 50%、手書き群 67%。生成後に質問して確認する使い方は 65% 以上）。研究自身が因果関係ではないと明記しているので、「研究で示唆されたパターンを設計原理にした」以上のことは言わない。
+The design follows cognitive load theory. What it reduces is load unrelated to the essentials (constructs beyond the user's understanding, a huge diff at once); what it keeps is the load that builds understanding (deciding, writing by hand, asking).
+The research it leans on is Anthropic's RCT (comprehension quiz average of 50% for the AI-assisted group versus 67% for the hand-written group; asking questions after generation to confirm scored 65% or higher). The study itself states that this is not a causal relationship, so molt claims nothing beyond "the patterns the study suggested were taken as design principles".
 
 ---
 
-## 2. 用語
+## 2. Terms
 
 ```mermaid
 flowchart TB
-  P["理解プロファイル<br/>（利用者ごとに 1 つ）"] --> C1["分類（10）<br/>所有権 / 借用 / ライフタイム / トレイト・ジェネリクス /<br/>スマートポインタ / エラー処理 / イテレータ・クロージャ /<br/>async / マクロ / unsafe"]
-  P --> CR["外部クレート"]
-  C1 --> E["構文要素<br/>例：Arc, Mutex, impl Trait, クロージャ,<br/>async fn, .await, ライフタイム注釈, dyn Trait"]
-  E --> S["状態：known / seen / unknown"]
+  P["Comprehension profile<br/>(one per user)"] --> C1["Categories (10)<br/>ownership / borrowing / lifetimes / traits & generics /<br/>smart pointers / error handling / iterators & closures /<br/>async / macros / unsafe"]
+  P --> CR["External crates"]
+  C1 --> E["Syntax elements<br/>e.g. Arc, Mutex, impl Trait, closures,<br/>async fn, .await, lifetime annotations, dyn Trait"]
+  E --> S["Status: known / seen / unknown"]
   CR --> S
 ```
 
-図から読み取ること：境界の判定は構文要素とクレートの単位で行い、解説は分類の単位でまとめる。
+What to read from the figure: boundaries are judged per syntax element and per crate, while explanations are grouped per category.
 
-| 用語 | 意味 |
+| Term | Meaning |
 |---|---|
-| 利用者 | molt を使って自分の Rust プロジェクトを開発するエンジニア |
-| 理解プロファイル（プロファイル） | 構文要素・外部クレートごとの状態と根拠の集合。利用者ごとに 1 つ |
-| 分類 | 構文要素をまとめる 10 の区分 |
-| 構文要素 | 境界判定の最小単位。一覧の正はコードの `Element` と `tests/fixtures/elements/` |
-| 基本要素 | 常に許す構文要素（例：共有参照 `&`、`Result`、`Option`、`?`、`println!` など std の基本マクロ）。Rust を書く上で避けられないため、プロファイルに関係なく生成に使える。一覧の正はコードの既定値 |
-| 状態 | `known`（書ける。生成に使ってよい）/ `seen`（読める、または副線で見た。生成には使わない）/ `unknown`（未知。記載が無い要素はこれ） |
-| 根拠 | 状態がそうなった理由。自己申告 / 質疑応答 / 参考リポジトリ / 副線で理解 / 自分で書いた / 手動 |
-| 境界 | molt が書こうとしたコードに `known` でも基本要素でもない要素が含まれ、かつプロファイル内の書き方では実現が難しい状態 |
-| 本線 | 利用者の開発の依頼を進める対話 |
-| 副線 | 境界で本線を止めて開く、その要素に絞った対話。本線の対話の記録に現れない |
+| User | An engineer who develops their own Rust project with molt |
+| Comprehension profile (profile) | The set of status and provenance per syntax element and per external crate. One per user |
+| Category | One of the 10 groups that syntax elements are sorted into |
+| Syntax element | The smallest unit of boundary judgement. The source of truth for the list is `Element` in the code and `tests/fixtures/elements/` |
+| Base element | A syntax element that is always allowed (for example shared references `&`, `Result`, `Option`, `?`, and basic std macros such as `println!`). They cannot be avoided when writing Rust, so generation may use them regardless of the profile. The source of truth for the list is the default in the code |
+| Status | `known` (can write it; generation may use it) / `seen` (can read it, or saw it on the side line; generation does not use it) / `unknown` (not known; any element with no entry is this) |
+| Provenance | Why the status became what it is. Self-report / Q&A / reference repository / understood on the side line / wrote it themselves / manual |
+| Boundary | The state where the code molt is about to write contains an element that is neither `known` nor a base element, and the request is hard to realise with the constructs in the profile |
+| Main line | The dialogue that carries the user's development request forward |
+| Side line | The dialogue opened at a boundary, with the main line paused, focused on that element. It never appears in the main line's transcript |
 
 ---
 
-## 3. 保証すること
+## 3. Guarantees
 
-molt が書く行に `known` でない要素が入らないこと、境界では必ず利用者が選ぶこと、副線が本線の記録に現れないことを保証する。
+molt guarantees that no line it writes contains an element that is not `known`, that the user always chooses at a boundary, and that the side line never appears in the main line's transcript.
 
-| 観点 | 保証 |
+| Aspect | Guarantee |
 |---|---|
-| 核 | molt が書き込んだ行に、`known` でも基本要素でもない構文要素・外部クレートは含まれない |
-| 核 | `known` でない要素が検出されたとき、利用者は必ず 3 択（理解してから任せる / 知っている書き方で / 自分で書く）から選べる。選ぶか依頼を取り下げるまで本線は進まない |
-| 整合性 | 要素が `known` になるのは、利用者の回答（質疑応答）、副線での選択（① 理解した、③ 自分で書いた）、参考リポジトリで使っているクレート、手動の操作のときだけ。molt の判断だけで広がらない |
-| 整合性 | 検査は書き込む前の内容に対して行い、検査を通らなかった内容はディスクに置かない |
-| 整合性 | git コミットは利用者が承認した内容だけ。承認なしにコミット・push しない |
-| 文脈の分離 | 副線で交わした質問・解説は、本線の対話の記録に現れない。副線から本線に戻るのは、選択の結果（解決の種類と要素名）と、② のときだけコードの方針 1 行 |
-| 可観測性 | 検出した要素・却下した生成・選んだ選択肢・プロファイルの変更は、セッションの記録として残り、後から追える |
-| 検証 | molt が書き込んだ後は `cargo check` を実行し、その結果（通らなければエラー）を利用者に見せる |
-| 冪等 | 同じ要素が同じセッション内で何度出ても、`known` になった後は再び境界にならない |
-| 言語 | 解説・質問・回答は利用者の直近の入力言語で返す。UI の固定文字列は英語 |
-| セキュリティ | API キーは環境変数から読み、ファイル・ログ・セッションの記録に書かない |
+| Core | No line molt writes contains a syntax element or external crate that is neither `known` nor a base element |
+| Core | When an element that is not `known` is detected, the user can always choose from 3 options (understand then delegate / use a construct I know / write it myself). The main line does not advance until the user chooses or withdraws the request |
+| Consistency | An element becomes `known` only through the user's answers (Q&A), a choice on the side line (① understood, ③ wrote it themselves), a crate used by the reference repository, or a manual operation. It never spreads by molt's judgement alone |
+| Consistency | The check runs on the content before it is written, and content that fails the check never lands on disk |
+| Consistency | A git commit contains only what the user approved. molt never commits or pushes without approval |
+| Context separation | Questions and explanations exchanged on the side line never appear in the main line's transcript. What returns from the side line to the main line is the outcome of the choice (the kind of resolution and the element names) and, only for ②, a one-line coding policy |
+| Observability | Detected elements, rejected generations, chosen options, and profile changes are kept in the session log and can be traced later |
+| Verification | After molt writes, it runs `cargo check` and shows the user the result (the errors, if it fails) |
+| Idempotence | However many times the same element appears within a session, it never becomes a boundary again once it is `known` |
+| Language | Explanations, questions, and answers are returned in the language of the user's latest input. Fixed UI strings are English |
+| Security | The API key is read from an environment variable and is never written to files, logs, or the session log |
 
 ---
 
-## 4. 保証しないこと
+## 4. Non-guarantees
 
-作りすぎを判定する根拠として、次は扱わない。
+As the basis for judging over-building, the following are not handled.
 
-| 保証しないこと | 理由 / 扱う先 |
+| Not guaranteed | Reason / where it is handled |
 |---|---|
-| 理解度クイズ・採点 | 理解の判定は質疑応答での自己申告と対話に委ねる |
-| 生成コードの「正しさ」そのもの（仕様どおり動くか） | `cargo check`（と利用者が頼めば `cargo test`）で分かる範囲まで。それ以上は利用者がレビューする |
-| 利用者が自分で書いたコードへの制約 | 利用者本人が書くものは制約しない。むしろ ③ の経路でプロファイルに加わる |
-| 利用者が元から持っていたコードの検査 | molt が変えた行だけを検査する。既存のコードに `known` でない要素があっても止めない |
-| プロファイル内の書き込みごとの承認 | 検査を通れば書く。承認を求めるのはコミットとクレートの追加だけ |
-| 急ぎモード（制約を外す） | 対象外。将来の検討 |
-| git 履歴からのプロファイル自動生成 | 参考リポジトリを共有されたときは、質疑応答の材料と、使っているクレートの読み取りに使うだけ |
-| 理解マップの可視化、忘却への対応、理解できる単位での作業分割 | 対象外。将来の検討 |
-| Rust 以外の言語 | 対象外 |
-| Web UI・ホスティング・デモ URL・提出物 | 今は考えない。プロダクトとして成立させることを優先する |
-| 複数利用者・チームでのプロファイル共有、同じプロファイルや同じプロジェクトでの同時実行 | プロファイルは利用者 1 人に 1 つ。同時に 2 つの molt を動かすことは想定しない（保存は後勝ち） |
+| Comprehension quizzes or grading | Judging comprehension is left to self-report and dialogue in the Q&A |
+| The "correctness" of generated code itself (whether it works as specified) | Only as far as `cargo check` (and `cargo test` when the user asks) can tell. Beyond that, the user reviews |
+| Constraints on code the user writes themselves | What the user writes is not constrained. Rather, it enters the profile via path ③ |
+| Checking code the user already had | Only the lines molt changed are checked. Elements that are not `known` in existing code do not stop molt |
+| Approval for each write within the profile | If the check passes, molt writes. Approval is requested only for commits and for adding crates |
+| A rush mode (lifting the constraints) | Out of scope. For future consideration |
+| Generating the profile automatically from git history | When a reference repository is shared, it is used only as material for the Q&A and to read which crates it uses |
+| Visualising the comprehension map, handling forgetting, splitting work into understandable units | Out of scope. For future consideration |
+| Languages other than Rust | Out of scope |
+| Web UI, hosting, demo URL, submission | Not considered now. Standing as a product comes first |
+| Sharing a profile across multiple users or a team, running concurrently on the same profile or the same project | A profile belongs to one user. Running two molt instances at once is not assumed (last save wins) |
 
 ---
 
-## 5. 動かせない前提
+## 5. Fixed premises
 
-| 種類 | 前提 |
+| Kind | Premise |
 |---|---|
-| 技術 | LLM は Nebius Token Factory の OpenAI 互換 API（Bearer 認証、`/v1/chat/completions`）で呼ぶ。API 仕様に function calling・`response_format`（json_object / json_schema）・`reasoning_effort` がある。各モデルが実際に受理するかは `molt doctor`（8.7）で確かめる |
-| 技術 | 使うモデルは NVIDIA Nemotron。カタログで確認したところ Lightning / Nano / Super / Ultra の 4 つがあり、いずれも function calling 対応と記載。既定の ID は 8.7 |
-| 技術 | 実装は Rust（1.99.0、edition 2024）。CI は fmt / clippy（`-D warnings`）/ test |
-| 技術 | 利用者の対象プロジェクトは cargo プロジェクト（`cargo check` が動く） |
-| 業務 | 締切 2026-10-30 10:00 PDT（2026-10-31 02:00 JST）。提出目標 10/29。1 人で作る |
-| 業務 | 公開リポジトリ・OSS ライセンス（Apache 2.0 / MIT 等）が提出要件 |
+| Technical | The LLM is called through Nebius Token Factory's OpenAI-compatible API (Bearer auth, `/v1/chat/completions`). The API spec has function calling, `response_format` (json_object / json_schema), and `reasoning_effort`. Whether each model actually accepts them is confirmed by `molt doctor` (8.7) |
+| Technical | The models are NVIDIA Nemotron. The catalogue lists 4 of them, Lightning / Nano / Super / Ultra, all marked as supporting function calling. The default IDs are in 8.7 |
+| Technical | The implementation is Rust (1.99.0, edition 2024). CI runs fmt / clippy (`-D warnings`) / test |
+| Technical | The user's target project is a cargo project (`cargo check` runs) |
+| Business | Deadline 2026-10-30 10:00 PDT (2026-10-31 02:00 JST). Target submission 10/29. Built by one person |
+| Business | A public repository and an OSS licence (Apache 2.0 / MIT etc.) are submission requirements |
 
 ---
 
-## 6. ユースケース
+## 6. Use cases
 
-### UC1 理解プロファイルを作る（初回設定）
+### UC1 Create the comprehension profile (first-time setup)
 
-利用者は分類ごとに自己申告し、「書いたことがある」と答えた分類だけ molt が構文要素の単位で自由記述の質問をして確かめる。
+The user self-reports per category, and only for the categories answered "have written" does molt ask free-text questions per syntax element to confirm.
 
 ```mermaid
 flowchart TB
-  S["molt init"] --> K{"API キー<br/>があるか"}
-  K -- "無い" --> X1["伝えて終了<br/>プロファイルは作らない"]:::bad
-  K -- "ある" --> D["分類ごとに申告<br/>書いた / 読める / 知らない"]
-  D --> R{"参考リポジトリの<br/>共有があるか"}
-  R -- "ある" --> RS["読んで棚卸し<br/>質問の材料にし、使っているクレートを known に"] --> Q
-  R -- "無い" --> Q
-  Q["『書いた』分類ごとに<br/>構文要素を覆う自由記述の質問"] --> J["回答から要素ごとに<br/>known / unknown を判定"]
-  J --> V["利用者が確認・修正"] --> SV["保存"]:::ok
+  S["molt init"] --> K{"Is there an<br/>API key?"}
+  K -- "No" --> X1["Report and exit<br/>no profile is created"]:::bad
+  K -- "Yes" --> D["Self-report per category<br/>have written / can read / don't know"]
+  D --> R{"Is a reference<br/>repository shared?"}
+  R -- "Yes" --> RS["Read and take stock<br/>use as question material, mark its crates known"] --> Q
+  R -- "No" --> Q
+  Q["For each 'have written' category<br/>free-text questions covering its elements"] --> J["From the answers, judge<br/>known / unknown per element"]
+  J --> V["User confirms and corrects"] --> SV["Save"]:::ok
   classDef ok   fill:#ecfdf5,stroke:#059669,color:#065f46
   classDef bad  fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
 ```
 
-図から読み取ること：質問は「書いた」と申告した分類にしか出ないので、申告の数で所要時間が決まる。
+What to read from the figure: questions are asked only for the categories reported as "have written", so the number of reports determines the time it takes.
 
-- 事前条件：プロファイルがまだ無い（または作り直しを選んだ）。`NEBIUS_API_KEY` がある
-- 主フロー：申告 → （参考リポジトリ） → 質問と判定 → 確認 → 保存。申告の反映は「書いた」→ 質疑応答の結果（要素ごとに `known` / `unknown`）、「読める」→ その分類の要素を `seen`、「知らない」→ `unknown`
-- 主フロー：外部クレートは init では聞かない。参考リポジトリの共有があれば、その `Cargo.toml` の依存を `known`（根拠：参考リポジトリ）にする。それ以外のクレートは最初に使おうとしたときに境界になる（UC3）
-- 代替フロー：すべて「知らない」 → 質問を飛ばし、基本要素だけのプロファイルを保存する
-- 代替フロー：既にプロファイルがある → 上書きするか確認し、拒否されれば何も変えない
-- 例外フロー：共有されたパスが存在しない / cargo プロジェクトでない → 伝え、参考無しで続ける
-- 例外フロー：質疑応答の途中で API が失敗（認証・レート制限・ネットワーク） → 原因を伝えて終了し、途中のプロファイルは保存しない
-- 例外フロー：途中で中断 → 途中のプロファイルは保存しない
-- 同時に 2 つの `molt init` が走る場合は想定しない（4 節。保存は後勝ち）
-- 事後条件：構文要素とクレートごとに状態・根拠・日時が保存されている。`known` の要素はすべて、利用者の回答か参考リポジトリに由来する
+- Precondition: no profile exists yet (or the user chose to recreate it). `NEBIUS_API_KEY` is set
+- Main flow: report → (reference repository) → questions and judgement → confirmation → save. Reports map as follows: "have written" → the Q&A result (`known` / `unknown` per element), "can read" → the elements of that category become `seen`, "don't know" → `unknown`
+- Main flow: external crates are not asked about in init. If a reference repository is shared, the dependencies in its `Cargo.toml` become `known` (provenance: reference repository). Any other crate becomes a boundary the first time molt tries to use it (UC3)
+- Alternative flow: everything is "don't know" → skip the questions and save a profile with base elements only
+- Alternative flow: a profile already exists → ask whether to overwrite; if declined, change nothing
+- Exception flow: the shared path does not exist / is not a cargo project → report it and continue without a reference
+- Exception flow: the API fails during the Q&A (auth, rate limit, network) → report the cause and exit; the partial profile is not saved
+- Exception flow: interrupted midway → the partial profile is not saved
+- Two `molt init` runs at the same time are not assumed (section 4; last save wins)
+- Postcondition: status, provenance, and timestamp are saved per syntax element and per crate. Every `known` element originates from the user's answers or the reference repository
 
-### UC2 プロファイル内で開発を進める（本線）
+### UC2 Develop within the profile (main line)
 
-生成したコードは静的検査を通ったものだけがファイルに書かれ、避けられない要素は境界として副線に渡す。
+Only generated code that passes the static check is written to files, and elements that cannot be avoided are handed to the side line as a boundary.
 
 ```mermaid
 flowchart TB
-  U["利用者の依頼"] --> G["候補コードを作る"]
-  G --> C{"静的検査<br/>known でも基本要素でもない要素・<br/>known でないクレートは無いか"}
-  C -- "無い" --> W["ファイルに書く"] --> CK{"cargo check"}
-  CK -- "通る" --> SH["差分と結果を示す"]:::ok
-  CK -- "失敗（上限まで）" --> G
-  CK -- "上限を超えた" --> ST["エラーと状態を見せて止まる"]:::bad
-  C -- "ある（1 回目）" --> RW["プロファイル内で書き直す"] --> C
-  C -- "ある（同じ要素 2 回目）" --> B["境界"]:::warn
-  G -- "モデルが『この書き方でないと難しい』" --> B
-  B --> UC3["UC3 副線へ<br/>ファイルは書き換えない"]
+  U["User's request"] --> G["Produce candidate code"]
+  G --> C{"Static check<br/>any element that is neither known nor base,<br/>or any crate that is not known?"}
+  C -- "None" --> W["Write to file"] --> CK{"cargo check"}
+  CK -- "Passes" --> SH["Show the diff and the result"]:::ok
+  CK -- "Fails (up to the limit)" --> G
+  CK -- "Over the limit" --> ST["Show the error and state, then stop"]:::bad
+  C -- "Found (1st time)" --> RW["Rewrite within the profile"] --> C
+  C -- "Found (same element, 2nd time)" --> B["Boundary"]:::warn
+  G -- "Model says 'hard without this construct'" --> B
+  B --> UC3["To UC3 side line<br/>files are not modified"]
   classDef ok   fill:#ecfdf5,stroke:#059669,color:#065f46
   classDef warn fill:#fffbeb,stroke:#d97706,color:#92400e
   classDef bad  fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
 ```
 
-図から読み取ること：コンパイル失敗は境界ではない。境界になるのは「`known` でない要素を避けられない」ときだけ。
+What to read from the figure: a compile failure is not a boundary. A boundary arises only when "an element that is not `known` cannot be avoided".
 
-- 事前条件：プロファイルがある。カレントディレクトリが cargo プロジェクト
-- 主フロー：依頼 → 候補 → 検査 → 書く → `cargo check` → 差分と結果を示す。検査を通った書き込みに承認は求めない
-- 代替フロー：検査で `known` でない要素が見つかる → プロファイル内の書き方で書き直す。通れば書く
-- 代替フロー：`cargo check` が失敗 → エラーを使って直し、再び検査から。上限（8.4）を超えたら、エラーと最後の状態を見せて止まる
-- 代替フロー：`known` のクレートがまだ `Cargo.toml` に無い → `cargo add` するか利用者に確認し、承認されたときだけ追加する。`known` でないクレートは検査で止まり、境界になる（UC3）
-- 例外フロー：同じ要素が 2 回却下される、またはモデルが「この書き方でないと難しい」と判断 → 境界として UC3 へ。ファイルは書き換えない
-- 例外フロー：1 ターンのツール呼び出しが上限（8.4）を超える → そこまでの状態を見せて止まる
-- 例外フロー：cargo プロジェクトでない → 伝えて止まる
-- 例外フロー：API が失敗（認証・レート制限・ネットワーク） → 原因を伝え、ファイルは変えない
-- 同じプロジェクトで 2 つの molt が動く場合は想定しない（4 節）
-- 事後条件：molt が書き込んだ行に `known` でも基本要素でもない要素は無い。`cargo check` の結果が利用者に示されている
+- Precondition: a profile exists. The current directory is a cargo project
+- Main flow: request → candidate → check → write → `cargo check` → show the diff and the result. A write that passed the check needs no approval
+- Alternative flow: the check finds an element that is not `known` → rewrite with constructs in the profile. If it passes, write
+- Alternative flow: `cargo check` fails → fix using the errors and start again from the check. Past the limit (8.4), show the error and the last state, then stop
+- Alternative flow: a `known` crate is not yet in `Cargo.toml` → ask the user whether to `cargo add` it, and add it only when approved. A crate that is not `known` is stopped by the check and becomes a boundary (UC3)
+- Exception flow: the same element is rejected twice, or the model judges "hard without this construct" → go to UC3 as a boundary. Files are not modified
+- Exception flow: tool calls in one turn exceed the limit (8.4) → show the state so far and stop
+- Exception flow: not a cargo project → report it and stop
+- Exception flow: the API fails (auth, rate limit, network) → report the cause; files are not changed
+- Two molt instances on the same project are not assumed (section 4)
+- Postcondition: no line molt wrote contains an element that is neither `known` nor a base element. The `cargo check` result has been shown to the user
 
-### UC3 境界で選ぶ（副線）
+### UC3 Choose at a boundary (side line)
 
-副線は解説から始まり、利用者が理解できるまで質問でき、3 択で本線に戻る。
+The side line starts with an explanation, lets the user ask until they understand, and returns to the main line through a 3-way choice.
 
 ```mermaid
 sequenceDiagram
-  actor U as 利用者
-  participant M as 本線
-  participant S as 副線
-  participant P as プロファイル
-  M->>S: 境界（要素・試みたコード）
-  S->>U: 解説：考え方、2 つの書き方の比較、<br/>参考リポジトリの似た箇所
-  loop 理解できるまで
-    U->>S: 質問
-    S->>U: 回答
+  actor U as User
+  participant M as Main line
+  participant S as Side line
+  participant P as Profile
+  M->>S: Boundary (element, attempted code)
+  S->>U: Explanation: the idea, a comparison of the 2 ways to write it,<br/>similar spots in the reference repository
+  loop Until understood
+    U->>S: Question
+    S->>U: Answer
   end
-  alt ① 理解してから任せる
+  alt ① Understand, then delegate
     U->>S: 1
-    S->>P: 要素を known に（根拠：副線で理解）
-    S->>M: 解決 ①：その要素を使ってよい
-  else ② 知っている書き方で
+    S->>P: Mark the element known (provenance: understood on the side line)
+    S->>M: Resolution ①: the element may be used
+  else ② Use a construct I know
     U->>S: 2
-    S->>P: 要素を seen に
-    S->>M: 解決 ②：その要素を使わずに書き直す
-  else ③ 自分で書く
+    S->>P: Mark the element seen
+    S->>M: Resolution ②: rewrite without the element
+  else ③ Write it myself
     U->>S: 3
-    S->>U: どこに何を書くかの誘導
+    S->>U: Guidance on where to write what
     U->>S: /done
-    S->>S: 利用者が書いた行から要素を検出＋ cargo check ＋ レビュー
-    S->>P: 利用者が書いた行の要素を known に（根拠：自分で書いた）
-    S->>M: 解決 ③：利用者が書いた。ファイルを読み直す
+    S->>S: Detect elements in the user's lines + cargo check + review
+    S->>P: Mark the elements in the user's lines known (provenance: wrote it themselves)
+    S->>M: Resolution ③: the user wrote it. Re-read the files
   end
-  Note over M,S: 副線の質問・解説は本線に渡さない
+  Note over M,S: Side-line questions and explanations are not passed to the main line
 ```
 
-図から読み取ること：要素が `known` になるのは ① と ③ だけ（② は `seen`）。本線に戻るのは解決の種類と要素名で、② ではこれにコードの方針 1 行が付く。
+What to read from the figure: an element becomes `known` only through ① and ③ (② makes it `seen`). What returns to the main line is the kind of resolution and the element names, plus a one-line coding policy for ②.
 
-- 事前条件：UC2 で境界に至った。本線は止まっている
-- 主フロー：解説 → 質問（任意・回数制限なし） → 選択 → 本線へ
-- 選択 ①：要素を `known` にし、本線はその要素を使って続ける
-- 選択 ②：要素を `seen` にし、本線はその要素を使わずに書き直す。書き直せなければ、できない理由を示して止まる
-- 選択 ③：molt は書かず、どこに何を書くかを誘導する。利用者が書いて `/done` → 利用者が書いた行を読み、`cargo check` を走らせ、レビューを返す。利用者が書いた行に含まれる `known` でない要素はすべて `known` になる（根拠：自分で書いた）。境界がクレートなら、利用者が `Cargo.toml` に足したクレートが `known` になる
-- 代替フロー：③ で `cargo check` が失敗 → 結果を見せ、利用者は直して再び `/done` するか、① ② に切り替える。プロファイルは `/done` が通るまで変えない
-- 代替フロー：③ で何も書かずに `/done` → 変更が無いことを伝え、選び直す
-- 代替フロー：依頼を取り下げる（`/abort`） → ファイルもプロファイルも変えず、本線は次の依頼を待つ
-- 例外フロー：副線で中断（Ctrl-C） → 何も変えず、本線を「境界で止まった」状態に戻す。利用者は選び直すか取り下げる
-- 例外フロー：1 度に複数の要素が境界になる → 1 つずつ扱う（分類が同じなら束ねてよい）。すべてに選択が付くまで本線は進まない
-- 例外フロー：② の後、同じターンで同じ境界が再発 → 2 度目で止まり、その書き方が要ることを伝えて ① か ③ を勧める
-- 事後条件：① ③ では要素が `known`、② では `seen` になっている。それ以外の要素は変わっていない。本線の対話の記録に副線の質問・解説は無い
+- Precondition: UC2 reached a boundary. The main line is paused
+- Main flow: explanation → questions (optional, unlimited) → choice → back to the main line
+- Choice ①: the element becomes `known`, and the main line continues using it
+- Choice ②: the element becomes `seen`, and the main line rewrites without it. If it cannot be rewritten, show why and stop
+- Choice ③: molt does not write; it guides where to write what. The user writes and sends `/done` → molt reads the user's lines, runs `cargo check`, and returns a review. Every element in the user's lines that is not `known` becomes `known` (provenance: wrote it themselves). If the boundary is a crate, the crate the user added to `Cargo.toml` becomes `known`
+- Alternative flow: `cargo check` fails in ③ → show the result; the user fixes it and sends `/done` again, or switches to ① or ②. The profile is not changed until `/done` passes
+- Alternative flow: `/done` without writing anything in ③ → report that there is no change and let the user choose again
+- Alternative flow: the request is withdrawn (`/abort`) → neither files nor the profile change; the main line waits for the next request
+- Exception flow: interrupted on the side line (Ctrl-C) → change nothing and return the main line to the "paused at a boundary" state. The user chooses again or withdraws
+- Exception flow: several elements become a boundary at once → handle them one at a time (they may be bundled if the category is the same). The main line does not advance until every one has a choice
+- Exception flow: after ②, the same boundary recurs in the same turn → stop at the second time, explain that the construct is needed, and recommend ① or ③
+- Postcondition: the element is `known` after ① or ③, and `seen` after ②. No other element has changed. The main line's transcript has no side-line questions or explanations
 
-### UC4 変更をコミットする
+### UC4 Commit the changes
 
-コミットは利用者が差分とメッセージ案を見て承認したものだけ。
+A commit contains only what the user approved after seeing the diff and the proposed message.
 
-- 事前条件：molt の書き込みがあり、`cargo check` が通っている。カレントディレクトリが git リポジトリ
-- 主フロー：利用者が頼む（または molt が提案）→ molt が変えたファイル（`cargo add` による `Cargo.toml` と `Cargo.lock` を含む）の差分とメッセージ案を見せる → 承認 → その内容だけをステージしてコミット
-- 代替フロー：他に未ステージの変更が混ざっている → 伝え、molt が変えたファイルだけをステージするか利用者に確かめる
-- 例外フロー：承認しない → 何もしない。差分は作業ツリーに残る
-- 例外フロー：コミットする差分が無い → 伝えて何もしない
-- 例外フロー：直前の `cargo check` が失敗したまま → その事実を警告し、それでもコミットするか確かめる
-- 例外フロー：git リポジトリでない → 伝えて何もしない
-- 例外フロー：`git commit` が失敗（hook、`user.name` 未設定など） → エラーを見せ、コミットされていないことを伝える。ステージは解かない
-- 事後条件：承認した内容だけがコミットされている。push はしていない
+- Precondition: molt has written, and `cargo check` passes. The current directory is a git repository
+- Main flow: the user asks (or molt proposes) → molt shows the diff of the files it changed (including `Cargo.toml` and `Cargo.lock` changed by `cargo add`) and a proposed message → approval → stage only that content and commit
+- Alternative flow: other unstaged changes are mixed in → report it and confirm with the user whether to stage only the files molt changed
+- Exception flow: not approved → do nothing. The diff stays in the working tree
+- Exception flow: nothing to commit → report it and do nothing
+- Exception flow: the last `cargo check` is still failing → warn about that fact and confirm whether to commit anyway
+- Exception flow: not a git repository → report it and do nothing
+- Exception flow: `git commit` fails (a hook, `user.name` unset, etc.) → show the error and report that nothing was committed. The staging is left as is
+- Postcondition: only the approved content is committed. Nothing is pushed
 
-### UC5 プロファイルを見る・直す
+### UC5 View and edit the profile
 
-利用者は要素ごとの状態と根拠を一覧でき、手で状態を変えられる。
+The user can list the status and provenance per element and change a status by hand.
 
-- 事前条件：プロファイルがある
-- 主フロー（見る）：`molt profile show` で、分類ごとに要素の状態・根拠・日時を一覧する。基本要素は最後にまとめて示す
-- 主フロー（直す）：`molt profile set <要素> <状態>` で状態を変える。根拠は「手動」、変更は履歴に残る。基本要素を `unknown` にすると、その要素は基本要素から外れる（`deny`）。`known` に戻すと `deny` から外れる
-- 例外フロー：存在しない要素名 / 無効な状態 → 拒否し、有効な名前・状態を示す。何も変えない
-- 例外フロー：プロファイルが無い → `molt init` を促す
-- 変更は、次に起動した本線の最初の生成から反映される（動いている本線には反映されない）。`known` でなくした要素は再び境界になる
-- 事後条件：変えた要素の状態と根拠「手動」が保存され、履歴に 1 件増えている
+- Precondition: a profile exists
+- Main flow (view): `molt profile show` lists the status, provenance, and timestamp of each element per category. Base elements are shown together at the end
+- Main flow (edit): `molt profile set <element> <status>` changes the status. The provenance is "manual" and the change is recorded in the history. Setting a base element to `unknown` removes it from the base elements (`deny`). Setting it back to `known` removes it from `deny`
+- Exception flow: a non-existent element name / an invalid status → reject and show the valid names and statuses. Change nothing
+- Exception flow: no profile → prompt for `molt init`
+- The change takes effect from the first generation of the next main line started (a running main line does not pick it up). An element that is no longer `known` becomes a boundary again
+- Postcondition: the changed element's status and the provenance "manual" are saved, and the history has one more entry
 
 ---
 
-## 7. プロファイルの状態遷移
+## 7. Profile state transitions
 
-要素の状態は 3 つで、生成を許すのは `known` だけ。
+An element has 3 statuses, and only `known` permits generation.
 
 ```mermaid
 stateDiagram-v2
   [*] --> unknown
-  unknown --> seen: 自己申告（読める） / ② 知っている書き方で / 手動
-  unknown --> known: 質疑応答で判定 / 参考リポジトリのクレート / ① 副線で理解 / ③ 自分で書いた / 手動
-  seen --> known: ① / ③ / 手動
-  known --> unknown: 手動（profile set）
-  known --> seen: 手動
-  seen --> unknown: 手動
-  note right of known: 生成に使ってよい
-  note right of seen: 生成には使わない。次回の解説を短くする
+  unknown --> seen: Self-report (can read) / ② use a construct I know / manual
+  unknown --> known: Judged in Q&A / crate in the reference repository / ① understood on the side line / ③ wrote it themselves / manual
+  seen --> known: ① / ③ / manual
+  known --> unknown: Manual (profile set)
+  known --> seen: Manual
+  seen --> unknown: Manual
+  note right of known: May be used for generation
+  note right of seen: Not used for generation. Shortens the next explanation
 ```
 
-図から読み取ること：molt の判断だけで `known` になる経路は無い。必ず利用者の申告・回答・選択、または利用者が共有したリポジトリを経る。
+What to read from the figure: there is no path to `known` by molt's judgement alone. It always goes through the user's report, answer, or choice, or a repository the user shared.
 
 ---
 
-## 8. 設計
+## 8. Design
 
-### 8.1 主要な判断
+### 8.1 Key decisions
 
-| 判断 | 選択 | 理由 |
+| Decision | Choice | Reason |
 |---|---|---|
-| crate 構成 | 単一 crate、`lib` + 薄い `bin` | 規模が小さい。モジュール境界と `ChatClient` トレイトでネット無しのテストは足りる |
-| 構文解析 | syn 3（`full` + `visit` + `extra-traits`）、`proc-macro2` の `span-locations` | 検査対象は書き込み前の完全なファイル。syn で parse できないものは cargo でも通らないので、部分解析に強い tree-sitter の利点が生きない。C ツールチェーン不要 |
-| LLM クライアント | reqwest + serde_json の自作（`ChatClient` トレイトの背後） | Nemotron 固有の応答フィールドと、送る項目を自分で制御したい |
-| git | `git` コマンドをシェルアウト（固定 argv） | status / diff / add / commit の 4 操作だけ |
-| 入力 | clap + rustyline（履歴・編集）+ dialoguer（承認） | 素の stdin は履歴が無く使いづらい |
-| 検査のフック位置 | `write_file` / `edit_file` が受け取った内容を、ディスクに書く前に文字列として検査する | 「検査を通らなかった内容はディスクに置かない」を構造で守る。検査が文字列の純関数になる |
-| 検査の範囲 | 変更された行に限る | 利用者が元から持っていたコードが、無関係な編集を止めないようにする（4 節） |
-| 本線・副線の分離 | メッセージ列を本線用と副線用で別に持つ | 「副線は本線の記録に現れない」を構造で守る |
-| プロファイルの置き場 | `$MOLT_HOME` → `$XDG_CONFIG_HOME/molt` → `~/.config/molt` | 理解は利用者に属するのでリポジトリではなく利用者の設定に置く |
+| Crate layout | A single crate, `lib` + a thin `bin` | The scale is small. Module boundaries and the `ChatClient` trait are enough for network-free tests |
+| Parsing | syn 3 (`full` + `visit` + `extra-traits`), `proc-macro2` with `span-locations` | The check runs on the complete file before it is written. Anything syn cannot parse would not pass cargo either, so tree-sitter's strength in partial parsing brings nothing. No C toolchain needed |
+| LLM client | Hand-written on reqwest + serde_json (behind the `ChatClient` trait) | Want control over Nemotron-specific response fields and over what is sent |
+| git | Shell out to the `git` command (fixed argv) | Only the 4 operations status / diff / add / commit |
+| Input | clap + rustyline (history, editing) + dialoguer (approval) | Raw stdin has no history and is hard to use |
+| Where the check hooks in | The content received by `write_file` / `edit_file` is checked as a string before it is written to disk | Keeps "content that fails the check never lands on disk" by structure. The check becomes a pure function over strings |
+| Scope of the check | Only the changed lines | So that code the user already had does not stop unrelated edits (section 4) |
+| Separating the main and side lines | Separate message lists for the main line and the side line | Keeps "the side line never appears in the main line's transcript" by structure |
+| Where the profile lives | `$MOLT_HOME` → `$XDG_CONFIG_HOME/molt` → `~/.config/molt` | Comprehension belongs to the user, so it lives in the user's config, not the repository |
 
-### 8.2 モジュールと依存
+### 8.2 Modules and dependencies
 
 ```mermaid
 flowchart TB
-  cli["cli<br/>clap・Ui トレイト・描画・commands"] --> agent["agent<br/>mainline・subline・tools・prompts"]
-  cli --> onboarding["onboarding<br/>questionnaire・probe・repo_scan"]
-  agent --> workspace["workspace<br/>パスの閉じ込め・cargo・git"]
-  agent --> checker["checker<br/>visitor・diff・crates・finding"]
-  agent --> llm["llm<br/>ChatClient・nebius・router・fake"]
-  agent --> profile["profile<br/>element・状態・baseline・store"]
-  agent --> session["session<br/>jsonl ログ"]
+  cli["cli<br/>clap, Ui trait, rendering, commands"] --> agent["agent<br/>mainline, subline, tools, prompts"]
+  cli --> onboarding["onboarding<br/>questionnaire, probe, repo_scan"]
+  agent --> workspace["workspace<br/>path confinement, cargo, git"]
+  agent --> checker["checker<br/>visitor, diff, crates, finding"]
+  agent --> llm["llm<br/>ChatClient, nebius, router, fake"]
+  agent --> profile["profile<br/>element, status, baseline, store"]
+  agent --> session["session<br/>jsonl log"]
   onboarding --> checker
   onboarding --> llm
   onboarding --> profile
@@ -322,161 +324,161 @@ flowchart TB
   profile --> config
 ```
 
-図から読み取ること：`checker` と `profile` は I/O を持たず、ネット無しで単体テストできる。LLM と cargo はトレイトの背後にあり、テストでは偽物に差し替える。
+What to read from the figure: `checker` and `profile` do no I/O and can be unit-tested without a network. The LLM and cargo sit behind traits and are replaced with fakes in tests.
 
-### 8.3 データモデル
+### 8.3 Data model
 
-- `Category`（10）と `Element`（閉じた enum）。`Element::category()` を網羅 match で持つ。要素の一覧の正はコードの `Element` と `tests/fixtures/elements/`
-- `ItemKey = Element | Crate(String)`（toml キーは `arc` / `"crate:tokio"`）
-- `Profile`：要素ごとの `{ status, provenance, at, evidence }`、分類ごとの申告、基本要素の追加・除外（`allow` / `deny`）、履歴（追記のみ）
-- 基本要素の既定はコードが持つ。`clone()` は入れない（所有権の分類の核）。利用者は `deny` で基本要素を外せる
-- `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`。ParseError はコンパイル系の失敗として扱い、境界にしない
-- マクロ呼び出しの中身は syn では見えない → 基本マクロ以外の呼び出し自体を finding にする
-- 新規クレートは `Cargo.toml` の依存キーの差分と、ソース中のパスの先頭セグメント（std / core / crate / self / super / 自プロジェクトのモジュール以外）の両方から検出する
+- `Category` (10) and `Element` (a closed enum). `Element::category()` is an exhaustive match. The source of truth for the element list is `Element` in the code and `tests/fixtures/elements/`
+- `ItemKey = Element | Crate(String)` (toml keys are `arc` / `"crate:tokio"`)
+- `Profile`: `{ status, provenance, at, evidence }` per element, the report per category, additions to and removals from the base elements (`allow` / `deny`), and the history (append-only)
+- The default base elements live in the code. `clone()` is not among them (it is the core of the ownership category). The user can remove a base element with `deny`
+- `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`. ParseError is treated as a compile-type failure, not a boundary
+- The inside of a macro invocation is invisible to syn → any invocation other than a base macro is itself a finding
+- New crates are detected from both the diff of dependency keys in `Cargo.toml` and the first segment of paths in the source (anything other than std / core / crate / self / super / the project's own modules)
 
-### 8.4 書き込みの経路
+### 8.4 The write path
 
 ```mermaid
 sequenceDiagram
-  participant L as モデル
+  participant L as Model
   participant T as tools
   participant C as checker
-  participant D as ディスク
-  participant U as 利用者
-  L->>T: write_file / edit_file（新しい内容）
-  T->>C: check_file(ディスクの旧内容, 新しい内容, profile)
+  participant D as Disk
+  participant U as User
+  L->>T: write_file / edit_file (new content)
+  T->>C: check_file(old content on disk, new content, profile)
   alt Clean
     C-->>T: Clean
-    T->>D: 書き込み
+    T->>D: Write
     T-->>L: written
   else OutOfProfile
     C-->>T: findings
-    T-->>L: 却下文（行・要素・分類・書き直しの指示）
+    T-->>L: Rejection (line, element, category, rewrite instruction)
   else ParseError
-    C-->>T: 行・列・メッセージ
-    T-->>L: parse エラー（コンパイル失敗と同じ扱い）
+    C-->>T: line, column, message
+    T-->>L: parse error (treated like a compile failure)
   end
-  Note over T,D: ターン中に書き込みがあれば、モデルの呼び出しに関係なく<br/>ターンの終わりに tools 側が cargo check を実行する
+  Note over T,D: If anything was written during the turn, tools runs cargo check<br/>at the end of the turn regardless of the model's calls
   T->>D: cargo check
-  D-->>T: 結果
-  T-->>L: 結果（失敗なら修正のターンへ）
-  T->>U: 差分と cargo check の結果
+  D-->>T: Result
+  T-->>L: Result (on failure, a fixing turn follows)
+  T->>U: Diff and the cargo check result
 ```
 
-図から読み取ること：ディスクに届くのは Clean と判定された内容だけ。却下された内容はモデルにだけ返り、利用者にもディスクにも出ない。`cargo check` はモデルが呼ばなくてもエージェント側が走らせるので、3 節「検証」はモデルの振る舞いに依存しない。
+What to read from the figure: only content judged Clean reaches the disk. Rejected content goes back to the model only, never to the user or the disk. `cargo check` is run by the agent even if the model does not call it, so "Verification" in section 3 does not depend on the model's behaviour.
 
-ツール：`list_files` `read_file` `write_file` `edit_file` `run_cargo` `git_status` `git_diff` `git_commit`（承認必須）`request_boundary(items, reason, proposed_code)` `finish`。
-`run_cargo` が受け付けるのは `check` `test` `clippy` `build` `fmt` `add` だけ（`add` は承認必須、`run` や任意のサブコマンドは受け付けない）。
-1 ターンの予算：同じ要素の却下 2 回、コンパイル修正 3 回、ツール呼び出し 40 回。質疑応答（UC1）の予算：1 分類につき質問 1 問、追加の質問は 1 問まで。
+Tools: `list_files` `read_file` `write_file` `edit_file` `run_cargo` `git_status` `git_diff` `git_commit` (approval required) `request_boundary(items, reason, proposed_code)` `finish`.
+`run_cargo` accepts only `check` `test` `clippy` `build` `fmt` `add` (`add` requires approval; `run` and arbitrary subcommands are not accepted).
+Budget per turn: 2 rejections of the same element, 3 compile fixes, 40 tool calls. Budget for the Q&A (UC1): 1 question per category, plus at most 1 follow-up question.
 
-### 8.5 副線から本線へ渡すもの
+### 8.5 What the side line hands to the main line
 
-本線に入るのは 1 メッセージだけで、形は 3 つ。
+Only one message enters the main line, in one of 3 forms.
 
-| 解決 | 本線に入るメッセージ | プロファイル |
+| Resolution | Message entering the main line | Profile |
 |---|---|---|
-| ① unlock | `BOUNDARY RESOLVED: unlock` ＋ 許可した要素名。元の方針で進めてよい | known（unlocked） |
-| ② rewrite | `BOUNDARY RESOLVED: rewrite` ＋ 禁止のままの要素名 ＋ 副線の記録から light モデルが作った方針 1 行 | seen |
-| ③ user_wrote | `BOUNDARY RESOLVED: user_wrote` ＋ 許可した要素名。ファイルを再読するよう指示 | known（wrote_themselves） |
+| ① unlock | `BOUNDARY RESOLVED: unlock` + the permitted element names. The original approach may proceed | known (unlocked) |
+| ② rewrite | `BOUNDARY RESOLVED: rewrite` + the still-forbidden element names + a one-line policy the light model made from the side-line transcript | seen |
+| ③ user_wrote | `BOUNDARY RESOLVED: user_wrote` + the permitted element names. An instruction to re-read the files | known (wrote_themselves) |
 
 ### 8.6 CLI
 
 ```text
-molt                      cwd の cargo プロジェクトで本線を開く（プロファイル無しなら init を促す）
-molt init [--repo PATH]   質疑応答でプロファイルを作る。--repo は参考リポジトリの棚卸し
+molt                      Open the main line in the cargo project at cwd (prompts for init if there is no profile)
+molt init [--repo PATH]   Create the profile through Q&A. --repo takes stock of a reference repository
 molt profile show|set <key> <status>|path
-molt check [PATHS..]      検査器を単体で走らせ、finding を表示（あれば exit 1）
-molt doctor               Token Factory の対応確認
+molt check [PATHS..]      Run the checker alone and print findings (exit 1 if any)
+molt doctor               Check Token Factory support
 ```
 
-共通フラグ：`--profile PATH`、`--fake`（`FakeChatClient` と台本でオフライン実行）。
-本線のプロンプトは `molt> `、副線は `molt [sub: arc, mutex]> `。副線に入る・抜けるときは罫線のバナーを出し、副線内の出力は 2 スペース下げる。
-3 節の「言語」は、UI の固定文字列を英語で持ち、モデルに「利用者の直近の入力言語で答える」と指示することで満たす（言語の判定コードは持たない）。
+Common flags: `--profile PATH`, `--fake` (offline run with `FakeChatClient` and a script).
+The main-line prompt is `molt> `, the side-line prompt is `molt [sub: arc, mutex]> `. A ruled banner is printed on entering and leaving the side line, and side-line output is indented by 2 spaces.
+"Language" in section 3 is met by holding fixed UI strings in English and instructing the model to "answer in the language of the user's latest input" (there is no language-detection code).
 
-### 8.7 モデルの役割と設定
+### 8.7 Model roles and configuration
 
-| 役割 | 既定の ID（カタログで確認済み） | 用途 |
+| Role | Default ID (confirmed in the catalogue) | Use |
 |---|---|---|
-| light | `nvidia/Nemotron-3_5-Lightning` | 質疑応答の判定、副線→本線の 1 行要約、ログ整形 |
-| generate | `nvidia/nemotron-3-super-120b-a12b` | コード生成・書き直し、③ のレビュー |
-| reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | 境界の判断、プロファイル内の代替案、解説、副線の質疑応答、質問の生成 |
+| light | `nvidia/Nemotron-3_5-Lightning` | Judging the Q&A, the one-line side-line to main-line summary, log formatting |
+| generate | `nvidia/nemotron-3-super-120b-a12b` | Code generation and rewriting, the review in ③ |
+| reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | Boundary judgement, alternatives within the profile, explanations, side-line Q&A, question generation |
 
-`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` は light の代替候補。既定値の正は `config.toml` を読むコード。
-設定は `config.toml`（`[api]` `[models]` `[reasoning_effort]` `[capabilities]`）。`[capabilities]` は `molt doctor` が書く。
-`molt doctor` は各役割のモデルに対し、ID の存在、素の chat、`tool_choice: required` でのツール呼び出し、`response_format: json_schema` の遵守、`reasoning_effort` の挙動を確かめて表にする。`json_schema` が使えないモデルでは、`json_object` ＋ プロンプトにスキーマ ＋ serde 検証 ＋ 1 回修復に切り替える。
+`nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B` is an alternative candidate for light. The source of truth for the defaults is the code that reads `config.toml`.
+Configuration is `config.toml` (`[api]` `[models]` `[reasoning_effort]` `[capabilities]`). `[capabilities]` is written by `molt doctor`.
+`molt doctor` checks, for the model of each role, that the ID exists, plain chat, a tool call with `tool_choice: required`, adherence to `response_format: json_schema`, and the behaviour of `reasoning_effort`, and prints a table. For a model that cannot use `json_schema`, it switches to `json_object` + the schema in the prompt + serde validation + 1 repair attempt.
 
-### 8.8 永続化
+### 8.8 Persistence
 
-プロファイルとセッションの記録の形はコード（`profile/store.rs`、`session.rs`）が正。ここには形の理由だけを書く。
+The shape of the profile and the session log is defined by the code (`profile/store.rs`, `session.rs`). Only the reasons for the shape are written here.
 
-| 決め | 理由 |
+| Decision | Reason |
 |---|---|
-| 要素の状態は上書きし、遷移は履歴（`[[history]]`）に追記する | 「いつ・何がきっかけで `known` になったか」を後から辿れる。将来の理解マップの材料にもなる |
-| 根拠（provenance）と日時を要素ごとに持つ | 3 節「molt の判断だけで広がらない」を、保存された内容から確かめられる |
-| 保存は一時ファイルに書いてから rename する | 途中で失敗しても壊れたプロファイルを残さない |
-| セッションの記録は 1 行 1 イベントの jsonl。副線のイベントは `line: "sub"` を持つ | 本線と副線を記録上で区別でき、3 節「副線は本線の記録に現れない」を記録から確かめられる |
-| セッションの記録にリクエストヘッダと API キーを書かない。LLM のリクエスト本文は `MOLT_LOG` が有効なときだけ別ファイルに出す | 3 節「API キーをログに書かない」 |
+| An element's status is overwritten, and each transition is appended to the history (`[[history]]`) | "When and why did it become `known`" can be traced later. It is also material for a future comprehension map |
+| Provenance and timestamp are held per element | "It never spreads by molt's judgement alone" in section 3 can be verified from the saved content |
+| Saving writes to a temporary file and then renames | A failure midway never leaves a corrupted profile |
+| The session log is jsonl, one event per line. Side-line events carry `line: "sub"` | The main and side lines are distinguishable in the log, so "the side line never appears in the main line's transcript" in section 3 can be verified from the log |
+| Request headers and the API key are not written to the session log. LLM request bodies go to a separate file only when `MOLT_LOG` is enabled | "The API key is never written to logs" in section 3 |
 
 ---
 
-## 9. テスト
+## 9. Tests
 
-ネット無しで 3 節の保証を確かめる。
+The guarantees in section 3 are verified without a network.
 
-| 対象 | 方法 |
+| Target | Method |
 |---|---|
-| checker | `tests/fixtures/elements/*.rs` の先頭 `// expect: …` と検出集合の完全一致。`fixtures/negative/*.rs` は基本要素以外 0 件。全 `Element` に fixture があることをテストで強制。変更行フィルタ（旧↔新）で既存の要素が出ないこと |
-| profile | toml 往復、遷移で履歴が増える、未記載 = unknown、allow / deny、存在しない要素名・無効な状態の拒否 |
-| llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` |
-| agent（本線） | `FakeCargo` + tempdir。Clean → ディスクに書かれる。却下 → ディスクは変わらず、書き直しで通る。2 回却下で境界。`request_boundary` で境界。予算超過で止まる |
-| agent（副線） | ① で known、② で seen、③ で利用者が書いた行の要素が known。③ で `cargo check` が失敗したらプロファイルは変わらない。① の後、同じ要素で再び境界にならない。本線のリクエスト履歴に副線のメッセージが無い。`/abort` で何も変わらない |
-| agent（git） | tempdir の git リポジトリで、承認なし → コミットが増えない。承認 → molt が変えたファイルだけがコミットされ、push は呼ばれない |
-| onboarding | `ScriptedUi` ＋ fake の判定で、申告「読める」→ seen、「知らない」→ unknown、「書いた」→ 判定どおり。参考リポジトリの `Cargo.toml` の依存が known。根拠と日時が保存される。中断 → 保存されない |
-| session | `FakeChatClient` に渡した API キーが、jsonl と標準出力のどこにも現れない |
-| cli | `ScriptedUi` で副線の選択を駆動。`assert_cmd` で `molt check` の exit code |
+| checker | Exact match between the leading `// expect: …` in `tests/fixtures/elements/*.rs` and the detected set. `fixtures/negative/*.rs` yields 0 findings other than base elements. A test enforces that every `Element` has a fixture. The changed-line filter (old↔new) does not report existing elements |
+| profile | toml round trip, a transition grows the history, no entry = unknown, allow / deny, rejection of non-existent element names and invalid statuses |
+| llm | `FakeChatClient` (a response queue + a record of sent requests). The wire format is compared with JSON fixtures. The real API is `#[ignore]` |
+| agent (main line) | `FakeCargo` + tempdir. Clean → written to disk. Rejected → disk unchanged, and the rewrite passes. 2 rejections → boundary. `request_boundary` → boundary. Stops when the budget is exceeded |
+| agent (side line) | ① → known, ② → seen, ③ → the elements in the user's lines are known. If `cargo check` fails in ③, the profile is unchanged. After ①, the same element is not a boundary again. The main line's request history has no side-line messages. `/abort` changes nothing |
+| agent (git) | In a tempdir git repository: without approval → no new commit. With approval → only the files molt changed are committed, and push is not called |
+| onboarding | With `ScriptedUi` + a fake judgement: the report "can read" → seen, "don't know" → unknown, "have written" → as judged. The dependencies in the reference repository's `Cargo.toml` are known. Provenance and timestamp are saved. Interrupted → not saved |
+| session | The API key passed to `FakeChatClient` appears nowhere in the jsonl or stdout |
+| cli | `ScriptedUi` drives the side-line choice. `assert_cmd` checks the exit code of `molt check` |
 
 ---
 
-## 10. 実装の依存関係
+## 10. Implementation dependencies
 
-モジュール間の依存から決まる着手の制約。進め方と進捗は issue が持つ。
+The ordering constraints that follow from the dependencies between modules. The plan and progress live in issues.
 
 ```mermaid
 flowchart TB
-  s0["骨格・依存の追加"] --> s1["プロファイルのモデルと保存"]
-  s1 --> s2["検査器の核＋全要素の fixture"]
-  s2 --> s3["変更行フィルタ・クレート検出・molt check"]
-  s0 --> s4["LLM クライアント＋molt doctor"]
-  s0 --> s5["Workspace・ツール・CargoRunner"]
-  s3 --> s6["本線のループ（fake LLM）・Ui"]
+  s0["Skeleton and dependencies"] --> s1["Profile model and store"]
+  s1 --> s2["Checker core + fixtures for every element"]
+  s2 --> s3["Changed-line filter, crate detection, molt check"]
+  s0 --> s4["LLM client + molt doctor"]
+  s0 --> s5["Workspace, tools, CargoRunner"]
+  s3 --> s6["Main-line loop (fake LLM), Ui"]
   s4 --> s6
   s5 --> s6
-  s6 --> s7["検査フック・予算・境界の発生"]
-  s7 --> s8["副線（解説・3 択・遷移）"]
-  s8 --> s9["承認付き git コミット"]
-  s9 --> m(["--fake で 1 本通る：依頼 → 却下 → 境界 → 副線 → ① → 書き込み → cargo check → コミット承認"]):::ok
-  s3 --> s10["質疑応答 molt init"]
+  s6 --> s7["Check hook, budget, raising boundaries"]
+  s7 --> s8["Side line (explanation, 3 choices, transitions)"]
+  s8 --> s9["git commit with approval"]
+  s9 --> m(["One pass with --fake: request → rejection → boundary → side line → ① → write → cargo check → commit approval"]):::ok
+  s3 --> s10["Q&A molt init"]
   s4 --> s10
-  s8 --> s11["解説の強化（比較・参考コード）"]
-  s10 --> s12["README・LICENSE・台本・ログ"]
+  s8 --> s11["Richer explanations (comparison, reference code)"]
+  s10 --> s12["README, LICENSE, script, logs"]
   s11 --> s12
   classDef ok fill:#ecfdf5,stroke:#059669,color:#065f46
 ```
 
-図から読み取ること：検査器・LLM クライアント・Workspace は互いに依存しないので、本線のループより前ならどの順でもよい。本線から git コミットまでが 1 本通った時点が、製品として成立したかの目安。
+What to read from the figure: the checker, the LLM client, and the Workspace do not depend on each other, so before the main-line loop they can be built in any order. The point where one pass runs from the main line through to a git commit is the measure of whether the product stands.
 
 ---
 
-## 11. リスクと手当て
+## 11. Risks and mitigations
 
-| リスク | 手当て |
+| Risk | Mitigation |
 |---|---|
-| Nemotron のツール呼び出しが不安定（引数 JSON が壊れる・テキストで返す） | `doctor` で早い段階に計測。引数は寛容に parse し 1 回再試行。未知ツールは有効名の一覧をエラーで返す。設定でモデルを差し替えられる |
-| `json_schema` 非対応 | `doctor` で検出し、8.7 の切り替えで対応する |
-| `reasoning_effort` を拒否される | `doctor` で確認し、`[capabilities]` が真のときだけ送る |
-| syn が生成コードを parse できない | コンパイル系の失敗として行・列つきで返す。境界にしない |
-| マクロ本体の中が見えない | 基本マクロ以外の呼び出し自体を finding にする。README に制限として書く |
-| 分類をまたぐ要素（`Box<dyn Error>` 等） | 要素ごとに 1 件ずつ出し、解説で分類ごとにまとめて重複を除く。解禁は要素単位なので矛盾しない |
-| 承認が開発のテンポを落とす | 承認はコミットと `cargo add` だけ（4 節）。検査を通った書き込みと cargo check / test / clippy は承認不要 |
-| パス逸脱・破壊的操作 | ルート配下に canonicalize して閉じ込め、`.git/` `target/` は書き込み禁止。`run_cargo` のサブコマンドは列挙したものだけ。シェル文字列は使わず固定 argv |
-| CI の `--locked` | `cargo add` のたびに `Cargo.lock` をコミットする（UC4 の対象に含める） |
+| Nemotron's tool calls are unstable (broken argument JSON, returned as text) | Measure early with `doctor`. Parse arguments leniently and retry once. For an unknown tool, return the list of valid names as the error. The model can be swapped in the config |
+| `json_schema` unsupported | Detect with `doctor` and apply the switch in 8.7 |
+| `reasoning_effort` rejected | Confirm with `doctor` and send it only when `[capabilities]` is true |
+| syn cannot parse the generated code | Return it as a compile-type failure with line and column. Not a boundary |
+| The inside of a macro body is invisible | Any invocation other than a base macro is itself a finding. Documented as a limitation in the README |
+| Elements spanning categories (`Box<dyn Error>` etc.) | Report one finding per element, and in the explanation group by category and remove duplicates. Unlocking is per element, so there is no contradiction |
+| Approvals slow the pace of development | Approvals are only for commits and `cargo add` (section 4). Writes that passed the check and cargo check / test / clippy need no approval |
+| Path escape and destructive operations | Confine to canonicalised paths under the root, and forbid writes to `.git/` and `target/`. `run_cargo` subcommands are only those enumerated. No shell strings; fixed argv |
+| CI's `--locked` | Commit `Cargo.lock` on every `cargo add` (included in the scope of UC4) |
