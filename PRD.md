@@ -298,7 +298,7 @@ What to read from the figure: there is no path to `known` by molt's judgement al
 | Parsing | syn 3 (`full` + `visit` + `extra-traits`), `proc-macro2` with `span-locations` | The check runs on the complete file before it is written. Anything syn cannot parse would not pass cargo either, so tree-sitter's strength in partial parsing brings nothing. No C toolchain needed |
 | LLM client | Hand-written on reqwest + serde_json (behind the `ChatClient` trait) | Want control over Nemotron-specific response fields and over what is sent |
 | git | Shell out to the `git` command (fixed argv) | Only the 4 operations status / diff / add / commit |
-| Input | clap + rustyline (history, editing) + dialoguer (approval) | Raw stdin has no history and is hard to use |
+| Input | clap + rustyline (history, editing; approvals and choices are typed as lines too) | Raw stdin has no history and is hard to use. A single input path gives Ctrl-C one meaning at every question (no answer, never ending molt by itself); dialoguer's dialogs raise SIGINT on Ctrl-C |
 | Where the check hooks in | The content received by `write_file` / `edit_file` is checked as a string before it is written to disk | Keeps "content that fails the check never lands on disk" by structure. The check becomes a pure function over strings |
 | Scope of the check | Only the changed lines | So that code the user already had does not stop unrelated edits (section 4) |
 | Separating the main and side lines | Separate message lists for the main line and the side line | Keeps "the side line never appears in the main line's transcript" by structure |

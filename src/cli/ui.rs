@@ -1,8 +1,8 @@
 //! The boundary between molt and its user (PRD §8.2): reading a line, showing text, choosing one
 //! of several items and approving an operation.
 //!
-//! `TerminalUi` talks to a person through rustyline (lines, with history and editing) and
-//! dialoguer (choices and approvals) (PRD §8.1). [`ScriptedUi`] answers from a script instead, so
+//! `TerminalUi` talks to a person through rustyline (lines with history and editing, and choices
+//! and approvals as lines) (PRD §8.1). [`ScriptedUi`] answers from a script instead, so
 //! tests and `--ui-script` (PRD §8.6) run without a terminal.
 
 mod scripted;

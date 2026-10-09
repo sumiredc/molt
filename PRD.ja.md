@@ -298,7 +298,7 @@ stateDiagram-v2
 | 構文解析 | syn 3（`full` + `visit` + `extra-traits`）、`proc-macro2` の `span-locations` | 検査対象は書き込み前の完全なファイル。syn で parse できないものは cargo でも通らないので、部分解析に強い tree-sitter の利点が生きない。C ツールチェーン不要 |
 | LLM クライアント | reqwest + serde_json の自作（`ChatClient` トレイトの背後） | Nemotron 固有の応答フィールドと、送る項目を自分で制御したい |
 | git | `git` コマンドをシェルアウト（固定 argv） | status / diff / add / commit の 4 操作だけ |
-| 入力 | clap + rustyline（履歴・編集）+ dialoguer（承認） | 素の stdin は履歴が無く使いづらい |
+| 入力 | clap + rustyline（履歴・編集。承認と選択も行で打つ） | 素の stdin は履歴が無く使いづらい。入力の経路を 1 つにして、Ctrl-C をどの問いでも同じ意味（答えなし。それだけで molt を終えない）にする。dialoguer の対話は Ctrl-C で SIGINT を送る |
 | 検査のフック位置 | `write_file` / `edit_file` が受け取った内容を、ディスクに書く前に文字列として検査する | 「検査を通らなかった内容はディスクに置かない」を構造で守る。検査が文字列の純関数になる |
 | 検査の範囲 | 変更された行に限る | 利用者が元から持っていたコードが、無関係な編集を止めないようにする（4 節） |
 | 本線・副線の分離 | メッセージ列を本線用と副線用で別に持つ | 「副線は本線の記録に現れない」を構造で守る |

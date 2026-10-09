@@ -1,9 +1,9 @@
-//! The [`Ui`] for a person at a terminal: rustyline for lines (history and editing), dialoguer for
-//! choices and approvals (PRD §8.1).
+//! The [`Ui`] for a person at a terminal, all through rustyline (PRD §8.1): lines with history and
+//! editing, and choices and approvals as lines too, so that Ctrl-C means the same at every
+//! question (`Input::Interrupted` or no answer) and never ends molt by itself.
 
 use std::io;
 
-use dialoguer::{Confirm, Select};
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
@@ -17,6 +17,16 @@ impl TerminalUi {
     pub(crate) fn new() -> Result<Self, UiError> {
         let editor = DefaultEditor::new().map_err(terminal_error)?;
         Ok(Self { editor })
+    }
+
+    /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
+    /// Ctrl-D: the user did not answer.
+    fn read_answer(&mut self, prompt: &str) -> Result<Option<String>, UiError> {
+        match self.editor.readline(prompt) {
+            Ok(line) => Ok(Some(line)),
+            Err(ReadlineError::Interrupted | ReadlineError::Eof) => Ok(None),
+            Err(error) => Err(terminal_error(error)),
+        }
     }
 }
 
@@ -40,28 +50,64 @@ impl Ui for TerminalUi {
         println!("{text}");
     }
 
+    /// Lists `items` numbered from 1 and reads a number, asking again until it is one of them.
     fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
-        let answer = Select::new()
-            .with_prompt(prompt)
-            .items(items)
-            .default(0)
-            .interact_opt();
-        dialog_answer(answer)
+        println!("{prompt}");
+        for (index, item) in items.iter().enumerate() {
+            println!("  {}) {item}", index + 1);
+        }
+        loop {
+            let Some(line) = self.read_answer("> ")? else {
+                return Ok(None);
+            };
+            if let Some(index) = select_answer(&line, items.len()) {
+                return Ok(Some(index));
+            }
+            println!("Type a number from 1 to {}.", items.len());
+        }
     }
 
+    /// Reads `y`/`yes` or `n`/`no` after `prompt`, asking again until it is one of them.
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
-        let answer = Confirm::new().with_prompt(prompt).interact_opt();
-        dialog_answer(answer)
+        // A prompt of several lines is printed, and only its last line stays beside the answer.
+        let (head, last) = match prompt.rsplit_once('\n') {
+            Some((head, last)) => (Some(head), last),
+            None => (None, prompt),
+        };
+        if let Some(head) = head {
+            println!("{head}");
+        }
+        let question = if last.is_empty() {
+            "[y/n] ".to_owned()
+        } else {
+            format!("{last} [y/n] ")
+        };
+        loop {
+            let Some(line) = self.read_answer(&question)? else {
+                return Ok(None);
+            };
+            if let Some(answer) = confirm_answer(&line) {
+                return Ok(Some(answer));
+            }
+            println!("Type y or n.");
+        }
     }
 }
 
-/// Esc (`Ok(None)`) and Ctrl-C both mean the user did not answer.
-fn dialog_answer<T>(answer: Result<Option<T>, dialoguer::Error>) -> Result<Option<T>, UiError> {
-    match answer {
-        Ok(answer) => Ok(answer),
-        Err(dialoguer::Error::IO(error)) if error.kind() == io::ErrorKind::Interrupted => Ok(None),
-        Err(dialoguer::Error::IO(error)) => Err(UiError::Terminal(error)),
+/// `y` or `yes` is true, `n` or `no` is false, in any case and with spaces around. Anything else
+/// is no answer.
+fn confirm_answer(line: &str) -> Option<bool> {
+    match line.trim().to_ascii_lowercase().as_str() {
+        "y" | "yes" => Some(true),
+        "n" | "no" => Some(false),
+        _ => None,
     }
+}
+
+/// The index of the item numbered `line` (from 1) among `items` items, if it is one.
+fn select_answer(line: &str, items: usize) -> Option<usize> {
+    let number: usize = line.trim().parse().ok()?;
+    (1..=items).contains(&number).then(|| number - 1)
 }
 
 fn terminal_error(error: ReadlineError) -> UiError {
@@ -76,25 +122,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn esc_in_a_dialog_is_no_answer() {
-        assert_eq!(dialog_answer::<bool>(Ok(None)).unwrap(), None);
+    fn yes_and_no_in_any_case_answer_a_confirmation() {
+        for line in ["y", "Y", "yes", " YES "] {
+            assert_eq!(confirm_answer(line), Some(true), "{line:?}");
+        }
+        for line in ["n", "N", "no", " No "] {
+            assert_eq!(confirm_answer(line), Some(false), "{line:?}");
+        }
     }
 
     #[test]
-    fn ctrl_c_in_a_dialog_is_no_answer() {
-        let interrupted = io::Error::new(io::ErrorKind::Interrupted, "read interrupted");
-        assert_eq!(
-            dialog_answer::<bool>(Err(dialoguer::Error::IO(interrupted))).unwrap(),
-            None
-        );
+    fn anything_else_does_not_answer_a_confirmation() {
+        for line in ["", "  ", "yep", "1", "ok"] {
+            assert_eq!(confirm_answer(line), None, "{line:?}");
+        }
     }
 
     #[test]
-    fn other_dialog_failures_are_terminal_errors() {
-        let failed = io::Error::new(io::ErrorKind::BrokenPipe, "closed");
-        assert!(matches!(
-            dialog_answer::<bool>(Err(dialoguer::Error::IO(failed))),
-            Err(UiError::Terminal(error)) if error.kind() == io::ErrorKind::BrokenPipe
-        ));
+    fn a_number_of_an_item_chooses_it_counting_from_1() {
+        assert_eq!(select_answer("1", 3), Some(0));
+        assert_eq!(select_answer(" 3 ", 3), Some(2));
+    }
+
+    #[test]
+    fn a_number_outside_the_items_or_not_a_number_chooses_nothing() {
+        for line in ["0", "4", "-1", "", "two"] {
+            assert_eq!(select_answer(line, 3), None, "{line:?}");
+        }
     }
 }
