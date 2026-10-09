@@ -3,6 +3,7 @@
 //!
 //! A pure function over strings: no file, no environment variable, no network.
 
+mod diff;
 pub mod finding;
 pub mod visitor;
 
@@ -15,22 +16,28 @@ pub use finding::{CheckContext, CheckReport, Finding, ParseError};
 /// Checks `new`, the content about to be written to `path`, against
 /// `ctx.profile`.
 ///
-/// An element is reported unless it is a base element or `known`. Content
-/// that syn cannot parse is `ParseError`, whatever else it contains.
+/// An element is reported unless it is a base element or `known`, or it
+/// starts on a line unchanged from `old` (`old` is empty for a new file, and
+/// then the whole of `new` is checked). An element spanning several lines is
+/// judged by `Finding.line` alone, so that editing one line inside an
+/// existing `impl` does not report the whole `impl`; the visitor therefore
+/// puts `Finding.line` on the token that makes the element (the macro path,
+/// the `?`, the method name), not on the start of an enclosing expression.
+/// Content that syn cannot parse is `ParseError`, whatever else it contains
+/// and whichever lines changed.
 ///
-/// For now the whole of `new` is checked, and `path`, `old` and
-/// `ctx.own_modules` are not used yet.
-// TODO(#36): report only the lines that differ from `old`.
+/// `path` and `ctx.own_modules` are not used yet.
 // TODO(#37): detect crates from the paths in `new` and, when `path` is a
 // `Cargo.toml`, from its dependency keys.
-pub fn check_file(_path: &Path, _old: &str, new: &str, ctx: &CheckContext) -> CheckReport {
+pub fn check_file(_path: &Path, old: &str, new: &str, ctx: &CheckContext) -> CheckReport {
     let detected = match visitor::detect(new) {
         Ok(detected) => detected,
         Err(error) => return CheckReport::ParseError(error),
     };
+    let changed = diff::changed_lines(old, new);
     let findings: Vec<Finding> = detected
         .into_iter()
-        .filter(|finding| !is_allowed(finding, ctx))
+        .filter(|finding| changed.contains(finding.line) && !is_allowed(finding, ctx))
         .collect();
     if findings.is_empty() {
         CheckReport::Clean
