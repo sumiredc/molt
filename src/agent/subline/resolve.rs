@@ -651,6 +651,42 @@ fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too
 }
 
 #[test]
+fn a_crate_requested_with_a_hyphen_after_rewrite_of_its_underscore_spelling_is_a_recurrence() {
+    const WITH_SERDE_JSON: &str = "fn f(_: serde_json::Value) {}\n\nfn main() {}\n";
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line = main_line(&client, &cargo, &dir);
+    client.push_chat(Ok(write_main("first", WITH_SERDE_JSON)));
+    client.push_chat(Ok(write_main("second", WITH_SERDE_JSON)));
+    let TurnEnd::Boundary(boundary) = main_line.turn("use serde_json", &mut Refuse).end else {
+        panic!("the turn did not stop at a boundary");
+    };
+    assert_eq!(boundary.items, ["crate:serde_json".parse().unwrap()]);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("policy")));
+    let resolution = side
+        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "asked".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["crate:serde-json"], "reason": "it parses JSON" })
+                .to_string(),
+        }],
+    }));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    let TurnEnd::Boundary(again) = resumed.turn.end else {
+        panic!("the turn did not stop again: {:?}", resumed.turn.end);
+    };
+    assert!(main_line.side_line(again).is_recurrence());
+}
+
+#[test]
 fn unlock_makes_an_item_already_seen_known() {
     let dir = project();
     let client = FakeChatClient::new();

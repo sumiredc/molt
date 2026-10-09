@@ -81,7 +81,7 @@ struct Held {
     compile_fixes: usize,
     changes: Vec<Change>,
     progress: Progress,
-    /// The items the user chose ② for in this turn (PRD UC3).
+    /// The items the user chose ② for in this turn (PRD UC3), as [`checked_key`] spells them.
     rewritten: BTreeSet<ItemKey>,
     /// Whether the boundary names an item of `rewritten`: it recurred after ② in the same turn.
     recurred: bool,
@@ -321,25 +321,16 @@ impl<'a> MainLine<'a> {
         let mut items: Vec<ItemKey> = resolution.items().to_vec();
         if to == Status::Known {
             // The check allows a crate only when every spelling of it in the profile (`-` or `_`)
-            // is `known`, so ① unlocks each of them, or the same boundary would come again. Both
-            // sides are compared as the check does, with every `-` turned into `_`.
-            let checked_as = |name: &str| name.replace('-', "_");
-            let crates: Vec<String> = items
-                .iter()
-                .filter_map(|item| match item {
-                    ItemKey::Crate(name) => Some(checked_as(name)),
-                    ItemKey::Element(_) => None,
-                })
-                .collect();
+            // is `known`, so ① unlocks each of them, or the same boundary would come again.
+            let checked: Vec<ItemKey> = items.iter().map(checked_key).collect();
             let spellings: Vec<ItemKey> = self
                 .profile
                 .entries()
                 .map(|(key, _)| key)
-                .filter(|spelling| match spelling {
-                    ItemKey::Crate(name) => {
-                        !items.contains(spelling) && crates.contains(&checked_as(name))
-                    }
-                    ItemKey::Element(_) => false,
+                .filter(|spelling| {
+                    matches!(spelling, ItemKey::Crate(_))
+                        && !items.contains(spelling)
+                        && checked.contains(&checked_key(spelling))
                 })
                 .cloned()
                 .collect();
@@ -363,7 +354,7 @@ impl<'a> MainLine<'a> {
         };
         let mut rewritten = held.rewritten;
         if resolution.choice() == Choice::Rewrite {
-            rewritten.extend(resolution.items().iter().cloned());
+            rewritten.extend(resolution.items().iter().map(checked_key));
         }
         self.messages.push(Message::User {
             content: resolution.message(),
@@ -433,7 +424,10 @@ impl<'a> MainLine<'a> {
             let end = self.converse(&mut turn, &mut progress, approver);
             if let Some(end) = self.end_turn(end, &mut turn, &mut progress, approver) {
                 if let TurnEnd::Boundary(boundary) = &end {
-                    let recurred = boundary.items.iter().any(|item| rewritten.contains(item));
+                    let recurred = boundary
+                        .items
+                        .iter()
+                        .any(|item| rewritten.contains(&checked_key(item)));
                     self.held = Some(Held {
                         tool_calls: turn.tool_calls.clone(),
                         written: turn.written.clone(),
@@ -597,6 +591,14 @@ impl<'a> MainLine<'a> {
         request.tools = self.definitions.clone();
         request.tool_choice = Some(ToolChoice::Auto);
         request
+    }
+}
+
+/// `item` as the check compares it: a crate with every `-` turned into `_`, an element as it is.
+fn checked_key(item: &ItemKey) -> ItemKey {
+    match item {
+        ItemKey::Crate(name) => ItemKey::Crate(name.replace('-', "_")),
+        ItemKey::Element(_) => item.clone(),
     }
 }
 
