@@ -14,6 +14,7 @@ use crate::agent::mainline::{
     AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
+use crate::agent::subline::{Choice, SubLine};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{ChatClient, OpenAiClient, Router, fake_script};
@@ -37,13 +38,13 @@ pub(super) fn run(
     fake: Option<&Path>,
     ui_script: Option<&Path>,
 ) -> ExitCode {
-    let opened = preconditions(profile_flag).and_then(|(root, profile)| {
+    let opened = preconditions(profile_flag).and_then(|(root, profile, profile_path)| {
         let (home, config, client) = connect(fake)?;
         let ui = open_ui(ui_script)?;
         let log = open_log(&home)?;
-        Ok((root, profile, config, client, ui, log))
+        Ok((root, profile, profile_path, config, client, ui, log))
     });
-    let (root, profile, config, client, mut ui, log) = match opened {
+    let (root, profile, profile_path, config, client, mut ui, log) = match opened {
         Ok(opened) => opened,
         Err(message) => {
             eprintln!("{message}");
@@ -52,14 +53,15 @@ pub(super) fn run(
     };
     let cargo = Cargo::new(root.clone());
     let tools = Tools::new(root, &cargo);
-    let mut agent =
-        MainLine::new(client.as_ref(), Router::new(&config), tools, profile).with_log(log);
+    let mut agent = MainLine::new(client.as_ref(), Router::new(&config), tools, profile)
+        .with_log(log)
+        .with_profile_path(profile_path);
     main_line(ui.as_mut(), &mut agent)
 }
 
 /// UC2's preconditions: a profile exists, and the current directory is a cargo project. Returns
-/// that directory as the root the tools are confined to, and the profile.
-fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile), String> {
+/// that directory as the root the tools are confined to, the profile, and where it is saved.
+fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile, PathBuf), String> {
     let path = profile::profile_path(profile_flag)?;
     let loaded = profile::load(&path)?;
     let cwd = std::env::current_dir()
@@ -71,7 +73,7 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile), String>
         ));
     }
     let root = Root::new(&cwd).map_err(|error| error.to_string())?;
-    Ok((root, loaded))
+    Ok((root, loaded, path))
 }
 
 /// Reads `config.toml` and creates the client: the responses of the `--fake` script at `fake`,
@@ -263,8 +265,9 @@ fn boundary_text(boundary: &Boundary) -> String {
 /// What the user can do while the main line is paused at a boundary (UC3's exception flow).
 const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side line, or /abort to withdraw the request.";
 
-/// Opens the side line (UC3) at `boundary`, where the turn stopped. `/abort` there withdraws the
-/// request. Ctrl-C there pauses the main line at the boundary, where `/side` opens the same side
+/// Opens the side line (UC3) at `boundary`, where the turn stopped. A choice there goes on with
+/// the turn, which opens the side line again when it stops at another boundary. `/abort` there
+/// withdraws the request. Ctrl-C there pauses the main line at the boundary, where `/side` opens the same side
 /// line again and `/abort` withdraws the request, and no other line is accepted. Ctrl-D on the
 /// side line, and Ctrl-D and Ctrl-C while paused, end the main line as at the prompt, and their
 /// exit code is returned.
@@ -275,6 +278,13 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
             Left::Aborted => {
                 withdraw(ui, agent);
                 return None;
+            }
+            Left::Chose(choice) => {
+                // When the turn went on to its end, the main line takes the next request (`None`).
+                // At another boundary, the side line opens there.
+                let boundary = resolve(ui, agent, &side, choice)?;
+                side = agent.side_line(boundary);
+                continue;
             }
             Left::Interrupted => {}
             Left::Eof => return Some(ExitCode::SUCCESS),
@@ -297,6 +307,43 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 }
             }
         }
+    }
+}
+
+/// Goes on with the turn held at the boundary of `side` as the user chose there (UC3, §8.5): shows
+/// how the profile changed, then the rest of the turn as any turn. Returns the next boundary when
+/// the turn stops at one again.
+fn resolve(
+    ui: &mut dyn Ui,
+    agent: &mut MainLine,
+    side: &SubLine,
+    choice: Choice,
+) -> Option<Boundary> {
+    // `subline::run` offers only the choices of `side`, so the resolution is there.
+    let resolution = side.resolve(choice, agent.log())?;
+    let names = resolution
+        .items()
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    match resolution.policy() {
+        None => ui.show(&format!("Your profile allows {names} now (known).")),
+        Some(policy) => ui.show(&format!(
+            "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
+        )),
+    }
+    let resumed = agent.resolve(&resolution, &mut UiApprover::new(ui))?;
+    if let Err(error) = &resumed.saved {
+        ui.show(&format!(
+            "Could not save the profile: {error}. The change holds for this session only."
+        ));
+    }
+    show_turn(ui, &resumed.turn);
+    show_log_error(ui, agent);
+    match resumed.turn.end {
+        TurnEnd::Boundary(boundary) => Some(boundary),
+        _ => None,
     }
 }
 
@@ -688,7 +735,7 @@ mod write {
                 "Tool calls in this turn: write_file (2)",
                 "── side line: dbg_macro ────────────────────────────────────",
                 "  dbg! prints a value.",
-                "  Ask anything about it, as many times as you like. Type /abort to withdraw the request.",
+                "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
                 "hello again",

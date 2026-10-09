@@ -10,13 +10,64 @@ use super::mainline::Boundary;
 use super::prompts;
 use super::tools::Tools;
 use crate::llm::{ChatClient, ChatError, Message, Role, Router};
+use crate::profile::status::ItemKey;
 use crate::session::SessionLog;
+
+/// What the user chose on the side line (PRD UC3). ③ is not here yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Choice {
+    /// ① Understand, then delegate: the items become `known`, and the main line uses them.
+    Unlock,
+    /// ② Use a construct I know: the items become `seen`, and the main line rewrites without them.
+    Rewrite,
+}
+
+impl Choice {
+    /// The name in the message to the main line (PRD §8.5).
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::Unlock => "unlock",
+            Choice::Rewrite => "rewrite",
+        }
+    }
+}
+
+/// The outcome of the side line that goes back to the main line (PRD §8.5): the choice, the items,
+/// and for ② the one-line coding policy.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolution {
+    choice: Choice,
+    items: Vec<ItemKey>,
+    policy: Option<String>,
+}
+
+impl Resolution {
+    pub fn choice(&self) -> Choice {
+        self.choice
+    }
+
+    pub fn items(&self) -> &[ItemKey] {
+        &self.items
+    }
+
+    /// The one-line coding policy of ②.
+    pub fn policy(&self) -> Option<&str> {
+        self.policy.as_deref()
+    }
+
+    /// The one message that enters the main line (PRD §8.5).
+    pub fn message(&self) -> String {
+        prompts::boundary_resolved(self.choice.name(), &self.items, self.policy.as_deref())
+    }
+}
 
 /// The side line opened at one boundary.
 pub struct SubLine<'a> {
     client: &'a dyn ChatClient,
     router: Router,
     boundary: Boundary,
+    /// Whether the boundary recurred after ② in the same turn (PRD UC3), so ② is not offered.
+    recurred: bool,
     baseline: BTreeMap<String, String>,
     /// What the model is told about the boundary, sent as the first user message.
     context: String,
@@ -42,6 +93,7 @@ impl<'a> SubLine<'a> {
             router,
             baseline: tools.checkable_files(),
             boundary,
+            recurred: false,
             context,
             messages: vec![Message::System {
                 content: prompts::SIDE_LINE_SYSTEM.to_owned(),
@@ -49,9 +101,75 @@ impl<'a> SubLine<'a> {
         }
     }
 
+    /// The same side line, opened at a boundary that recurred after ② in the same turn when
+    /// `recurred` is true.
+    pub(crate) fn recurred(mut self, recurred: bool) -> Self {
+        self.recurred = recurred;
+        self
+    }
+
     /// The boundary the side line was opened at.
     pub fn boundary(&self) -> &Boundary {
         &self.boundary
+    }
+
+    /// Whether the boundary recurred after ② in the same turn. The construct is needed then, so
+    /// only ① (and ③) are offered (PRD UC3).
+    pub fn is_recurrence(&self) -> bool {
+        self.recurred
+    }
+
+    /// The choices the user has, in order.
+    pub fn choices(&self) -> &'static [Choice] {
+        if self.recurred {
+            &[Choice::Unlock]
+        } else {
+            &[Choice::Unlock, Choice::Rewrite]
+        }
+    }
+
+    /// The outcome of `choice` to hand back to the main line (PRD §8.5), or `None` when `choice`
+    /// is not one of [`SubLine::choices`]. For ② the `light` model makes the one-line policy from
+    /// the side line's message list; when it cannot, a fixed policy stands in, so ② never fails.
+    /// That request body goes to `log` (PRD §8.8).
+    pub fn resolve(&self, choice: Choice, log: &SessionLog) -> Option<Resolution> {
+        if !self.choices().contains(&choice) {
+            return None;
+        }
+        let items = self.boundary.items.clone();
+        let policy = match choice {
+            Choice::Unlock => None,
+            Choice::Rewrite => Some(
+                self.policy(log)
+                    .unwrap_or_else(|| prompts::fixed_policy(&items)),
+            ),
+        };
+        Some(Resolution {
+            choice,
+            items,
+            policy,
+        })
+    }
+
+    /// Asks the `light` model for the one-line policy of ②. `None` when the request fails or the
+    /// reply has no line of text.
+    fn policy(&self, log: &SessionLog) -> Option<String> {
+        let mut messages = self.messages.clone();
+        let instruction = prompts::policy_request(&self.boundary.items);
+        let content = if self.explained() {
+            instruction
+        } else {
+            format!("{}\n\n{instruction}", self.context)
+        };
+        messages.push(Message::User { content });
+        let request = self.router.request(Role::Light, messages);
+        log.record_request(&request);
+        let reply = self.client.chat(&request).ok()?.content?;
+        reply
+            .lines()
+            .map(str::trim)
+            .find(|line| !line.is_empty())
+            .map(str::to_owned)
     }
 
     /// The `.rs` files and `Cargo.toml`s under the root when the side line opened, with their
@@ -114,6 +232,11 @@ impl<'a> SubLine<'a> {
         Ok(response.content.unwrap_or_default())
     }
 }
+
+/// Tests of ① and ② and what the main line does with them. Named so that
+/// `cargo test subline::resolve` selects them.
+#[cfg(test)]
+mod resolve;
 
 /// Opening the side line at a boundary, its explanation and questions, and that none of it
 /// reaches the main line. Named so that `cargo test subline::open` selects them.

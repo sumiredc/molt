@@ -1,8 +1,10 @@
 //! The side line on the terminal (PRD UC3, §8.6): a ruled banner on entering and leaving, its own
 //! prompt `molt [sub: arc, mutex]> `, and its output indented by 2 spaces.
 
+mod resolve;
+
 use super::show_error_of;
-use crate::agent::subline::SubLine;
+use crate::agent::subline::{Choice, SubLine};
 use crate::cli::ui::{Input, Ui};
 use crate::profile::status::ItemKey;
 use crate::session::SessionLog;
@@ -10,13 +12,15 @@ use crate::session::SessionLog;
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
 
-/// What the user can do on the side line until the choice (UC3) is there.
-const HINT: &str =
-    "Ask anything about it, as many times as you like. Type /abort to withdraw the request.";
+/// What the user can do on the side line (UC3).
+const HINT: &str = "Ask anything about it, as many times as you like. Type /choose to choose how to go on, \
+     or /abort to withdraw the request.";
 
 /// How the user left the side line.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Left {
+    /// `/choose`, and the user chose one.
+    Chose(Choice),
     /// `/abort`: the request is to be withdrawn.
     Aborted,
     /// Ctrl-C: the main line goes back to being paused at the boundary.
@@ -41,6 +45,9 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
         }
         show_error_of(ui, log);
     }
+    if side.is_recurrence() {
+        ui.show(&indent(&resolve::recurred(&side.boundary().items)));
+    }
     ui.show(&indent(HINT));
     let prompt = prompt(&side.boundary().items);
     let left = loop {
@@ -49,6 +56,15 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
                 let line = line.trim();
                 if line == "/abort" {
                     break Left::Aborted;
+                } else if line == "/choose" {
+                    match resolve::choose(ui, side) {
+                        Ok(Some(choice)) => break Left::Chose(choice),
+                        Ok(None) => ui.show(&indent(HINT)),
+                        Err(error) => {
+                            eprintln!("{error}");
+                            return Left::Failed;
+                        }
+                    }
                 } else if line.is_empty() {
                 } else if line.starts_with('/') {
                     ui.show(&indent(&format!("Unknown command {line}. {HINT}")));
@@ -135,8 +151,7 @@ mod open {
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     const ENTER: &str = "── side line: dbg_macro ────────────────────────────────────";
     const LEAVE: &str = "── back to the main line ───────────────────────────────────";
-    const HINT_SHOWN: &str =
-        "  Ask anything about it, as many times as you like. Type /abort to withdraw the request.";
+    const HINT_SHOWN: &str = "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.";
     const STOPPED: &str = "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.";
     const SUB: &str = "molt [sub: dbg_macro]> ";
 

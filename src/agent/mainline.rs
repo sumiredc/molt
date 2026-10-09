@@ -11,20 +11,21 @@ mod turn_end;
 mod write;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::path::PathBuf;
 
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
-use super::subline::SubLine;
+use super::subline::{Choice, Resolution, SubLine};
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
     ChatClient, ChatError, ChatRequest, InvalidArguments, Message, Role, Router, ToolCall,
     ToolChoice, ToolDefinition,
 };
-use crate::profile::status::ItemKey;
-use crate::profile::store::Profile;
+use crate::profile::status::{ItemKey, Provenance, Status};
+use crate::profile::store::{Profile, StoreError, Timestamp};
 use crate::session::{self, Event, SessionLog};
 use crate::workspace::cargo::{CargoError, CargoOutput};
 
@@ -68,14 +69,31 @@ pub struct MainLine<'a> {
     held: Option<Held>,
     /// Where the events of the main line are recorded (PRD §8.8).
     log: SessionLog,
+    /// Where the profile is saved when the user's choice on the side line changes it.
+    profile_path: Option<PathBuf>,
 }
 
-/// The changes of a turn held at a boundary, and whether they still need `cargo check`.
-#[derive(Debug)]
+/// A turn held at a boundary: what it did so far, so that it can be withdrawn with `cargo check`
+/// on what it changed, or go on in the same turn once the user chose on the side line.
 struct Held {
+    tool_calls: Vec<String>,
+    written: Vec<String>,
+    compile_fixes: usize,
     changes: Vec<Change>,
-    unchecked: bool,
-    manifest_before: Option<String>,
+    progress: Progress,
+    /// The items the user chose ② for in this turn (PRD UC3), as [`checked_key`] spells them.
+    rewritten: BTreeSet<ItemKey>,
+    /// Whether the boundary names an item of `rewritten`: it recurred after ② in the same turn.
+    recurred: bool,
+}
+
+/// How the turn held at a boundary went on after the user's choice on the side line.
+#[derive(Debug)]
+pub struct Resumed {
+    /// Saving the profile changed by the choice, when the main line has a path to save it to.
+    pub saved: Result<(), StoreError>,
+    /// The turn, from its start: the tool calls, files and changes before the boundary count.
+    pub turn: Turn,
 }
 
 /// What withdrawing a request held at a boundary showed: the files the turn changed before the
@@ -234,7 +252,15 @@ impl<'a> MainLine<'a> {
             molt_checks: 0,
             held: None,
             log: SessionLog::disabled(),
+            profile_path: None,
         }
+    }
+
+    /// The same main line, saving its profile to `path` when the user's choice on the side line
+    /// changes it.
+    pub fn with_profile_path(mut self, path: PathBuf) -> Self {
+        self.profile_path = Some(path);
+        self
     }
 
     /// The same main line, recording its events and requests in `log`.
@@ -260,6 +286,7 @@ impl<'a> MainLine<'a> {
                 Message::User { content } => Some(content.as_str()),
                 _ => None,
             });
+        let recurred = self.held.as_ref().is_some_and(|held| held.recurred);
         SubLine::open(
             self.client,
             self.router.clone(),
@@ -267,6 +294,88 @@ impl<'a> MainLine<'a> {
             boundary,
             request,
         )
+        .recurred(recurred)
+    }
+
+    /// The profile the main line checks what the model writes against.
+    #[cfg(test)]
+    pub(crate) fn profile(&self) -> &Profile {
+        &self.profile
+    }
+
+    /// Goes on with the turn held at a boundary, as the user chose on the side line (PRD UC3,
+    /// §8.5): the profile changes (① `known`, ② `seen`, provenance `side_line`) and is saved,
+    /// `resolution`'s message goes into the message list as the only thing from the side line,
+    /// and the same turn goes on. `None` when no turn is held at a boundary.
+    pub fn resolve(
+        &mut self,
+        resolution: &Resolution,
+        approver: &mut dyn Approver,
+    ) -> Option<Resumed> {
+        let held = self.held.take()?;
+        let to = match resolution.choice() {
+            Choice::Unlock => Status::Known,
+            Choice::Rewrite => Status::Seen,
+        };
+        let at = Timestamp::now();
+        let mut items: Vec<ItemKey> = resolution.items().to_vec();
+        if to == Status::Known {
+            // The check allows a crate only when every spelling of it in the profile (`-` or `_`)
+            // is `known`, so ① unlocks each of them, or the same boundary would come again.
+            let checked: Vec<ItemKey> = items.iter().map(checked_key).collect();
+            let spellings: Vec<ItemKey> = self
+                .profile
+                .entries()
+                .map(|(key, _)| key)
+                .filter(|spelling| {
+                    matches!(spelling, ItemKey::Crate(_))
+                        && !items.contains(spelling)
+                        && checked.contains(&checked_key(spelling))
+                })
+                .cloned()
+                .collect();
+            items.extend(spellings);
+        }
+        for item in &items {
+            // Only these are changes, and PRD §7 allows each with `side_line`, so none is refused.
+            // ② leaves a `seen` item as it is, and ① a `known` one.
+            if matches!(
+                (self.profile.status(item), to),
+                (Status::Unknown, _) | (Status::Seen, Status::Known)
+            ) {
+                let _ = self
+                    .profile
+                    .transition(item.clone(), to, Provenance::SideLine, at, None);
+            }
+        }
+        let saved = match &self.profile_path {
+            Some(path) => self.profile.save(path),
+            None => Ok(()),
+        };
+        let mut rewritten = held.rewritten;
+        if resolution.choice() == Choice::Rewrite {
+            rewritten.extend(resolution.items().iter().map(checked_key));
+        }
+        self.messages.push(Message::User {
+            content: resolution.message(),
+        });
+        let turn = Turn {
+            end: TurnEnd::Finished,
+            tool_calls: held.tool_calls,
+            reply: None,
+            written: held.written,
+            compile_fixes: held.compile_fixes,
+            changes: held.changes,
+            crate_adds: Vec::new(),
+            check: None,
+        };
+        let progress = Progress {
+            resend_asked: false,
+            broken: false,
+            ..held.progress
+        };
+        let turn = self.run(turn, progress, rewritten, approver);
+        Some(Resumed { saved, turn })
     }
 
     /// The message list so far, starting with the system prompt.
@@ -285,7 +394,7 @@ impl<'a> MainLine<'a> {
         self.messages.push(Message::User {
             content: input.to_owned(),
         });
-        let mut turn = Turn {
+        let turn = Turn {
             end: TurnEnd::Finished,
             tool_calls: Vec::new(),
             reply: None,
@@ -295,18 +404,38 @@ impl<'a> MainLine<'a> {
             crate_adds: Vec::new(),
             check: None,
         };
-        let mut progress = Progress {
+        let progress = Progress {
             manifest_before: self.tools.read(MANIFEST),
             ..Progress::default()
         };
+        self.run(turn, progress, BTreeSet::new(), approver)
+    }
+
+    /// Runs the loop of `turn` until the turn ends. At a boundary the turn is held, with the items
+    /// the user chose ② for in it (`rewritten`).
+    fn run(
+        &mut self,
+        mut turn: Turn,
+        mut progress: Progress,
+        rewritten: BTreeSet<ItemKey>,
+        approver: &mut dyn Approver,
+    ) -> Turn {
         loop {
             let end = self.converse(&mut turn, &mut progress, approver);
             if let Some(end) = self.end_turn(end, &mut turn, &mut progress, approver) {
-                if matches!(end, TurnEnd::Boundary(_)) {
+                if let TurnEnd::Boundary(boundary) = &end {
+                    let recurred = boundary
+                        .items
+                        .iter()
+                        .any(|item| rewritten.contains(&checked_key(item)));
                     self.held = Some(Held {
+                        tool_calls: turn.tool_calls.clone(),
+                        written: turn.written.clone(),
+                        compile_fixes: turn.compile_fixes,
                         changes: turn.changes.clone(),
-                        unchecked: progress.unchecked,
-                        manifest_before: progress.manifest_before.clone(),
+                        progress,
+                        rewritten,
+                        recurred,
                     });
                 }
                 turn.end = end;
@@ -462,6 +591,14 @@ impl<'a> MainLine<'a> {
         request.tools = self.definitions.clone();
         request.tool_choice = Some(ToolChoice::Auto);
         request
+    }
+}
+
+/// `item` as the check compares it: a crate with every `-` turned into `_`, an element as it is.
+fn checked_key(item: &ItemKey) -> ItemKey {
+    match item {
+        ItemKey::Crate(name) => ItemKey::Crate(name.replace('-', "_")),
+        ItemKey::Element(_) => item.clone(),
     }
 }
 

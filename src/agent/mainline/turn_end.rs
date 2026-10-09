@@ -99,13 +99,13 @@ impl MainLine<'_> {
                 check: None,
             };
         };
-        if held.changes.is_empty() && !held.unchecked {
+        if held.changes.is_empty() && !held.progress.unchecked {
             return Withdrawal {
                 changes: Vec::new(),
                 check: None,
             };
         }
-        self.update_changes(&mut held.changes, held.manifest_before.as_deref());
+        self.update_changes(&mut held.changes, held.progress.manifest_before.as_deref());
         let check = self.tools.cargo_check();
         self.log.record(&check_event(&check));
         Withdrawal {
