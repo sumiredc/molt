@@ -5,7 +5,9 @@ use clap::{Args, Parser, Subcommand};
 
 mod check;
 mod doctor;
+mod mainline;
 mod profile;
+pub mod ui;
 
 /// A Rust coding agent that writes code only in the ways its user can understand.
 #[derive(Debug, Parser)]
@@ -28,6 +30,10 @@ pub(crate) struct CommonFlags {
     /// Replace the model's responses with the script file at PATH
     #[arg(long, value_name = "PATH", global = true)]
     pub(crate) fake: Option<PathBuf>,
+
+    /// Replace the user's inputs, choices, approvals and interrupts with the script file at PATH
+    #[arg(long, value_name = "PATH", global = true)]
+    pub(crate) ui_script: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -72,6 +78,10 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),
+        None => mainline::run(
+            cli.common.profile.as_deref(),
+            cli.common.ui_script.as_deref(),
+        ),
         _ => {
             eprintln!("not implemented yet");
             ExitCode::FAILURE
@@ -146,6 +156,13 @@ mod tests {
             .unwrap();
         assert_eq!(cli.common.profile, Some(PathBuf::from("p.toml")));
         assert_eq!(cli.common.fake, Some(PathBuf::from("f.toml")));
+    }
+
+    #[test]
+    fn ui_script_takes_a_path() {
+        let cli = Cli::try_parse_from(["molt", "--ui-script", "s.toml"]).unwrap();
+        assert_eq!(cli.common.ui_script, Some(PathBuf::from("s.toml")));
+        assert!(Cli::try_parse_from(["molt", "--ui-script"]).is_err());
     }
 
     #[test]
