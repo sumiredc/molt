@@ -13,10 +13,10 @@ When a request needs a construct the user has never written, molt pauses, explai
 ## Getting started
 
 ```sh
-cargo run
+cargo run -- --help
 ```
 
-If `Hello, world!` is printed, the build works. This confirms only that the toolchain is set up.
+If `cargo run -- --help` lists the subcommands, the build works. This confirms only that the toolchain is set up.
 
 ## Next reading
 
