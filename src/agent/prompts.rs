@@ -276,9 +276,13 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
             }
         }
     }
-    if let Some(request) = request {
-        context.push_str(&format!("\n\nThe user's request was:\n{request}"));
+    match request {
+        Some(request) => context.push_str(&format!(
+            "\n\nThe user's request was:\n{request}\n\nExplain the idea of these items in one \
+             paragraph, in the language of the user's request above, not in the language of this \
+             message."
+        )),
+        None => context.push_str("\n\nExplain the idea of these items in one paragraph."),
     }
-    context.push_str("\n\nExplain the idea of these items in one paragraph.");
     context
 }
