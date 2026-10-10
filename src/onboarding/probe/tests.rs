@@ -648,3 +648,36 @@ fn the_question_and_the_judgement_follow_the_language_of_the_user_s_latest_input
         "{second_question}"
     );
 }
+
+#[test]
+fn the_judgement_ends_by_quoting_the_answer_it_judges_as_the_user_s_latest_input() {
+    let client = FakeChatClient::new();
+    client.push_chat(reply("Question 1"));
+    client.push_chat(judgement(&all(Category::Ownership, "unclear")));
+    client.push_chat(reply("Question 2"));
+    client.push_chat(judgement(&all(Category::Ownership, "known")));
+
+    run_probe(
+        vec![answer("String を clone した"), answer("mem::take も使った")],
+        &client,
+        &config(true),
+        &[Category::Ownership],
+        None,
+    )
+    .1
+    .unwrap();
+
+    // With the answer in the transcript only, a small model gave the reasons for a Japanese
+    // answer in English or as broken strings.
+    let requests = client.requests();
+    let first_judgement = user_text(&requests[1]);
+    assert!(
+        first_judgement.ends_with("The user's latest input was:\nString を clone した"),
+        "{first_judgement}"
+    );
+    let second_judgement = user_text(&requests[3]);
+    assert!(
+        second_judgement.ends_with("The user's latest input was:\nmem::take も使った"),
+        "{second_judgement}"
+    );
+}

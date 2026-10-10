@@ -59,23 +59,35 @@ pub fn question_request(
     // here led small models to answer in another language (see the module doc of
     // `agent::prompts`).
     if let Some(latest) = latest {
-        text.push_str(&format!("\n\nThe user's latest input was:\n{latest}"));
+        text.push_str(&latest_input(latest));
     }
     text
 }
 
-/// What the `light` model is asked to judge `elements` of `category` from `exchanges`.
+/// What the `light` model is asked to judge `elements` of `category` from `exchanges`. The last
+/// answer is in the transcript, and is quoted again at the end as the user's latest input, the
+/// clue to the language the system prompt asks for: with the transcript alone, a small model
+/// gave the reasons for a Japanese answer in another language.
 pub fn judge_request(category: Category, elements: &[Element], exchanges: &[Exchange]) -> String {
     let names = elements
         .iter()
         .map(|element| format!("- `{}`", element.name()))
         .collect::<Vec<_>>()
         .join("\n");
-    format!(
+    let mut text = format!(
         "The category is `{category}`. Judge these elements:\n{names}\n\n{}\nGive one judgement \
          per element listed.",
         transcript(exchanges)
-    )
+    );
+    if let Some(latest) = exchanges.last() {
+        text.push_str(&latest_input(&latest.answer));
+    }
+    text
+}
+
+/// The user's latest input, quoted at the end of a request.
+fn latest_input(latest: &str) -> String {
+    format!("\n\nThe user's latest input was:\n{latest}")
 }
 
 /// `` - `arc`: used at src/a.rs:3, src/b.rs:9 `` per element, with the places only when `scan` is
