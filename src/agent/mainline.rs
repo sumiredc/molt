@@ -6,7 +6,11 @@
 //! the one resend (PRD §11), when the chat API fails (UC2's exception flow), at a boundary
 //! (the write path, in `write`), or when the code still does not build after the compile fixes
 //! of the budget. If anything was written, the turn ends with `cargo check` (`turn_end`).
+//!
+//! The main line also keeps the files molt changed in the session and not committed yet, and
+//! commits them with the user's approval (UC4, `commit`).
 
+mod commit;
 mod turn_end;
 mod write;
 
@@ -29,6 +33,8 @@ use crate::profile::store::{Profile, StoreError, Timestamp};
 use crate::session::{self, Event, SessionLog};
 use crate::workspace::cargo::{CargoError, CargoOutput};
 
+pub use commit::{CommitOutcome, CommitProposal};
+
 /// Tool calls per turn (PRD §8.4). Every call counts, `finish` too, so that no call the model
 /// repeats can keep a turn going.
 pub const TOOL_CALL_BUDGET: usize = 40;
@@ -49,6 +55,13 @@ const REQUEST_BOUNDARY: &str = "request_boundary";
 
 /// The manifest at the project root, which `cargo add` changes.
 const MANIFEST: &str = "Cargo.toml";
+
+/// The lockfile at the project root, which cargo updates when the manifest changes.
+const LOCKFILE: &str = "Cargo.lock";
+
+/// The tool that commits the files molt changed (UC4). It is handled by the loop, which knows
+/// them.
+const GIT_COMMIT: &str = "git_commit";
 
 /// The tool that runs cargo. `run_cargo add` changes `Cargo.toml`.
 const RUN_CARGO: &str = "run_cargo";
@@ -71,6 +84,13 @@ pub struct MainLine<'a> {
     log: SessionLog,
     /// Where the profile is saved when the user's choice on the side line changes it.
     profile_path: Option<PathBuf>,
+    /// The files molt changed in the session and has not committed, in the order first changed,
+    /// each with its content from before molt first changed it (or from its last commit): those
+    /// of the turns that ended and of the requests withdrawn (UC4).
+    uncommitted: Vec<Change>,
+    /// Whether the last `cargo check` molt ran passed: at the end of a turn, on a withdrawal,
+    /// before a commit, or on `/done` of ③. `None` before the first.
+    last_check: Option<bool>,
 }
 
 /// A turn held at a boundary: what it did so far, so that it can be withdrawn with `cargo check`
@@ -121,8 +141,9 @@ pub struct Turn {
     /// whose content did not parse, and once for each `cargo check` at the end of the turn that
     /// failed. At most [`COMPILE_FIX_BUDGET`].
     pub compile_fixes: usize,
-    /// The files molt changed in this turn, in the order first changed: those written, and the
-    /// `Cargo.toml` at the project root when `cargo add` changed it.
+    /// The files molt changed in this turn, in the order first changed: those written, the
+    /// `Cargo.toml` at the project root when `cargo add` changed it, and the `Cargo.lock` at the
+    /// root when cargo changed it along with `Cargo.toml`.
     pub changes: Vec<Change>,
     /// The files the user changed in ③ on the side line in this turn (UC3), each once: those of
     /// each `/done` in path order, after those of the `/done`s before. They are among `changes` too, as part of the one change of the turn
@@ -133,6 +154,8 @@ pub struct Turn {
     /// The last `cargo check` molt ran at the end of the turn, if it ran one: only when something
     /// was written, and never at a boundary.
     pub check: Option<Result<CargoOutput, CargoError>>,
+    /// What came of each `git_commit` the model called in this turn, in order (UC4).
+    pub commits: Vec<CommitOutcome>,
 }
 
 /// A file molt changed in a turn.
@@ -230,6 +253,12 @@ struct Progress {
     unchecked: bool,
     /// The project's `Cargo.toml` when the turn started, to show what `cargo add` changed.
     manifest_before: Option<String>,
+    /// The project's `Cargo.lock` when the turn started, to show and commit what cargo changed
+    /// in it along with `Cargo.toml`.
+    lock_before: Option<String>,
+    /// The files a `git_commit` in this turn committed, with the content committed, so that the
+    /// turn's changes join the uncommitted files from there (UC4).
+    committed: Vec<(String, String)>,
     /// The crates asked about in this turn and not added (the user said no, or `cargo add`
     /// failed), with `-` spelled `_`, and the note for the model on each. They are not asked
     /// about again.
@@ -258,6 +287,8 @@ impl<'a> MainLine<'a> {
             held: None,
             log: SessionLog::disabled(),
             profile_path: None,
+            uncommitted: Vec::new(),
+            last_check: None,
         }
     }
 
@@ -283,14 +314,7 @@ impl<'a> MainLine<'a> {
     /// boundary and the user's latest request, and nothing else of the main line's message list;
     /// what is said on it does not come back here.
     pub fn side_line(&self, boundary: Boundary) -> SubLine<'a> {
-        let request = self
-            .messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                Message::User { content } => Some(content.as_str()),
-                _ => None,
-            });
+        let request = self.latest_request();
         let recurred = self.held.as_ref().is_some_and(|held| held.recurred);
         SubLine::open(
             self.client,
@@ -300,6 +324,17 @@ impl<'a> MainLine<'a> {
             request,
         )
         .recurred(recurred)
+    }
+
+    /// The user's latest message in the message list.
+    fn latest_request(&self) -> Option<&str> {
+        self.messages
+            .iter()
+            .rev()
+            .find_map(|message| match message {
+                Message::User { content } => Some(content.as_str()),
+                _ => None,
+            })
     }
 
     /// `/done` of ③ on `side`, opened where this main line stopped (UC3): the user's lines are
@@ -371,6 +406,10 @@ impl<'a> MainLine<'a> {
         if resolution.choice() == Choice::Rewrite {
             rewritten.extend(resolution.items().iter().map(checked_key));
         }
+        if resolution.choice() == Choice::UserWrote {
+            // `/done` passes only when `cargo check` passes.
+            self.last_check = Some(true);
+        }
         let mut changes = held.changes;
         let mut user_written = held.user_written;
         for file in resolution.files() {
@@ -403,6 +442,7 @@ impl<'a> MainLine<'a> {
             user_written,
             crate_adds: Vec::new(),
             check: None,
+            commits: Vec::new(),
         };
         let progress = Progress {
             resend_asked: false,
@@ -439,16 +479,19 @@ impl<'a> MainLine<'a> {
             user_written: Vec::new(),
             crate_adds: Vec::new(),
             check: None,
+            commits: Vec::new(),
         };
         let progress = Progress {
             manifest_before: self.tools.read(MANIFEST),
+            lock_before: self.tools.read(LOCKFILE),
             ..Progress::default()
         };
         self.run(turn, progress, BTreeSet::new(), approver)
     }
 
     /// Runs the loop of `turn` until the turn ends. At a boundary the turn is held, with the items
-    /// the user chose ② for in it (`rewritten`).
+    /// the user chose ② for in it (`rewritten`). Otherwise the files the turn changed join the
+    /// uncommitted files.
     fn run(
         &mut self,
         mut turn: Turn,
@@ -474,6 +517,8 @@ impl<'a> MainLine<'a> {
                         rewritten,
                         recurred,
                     });
+                } else {
+                    self.absorb(&turn.changes, &progress.committed);
                 }
                 turn.end = end;
                 return turn;
@@ -537,7 +582,7 @@ impl<'a> MainLine<'a> {
     /// Runs one tool call and returns its result for the model. `progress.broken` is set when
     /// its arguments are not a JSON object and the model is asked to resend them.
     fn run_call(
-        &self,
+        &mut self,
         call: &ToolCall,
         turn: &mut Turn,
         progress: &mut Progress,
@@ -571,6 +616,7 @@ impl<'a> MainLine<'a> {
         match call.name.as_str() {
             WRITE_FILE | EDIT_FILE => return self.write(&call.name, arguments, turn, progress),
             REQUEST_BOUNDARY => return write::request_boundary(&self.profile, arguments),
+            GIT_COMMIT => return self.commit_tool(arguments, turn, progress, approver),
             _ => {}
         }
         if call.name == FINISH {
@@ -740,7 +786,7 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             &[],
         ),
         tool(
-            "git_commit",
+            GIT_COMMIT,
             prompts::GIT_COMMIT,
             json!({ "message": { "type": "string", "description": prompts::GIT_COMMIT_MESSAGE } }),
             &["message"],
@@ -1313,7 +1359,8 @@ mod turn {
         let cargo = FakeCargo::new();
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
         for definition in tool_definitions() {
-            if [FINISH, WRITE_FILE, EDIT_FILE, REQUEST_BOUNDARY].contains(&definition.name.as_str())
+            if [FINISH, WRITE_FILE, EDIT_FILE, REQUEST_BOUNDARY, GIT_COMMIT]
+                .contains(&definition.name.as_str())
             {
                 continue;
             }

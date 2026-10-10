@@ -101,16 +101,20 @@ impl<'a> UiApprover<'a> {
 impl Approver for UiApprover<'_> {
     /// Only an explicit yes approves. An interruption or a failure to ask is not approval.
     fn confirm(&mut self, request: &ApprovalRequest) -> bool {
-        let prompt = match request {
-            ApprovalRequest::CargoAdd(name) => {
-                format!("Add the crate `{}` with cargo add?", name.as_str())
-            }
-            ApprovalRequest::GitCommit { message } => {
-                format!("Commit the staged changes with this message?\n\n{message}\n")
+        let answer = match request {
+            ApprovalRequest::CargoAdd(name) => self
+                .ui
+                .confirm(&format!(
+                    "Add the crate `{}` with cargo add?",
+                    name.as_str()
+                ))
+                .map(|answer| answer == Some(true)),
+            ApprovalRequest::GitCommit(proposal) => {
+                super::mainline::commit::confirm(self.ui, proposal)
             }
         };
-        match self.ui.confirm(&prompt) {
-            Ok(answer) => answer == Some(true),
+        match answer {
+            Ok(approved) => approved,
             Err(error) => {
                 self.ui
                     .show(&format!("could not ask for approval: {error}"));
@@ -158,15 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn approver_asks_with_the_crate_name_and_the_commit_message() {
-        let mut ui = ScriptedUi::new([Step::Confirm(true), Step::Confirm(true)]);
-        let mut approver = UiApprover::new(&mut ui);
-        approver.confirm(&cargo_add());
-        approver.confirm(&ApprovalRequest::GitCommit {
-            message: "Add a parser".to_owned(),
-        });
+    fn approver_asks_with_the_crate_name() {
+        let mut ui = ScriptedUi::new([Step::Confirm(true)]);
+        UiApprover::new(&mut ui).confirm(&cargo_add());
         let asked = ui.asked();
         assert!(asked[0].contains("`serde`"), "{asked:?}");
-        assert!(asked[1].contains("Add a parser"), "{asked:?}");
     }
 }
