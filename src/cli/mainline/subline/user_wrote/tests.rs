@@ -388,3 +388,132 @@ fn ctrl_c_while_waiting_for_the_review_pauses_at_the_boundary_and_side_goes_on_w
         ui.shown()
     );
 }
+
+#[test]
+fn a_guidance_that_cannot_be_got_is_shown_and_the_user_still_writes() {
+    let dir = project_with_a_profile();
+    let client = stops_at_a_boundary_then(vec![
+        Err(ChatError::FakeExhausted),
+        Ok(reply("review")),
+        Ok(reply("done")),
+    ]);
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        &[true],
+        vec![vec![("src/main.rs", WITH_DBG)]],
+        [
+            input("debug 1"),
+            input("/choose"),
+            Step::Select(3),
+            input("/done"),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    let at = ui
+        .shown()
+        .iter()
+        .position(|text| text.starts_with("  Could not get the guidance on where to write it: "))
+        .unwrap_or_else(|| panic!("{:?}", ui.shown()));
+    assert_eq!(ui.shown()[at + 1], format!("  {WRITING}"));
+    assert_eq!(saved(&dir), Some((Status::Known, Provenance::WroteIt)));
+}
+
+#[test]
+fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing() {
+    let dir = project_with_a_profile();
+    let client = stops_at_a_boundary_then(vec![Err(ChatError::Interrupted)]);
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        &[],
+        vec![vec![("src/main.rs", WITH_DBG)]],
+        [
+            input("debug 1"),
+            input("/choose"),
+            Step::Select(3),
+            input("/side"),
+            input("/done"),
+            input("/abort"),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    let paused = shown_at(&ui, PAUSED);
+    assert_eq!(ui.shown()[paused + 2], format!("  {HINT}"));
+    shown_at(
+        &ui,
+        "  Type /choose and choose to write it yourself first, then /done when you wrote it.",
+    );
+    assert_eq!(saved(&dir), None);
+}
+
+#[test]
+fn a_review_that_cannot_be_got_is_shown_and_done_still_passes() {
+    let dir = project_with_a_profile();
+    let client = stops_at_a_boundary_then(vec![
+        Ok(reply("guidance")),
+        Err(ChatError::FakeExhausted),
+        Ok(reply("done")),
+    ]);
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        &[true],
+        vec![vec![("src/main.rs", WITH_DBG)]],
+        [
+            input("debug 1"),
+            input("/choose"),
+            Step::Select(3),
+            input("/done"),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    let passed = shown_at(&ui, "  cargo check passed.");
+    assert!(
+        ui.shown()[passed + 1].starts_with("  Could not get the review: "),
+        "{:?}",
+        ui.shown()
+    );
+    assert_eq!(saved(&dir), Some((Status::Known, Provenance::WroteIt)));
+}
+
+#[test]
+fn lines_with_no_item_new_to_the_profile_say_so_and_the_main_line_goes_on() {
+    let dir = project_with_a_profile();
+    let client = stops_at_a_boundary_then(vec![
+        Ok(reply("guidance")),
+        Ok(reply("review")),
+        Ok(reply("done")),
+    ]);
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        &[true],
+        vec![vec![("src/main.rs", "fn main() {\n    let _x = 1;\n}\n")]],
+        [
+            input("debug 1"),
+            input("/choose"),
+            Step::Select(3),
+            input("/done"),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    let said = shown_at(
+        &ui,
+        "Your lines use nothing your profile did not allow already.",
+    );
+    assert_eq!(ui.shown()[said + 1], "done");
+    assert_eq!(saved(&dir), None);
+}

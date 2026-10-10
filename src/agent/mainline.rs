@@ -124,8 +124,8 @@ pub struct Turn {
     /// The files molt changed in this turn, in the order first changed: those written, and the
     /// `Cargo.toml` at the project root when `cargo add` changed it.
     pub changes: Vec<Change>,
-    /// The files the user changed in ③ on the side line in this turn (UC3), each once, in the
-    /// order first changed. They are among `changes` too, as part of the one change of the turn
+    /// The files the user changed in ③ on the side line in this turn (UC3), each once: those of
+    /// each `/done` in path order, after those of the `/done`s before. They are among `changes` too, as part of the one change of the turn
     /// (UC4).
     pub user_written: Vec<String>,
     /// The crates molt asked the user to add in this turn, in order (PRD UC2).

@@ -105,12 +105,18 @@ pub struct SubLine<'a> {
     /// Whether the boundary recurred after ② in the same turn (PRD UC3), so ② is not offered.
     recurred: bool,
     baseline: BTreeMap<String, String>,
+    /// The `Cargo.lock` at the root when the side line opened, if there was one. `cargo check`
+    /// on ③'s `/done` changes it after the user adds a crate.
+    lock: Option<String>,
     /// What the model is told about the boundary, sent as the first user message.
     context: String,
     /// The system prompt, then the context and the explanation once it came, then each question
     /// and its answer.
     messages: Vec<Message>,
 }
+
+/// The lock file at the root, which `cargo check` updates when a crate is added to `Cargo.toml`.
+const LOCK: &str = "Cargo.lock";
 
 impl<'a> SubLine<'a> {
     /// Opens the side line at `boundary`. `request` is the user's latest request on the main line.
@@ -128,6 +134,7 @@ impl<'a> SubLine<'a> {
             client,
             router,
             baseline: tools.checkable_files(),
+            lock: tools.read(LOCK),
             boundary,
             request: request.map(str::to_owned),
             writing: false,

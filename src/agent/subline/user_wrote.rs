@@ -3,7 +3,7 @@
 //! the side line opened, detects the items in them, runs `cargo check`, and has the `generate`
 //! model review them.
 
-use super::{Choice, Resolution, SubLine};
+use super::{Choice, LOCK, Resolution, SubLine};
 use crate::agent::mainline::Change;
 use crate::agent::prompts;
 use crate::agent::tools::Tools;
@@ -68,7 +68,8 @@ impl SubLine<'_> {
 
     /// `/done` of ③ on the project of `tools`. The user's lines are those of the `.rs` files and
     /// `Cargo.toml`s that differ from when the side line opened (a file that is new counts as all
-    /// lines). Every item in them that `profile` does not allow is detected as a write would be,
+    /// lines; a file removed is not seen). When it passes, the outcome also carries the
+    /// `Cargo.lock` at the root if it differs from then. Every item in them that `profile` does not allow is detected as a write would be,
     /// then `cargo check` runs; only when the lines parse and the check passes is the outcome a
     /// resolution, and the `generate` model reviews the lines. When nothing changed, the side
     /// line is no longer writing, so the user chooses again. A review that fails otherwise than by
@@ -106,6 +107,7 @@ impl SubLine<'_> {
                 Some(CheckReport::Clean) | None => {}
             }
         }
+        let reviewed = files.len();
         let check = tools.cargo_check();
         let passed = matches!(&check, Ok(output) if output.success);
         if !passed || !parse_errors.is_empty() {
@@ -114,7 +116,20 @@ impl SubLine<'_> {
                 check,
             });
         }
-        let review = match self.review(&files, log) {
+        let mut files = files;
+        // Added after the check, which updates the lock for a crate the user added. It is not the
+        // user's lines, so it is neither detected nor reviewed, but it is part of their change.
+        if let Some(now) = tools
+            .read(LOCK)
+            .filter(|now| self.lock.as_ref() != Some(now))
+        {
+            files.push(Change {
+                path: LOCK.to_owned(),
+                before: self.lock.clone(),
+                after: now,
+            });
+        }
+        let review = match self.review(&files[..reviewed], log) {
             Err(ChatError::Interrupted) => return Done::Interrupted,
             review => review,
         };

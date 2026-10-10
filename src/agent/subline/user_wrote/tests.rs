@@ -585,3 +585,151 @@ fn ctrl_c_while_waiting_for_the_guidance_does_not_start_writing() {
 
     assert!(!side.is_writing());
 }
+
+#[test]
+fn the_cargo_lock_that_changed_with_the_users_crate_joins_their_files_but_not_the_review() {
+    let dir = project();
+    fs::write(dir.path().join("Cargo.lock"), "LOCK BEFORE\n").unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let boundary = request_boundary(&client, &mut main_line, &["crate:serde"]);
+    let mut side = main_line.side_line(boundary);
+    fs::write(
+        dir.path().join("Cargo.toml"),
+        format!("{MANIFEST}\n[dependencies]\nserde = \"1\"\n"),
+    )
+    .unwrap();
+    // What `cargo check` does to the lock after the user added a crate.
+    fs::write(dir.path().join("Cargo.lock"), "LOCK AFTER\n").unwrap();
+    client.push_chat(Ok(reply("review")));
+
+    let resolution = passed(main_line.done(&mut side));
+
+    let files: Vec<(&str, Option<&str>)> = resolution
+        .files()
+        .iter()
+        .map(|file| (file.path.as_str(), file.before.as_deref()))
+        .collect();
+    assert_eq!(
+        files,
+        [
+            ("Cargo.toml", Some(MANIFEST)),
+            ("Cargo.lock", Some("LOCK BEFORE\n"))
+        ]
+    );
+    assert_eq!(resolution.files()[1].after, "LOCK AFTER\n");
+    let review = format!("{:?}", client.requests().pop().unwrap().messages);
+    assert!(!review.contains("LOCK"), "{review}");
+}
+
+#[test]
+fn lines_with_no_item_new_to_the_profile_pass_and_make_nothing_known() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let mut side = main_line.side_line(boundary);
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    let _x = 1;\n}\n",
+    )
+    .unwrap();
+    client.push_chat(Ok(reply("review")));
+    let resolution = passed(main_line.done(&mut side));
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert!(resolution.items().is_empty());
+    assert!(
+        resolution
+            .message()
+            .contains("Their lines use nothing new to the profile."),
+        "{}",
+        resolution.message()
+    );
+    assert_eq!(
+        main_line.profile().status(&key("dbg_macro")),
+        Status::Unknown
+    );
+}
+
+#[test]
+fn a_file_molt_wrote_before_the_boundary_and_the_user_changed_keeps_its_content_from_before_molt() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true, true]);
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "lib".to_owned(),
+            name: "write_file".to_owned(),
+            arguments: json!({ "path": "src/lib.rs", "content": "pub fn f() {}\n" }).to_string(),
+        }],
+    }));
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let mut side = main_line.side_line(boundary);
+    let users = "pub fn f() {}\n\npub fn g() {\n    dbg!(1);\n}\n";
+    fs::write(dir.path().join("src/lib.rs"), users).unwrap();
+    client.push_chat(Ok(reply("review")));
+    let resolution = passed(main_line.done(&mut side));
+    client.push_chat(Ok(reply("done")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert_eq!(resumed.turn.user_written, ["src/lib.rs"]);
+    let lib: Vec<(Option<&str>, &str)> = resumed
+        .turn
+        .changes
+        .iter()
+        .filter(|c| c.path == "src/lib.rs")
+        .map(|c| (c.before.as_deref(), c.after.as_str()))
+        .collect();
+    assert_eq!(lib, [(None, users)], "created by molt in the turn");
+}
+
+#[test]
+fn a_file_the_user_wrote_at_two_boundaries_of_a_turn_is_listed_once() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true, true]);
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let mut side = main_line.side_line(boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    client.push_chat(Ok(reply("review")));
+    let resolution = passed(main_line.done(&mut side));
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "again".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["arc"], "reason": "shared" }).to_string(),
+        }],
+    }));
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+    let TurnEnd::Boundary(again) = resumed.turn.end else {
+        panic!("the turn did not stop again: {:?}", resumed.turn.end);
+    };
+    let mut side = main_line.side_line(again);
+    let shared = "use std::sync::Arc;\n\nfn main() {\n    dbg!(Arc::new(1));\n}\n";
+    fs::write(dir.path().join("src/main.rs"), shared).unwrap();
+    client.push_chat(Ok(reply("review")));
+    let resolution = passed(main_line.done(&mut side));
+    client.push_chat(Ok(reply("done")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert_eq!(resumed.turn.user_written, ["src/main.rs"]);
+    let main: Vec<(Option<&str>, &str)> = resumed
+        .turn
+        .changes
+        .iter()
+        .map(|c| (c.before.as_deref(), c.after.as_str()))
+        .collect();
+    assert_eq!(main, [(Some("fn main() {}\n"), shared)]);
+    assert_eq!(main_line.profile().status(&key("arc")), Status::Known);
+}
