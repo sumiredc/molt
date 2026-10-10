@@ -315,6 +315,7 @@ flowchart TB
   agent --> llm["llm<br/>ChatClient, openai, router, fake"]
   agent --> profile["profile<br/>element, status, baseline, store"]
   agent --> session["session<br/>jsonl log"]
+  agent --> onboarding
   onboarding --> checker
   onboarding --> llm
   onboarding --> profile
