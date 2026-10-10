@@ -454,7 +454,7 @@ The guarantees in section 3 are verified without a network.
 | agent (git) | In a tempdir git repository: without approval → no new commit. With approval → only the files molt changed are committed, and push is not called |
 | onboarding | With `ScriptedUi` + a fake judgement: the report "can read" → seen, "don't know" → unknown, "have written" → as judged. The dependencies in the reference repository's `Cargo.toml` are known. Provenance and timestamp are saved. Interrupted → not saved |
 | session | One run from a rejection to a boundary leaves the detected elements, the rejected generation, the tool calls and the `cargo check` result in the jsonl. With a key given to the real client against a loopback endpoint that writes the key back, the key appears nowhere in the jsonl, the `MOLT_LOG` request bodies or stdout. Without `MOLT_LOG`, no file of request bodies is created |
-| cli | `ScriptedUi` drives the side-line choice. `assert_cmd` checks the exit code of `molt check` |
+| cli | `ScriptedUi` drives the side-line choice: ①, ② and ③ chosen at three boundaries in a row each put their 8.5 message into the main line. `assert_cmd` checks the exit code of `molt check` |
 
 ---
 

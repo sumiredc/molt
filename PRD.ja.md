@@ -454,7 +454,7 @@ molt doctor               設定したエンドポイントとモデルの対応
 | agent（git） | tempdir の git リポジトリで、承認なし → コミットが増えない。承認 → molt が変えたファイルだけがコミットされ、push は呼ばれない |
 | onboarding | `ScriptedUi` ＋ fake の判定で、申告「読める」→ seen、「知らない」→ unknown、「書いた」→ 判定どおり。参考リポジトリの `Cargo.toml` の依存が known。根拠と日時が保存される。中断 → 保存されない |
 | session | 却下から境界に至る 1 回の実行で、jsonl に検出した要素・却下した生成・ツール呼び出し・`cargo check` の結果が残る。キーを書き返す loopback のエンドポイントに対して実クライアントに渡した API キーが、jsonl・`MOLT_LOG` のリクエスト本文・標準出力のどこにも現れない。`MOLT_LOG` が無ければリクエスト本文のファイルは作られない |
-| cli | `ScriptedUi` で副線の選択を駆動。`assert_cmd` で `molt check` の exit code |
+| cli | `ScriptedUi` で副線の選択を駆動し、続く 3 回の境界で選んだ ① ② ③ が、それぞれ 8.5 のメッセージを本線に入れる。`assert_cmd` で `molt check` の exit code |
 
 ---
 
