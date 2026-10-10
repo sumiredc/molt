@@ -784,7 +784,7 @@ fn after_a_finished_turn_that_wrote_and_passed_molt_proposes_the_generate_models
     };
     assert!(content.contains("print 1"), "the request: {content}");
     assert!(
-        content.contains("`src/main.rs`:\n-fn main() {}\n+fn main() {"),
+        content.contains("+++ b/src/main.rs") && content.contains("-fn main() {}\n+fn main() {"),
         "{content}"
     );
 }
@@ -1153,15 +1153,15 @@ fn a_file_the_user_wrote_in_3_before_withdrawing_the_request_is_not_among_the_fi
 // Reading git's and the model's output
 
 #[test]
-fn status_entries_reads_renames_quoted_paths_and_untracked_files() {
+fn status_entries_reads_renames_quoted_paths_and_their_status() {
     let status = " M src/main.rs\nR  old.rs -> new.rs\n?? \"caf\\303\\251.rs\"\n?? \"a\\\"b.rs\"\n";
     assert_eq!(
         status_entries(status),
         [
-            ("src/main.rs".to_owned(), false),
-            ("new.rs".to_owned(), false),
-            ("café.rs".to_owned(), true),
-            ("a\"b.rs".to_owned(), true)
+            ("src/main.rs".to_owned(), " M".to_owned()),
+            ("new.rs".to_owned(), "R ".to_owned()),
+            ("café.rs".to_owned(), "??".to_owned()),
+            ("a\"b.rs".to_owned(), "??".to_owned())
         ]
     );
 }

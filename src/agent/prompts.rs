@@ -277,29 +277,22 @@ Answer with the message only: no quotes, no code fences, no explanation.";
 pub const COMMIT_DIFF_LINES: usize = 200;
 
 /// What the `generate` model is asked for the message of a commit: the user's request, if any, and
-/// the lines each file changed, marked `+` (added) or `-` (removed), at most
-/// [`COMMIT_DIFF_LINES`] in all.
-pub fn commit_message_request(request: Option<&str>, files: &[Change]) -> String {
+/// what the commit records, as the user is shown it: `diff` (`git diff HEAD`) and each of
+/// `new_files` whole, at most [`COMMIT_DIFF_LINES`] lines in all.
+pub fn commit_message_request(
+    request: Option<&str>,
+    diff: &str,
+    new_files: &[(String, String)],
+) -> String {
     let mut text = String::new();
     if let Some(request) = request {
         text.push_str(&format!("The user's latest request was:\n{request}\n\n"));
     }
     text.push_str("Write the commit message for these changes:\n");
-    let mut lines = Vec::new();
-    for file in files {
-        let new = if file.before.is_none() {
-            " (a new file)"
-        } else {
-            ""
-        };
-        lines.push(format!("\n`{}`{new}:", file.path));
-        for line in line_diff(file.before.as_deref().unwrap_or(""), &file.after) {
-            match line {
-                DiffLine::Same(_) => {}
-                DiffLine::Added(line) => lines.push(format!("+{line}")),
-                DiffLine::Removed(line) => lines.push(format!("-{line}")),
-            }
-        }
+    let mut lines: Vec<String> = diff.lines().map(str::to_owned).collect();
+    for (path, content) in new_files {
+        lines.push(format!("\n`{path}` (a new file):"));
+        lines.extend(content.lines().map(|line| format!("+{line}")));
     }
     for line in lines.iter().take(COMMIT_DIFF_LINES) {
         text.push_str(line);
@@ -317,9 +310,8 @@ pub fn commit_message_request(request: Option<&str>, files: &[Change]) -> String
 }
 
 /// The message of a commit molt proposes when the `generate` model cannot give one (UC4).
-pub fn fixed_commit_message(files: &[Change]) -> String {
-    let paths: Vec<&str> = files.iter().map(|file| file.path.as_str()).collect();
-    format!("molt: {}", paths.join(", "))
+pub fn fixed_commit_message(files: &[String]) -> String {
+    format!("molt: {}", files.join(", "))
 }
 
 /// The system prompt of the side line (PRD UC3). The side line has a message list of its own, so
