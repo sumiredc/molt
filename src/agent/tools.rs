@@ -253,6 +253,25 @@ impl<'a> Tools<'a> {
         Ok(WriteOutcome::Written)
     }
 
+    /// Checks the lines of `path` changed from `old` to `new` against `profile`, as a write is
+    /// checked (PRD §8.4), with the project's own modules as they are now. `None` when `path`
+    /// cannot be read under the root.
+    pub(crate) fn check(
+        &self,
+        path: &str,
+        old: &str,
+        new: &str,
+        profile: &Profile,
+    ) -> Option<CheckReport> {
+        let resolved = self.root.resolve_read(path).ok()?;
+        let own_modules = ModuleScope::of(&resolved).own_modules();
+        let ctx = CheckContext {
+            profile,
+            own_modules: &own_modules,
+        };
+        Some(checker::check_file(&resolved, old, new, &ctx))
+    }
+
     /// Runs `cargo check` in the project, as the loop does at the end of a turn that wrote
     /// (PRD §8.4).
     pub(crate) fn cargo_check(&self) -> Result<CargoOutput, CargoError> {

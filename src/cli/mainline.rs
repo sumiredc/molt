@@ -14,7 +14,7 @@ use crate::agent::mainline::{
     AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
-use crate::agent::subline::{Resolution, Unresolved};
+use crate::agent::subline::{Choice, Resolution, Unresolved};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
@@ -286,7 +286,7 @@ const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side 
 fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Option<ExitCode> {
     let mut side = agent.side_line(boundary);
     loop {
-        match subline::run(ui, &mut side, agent.log()) {
+        match subline::run(ui, &mut side, agent) {
             Left::Aborted => {
                 withdraw(ui, agent);
                 return None;
@@ -305,6 +305,12 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 // `subline::run` offers only the choices of `side`.
                 Err(Unresolved::NotOffered) => return None,
             },
+            Left::Wrote(resolution) => {
+                // As after ① or ②.
+                let boundary = resolve(ui, agent, &resolution)?;
+                side = agent.side_line(boundary);
+                continue;
+            }
             Left::Interrupted => {}
             Left::Eof => return Some(ExitCode::SUCCESS),
             Left::Failed => return Some(ExitCode::FAILURE),
@@ -339,11 +345,17 @@ fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Op
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    match resolution.policy() {
-        None => ui.show(&format!("Your profile allows {names} now (known).")),
-        Some(policy) => ui.show(&format!(
+    match (resolution.choice(), resolution.policy()) {
+        (Choice::Rewrite, Some(policy)) => ui.show(&format!(
             "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
         )),
+        (Choice::UserWrote, _) if names.is_empty() => {
+            ui.show("Your lines use nothing your profile did not allow already.")
+        }
+        (Choice::UserWrote, _) => ui.show(&format!(
+            "Your profile allows {names} now (known: you wrote it)."
+        )),
+        _ => ui.show(&format!("Your profile allows {names} now (known).")),
     }
     let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
     if let Err(error) = &resumed.saved {

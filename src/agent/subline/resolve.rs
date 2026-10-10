@@ -425,7 +425,7 @@ fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_stops_at_once_and_offer
     assert_eq!(again.items, [dbg_macro()]);
     let side = main_line.side_line(again);
     assert!(side.is_recurrence());
-    assert_eq!(side.choices(), [Choice::Unlock]);
+    assert_eq!(side.choices(), [Choice::Unlock, Choice::UserWrote]);
     assert_eq!(
         side.resolve(Choice::Rewrite, &SessionLog::disabled()),
         Err(Unresolved::NotOffered)
@@ -473,7 +473,10 @@ fn the_same_boundary_in_a_later_turn_after_rewrite_is_not_a_recurrence() {
 
     let side = main_line.side_line(boundary);
     assert!(!side.is_recurrence());
-    assert_eq!(side.choices(), [Choice::Unlock, Choice::Rewrite]);
+    assert_eq!(
+        side.choices(),
+        [Choice::Unlock, Choice::Rewrite, Choice::UserWrote]
+    );
 }
 
 #[test]
@@ -521,7 +524,10 @@ fn a_boundary_after_rewrite_that_names_a_rewritten_item_with_a_new_one_is_a_recu
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
     };
     assert_eq!(again.items.len(), 2);
-    assert_eq!(main_line.side_line(again).choices(), [Choice::Unlock]);
+    assert_eq!(
+        main_line.side_line(again).choices(),
+        [Choice::Unlock, Choice::UserWrote]
+    );
 }
 
 #[test]

@@ -218,7 +218,7 @@ fn ctrl_c_at_the_choice_stays_on_the_side_line_and_changes_nothing() {
 }
 
 #[test]
-fn a_boundary_recurring_after_2_opens_the_side_line_again_recommending_the_others_and_offers_1_only()
+fn a_boundary_recurring_after_2_opens_the_side_line_again_recommending_the_others_and_offers_2_choices()
  {
     let dir = project_with_a_profile();
     let client = stops_at_a_boundary_then(vec![
@@ -235,11 +235,11 @@ fn a_boundary_recurring_after_2_opens_the_side_line_again_recommending_the_other
             input("/choose"),
             Step::Select(2),
             input("/choose"),
-            Step::Select(2),
+            Step::Select(3),
         ],
     );
 
-    assert_eq!(code, ExitCode::FAILURE, "there is no second choice");
+    assert_eq!(code, ExitCode::FAILURE, "there is no third choice");
     let recurred = format!("  {}", recurred(&["dbg_macro".parse().unwrap()]));
     assert!(ui.shown().contains(&recurred), "{:?}", ui.shown());
     assert_eq!(saved_status(&dir), Status::Seen);
@@ -324,20 +324,24 @@ fn offered(recurred: bool) -> Vec<String> {
 }
 
 #[test]
-fn choose_offers_1_and_2_by_number_in_that_order() {
+fn choose_offers_1_2_and_3_by_number_in_that_order() {
     assert_eq!(
         offered(false),
         [
             "Understand, then delegate: molt may use dbg_macro from now on",
             "Use a construct I know: molt rewrites without dbg_macro",
+            "Write it myself: molt shows where, and checks what I wrote when I type /done",
         ]
     );
 }
 
 #[test]
-fn choose_offers_1_only_at_a_boundary_recurring_after_2() {
+fn choose_offers_1_and_3_only_at_a_boundary_recurring_after_2() {
     assert_eq!(
         offered(true),
-        ["Understand, then delegate: molt may use dbg_macro from now on"]
+        [
+            "Understand, then delegate: molt may use dbg_macro from now on",
+            "Write it myself: molt shows where, and checks what I wrote when I type /done",
+        ]
     );
 }
