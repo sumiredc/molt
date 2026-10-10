@@ -7,9 +7,9 @@ mod user_wrote;
 use super::show_error_of;
 use crate::agent::mainline::MainLine;
 use crate::agent::subline::{Choice, Resolution, SubLine};
-use crate::cli::ui::{Input, Ui};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
+use crate::ui::{Input, Ui};
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
@@ -179,11 +179,11 @@ mod open {
     use super::*;
     use crate::agent::mainline::MainLine;
     use crate::agent::tools::Tools;
-    use crate::cli::ui::{ScriptedUi, Step};
     use crate::config::Config;
     use crate::llm::{ChatError, ChatResponse, FakeChatClient, Router, ToolCall};
     use crate::profile::store::Profile;
     use crate::session::SessionLog;
+    use crate::ui::{ScriptedUi, Step};
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
@@ -520,7 +520,7 @@ mod open {
         let crate::agent::mainline::TurnEnd::Boundary(boundary) = agent
             .turn(
                 "debug 1",
-                &mut crate::cli::ui::UiApprover::new(&mut ScriptedUi::new([])),
+                &mut crate::cli::mainline::approver::UiApprover::new(&mut ScriptedUi::new([])),
             )
             .end
         else {

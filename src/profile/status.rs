@@ -5,12 +5,13 @@
 //! line, so the toml form and the `molt profile` input cannot disagree.
 
 use std::fmt;
+use std::fmt::Write as _;
 use std::str::FromStr;
 
 use serde::de::{self, Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
 
-use super::element::Element;
+use super::element::{Category, Element};
 
 /// Implements `Serialize` / `Deserialize` through `Display` / `FromStr`, so the
 /// toml form is exactly the name.
@@ -224,6 +225,40 @@ impl FromStr for ItemKey {
 }
 
 serde_by_name!(ItemKey);
+
+/// The key and status of `molt profile set <key> <status>`. When either is
+/// invalid, the message names what is wrong and lists the valid keys and
+/// statuses. `molt init` takes its corrections in the same form.
+pub(crate) fn parse_setting(key: &str, status: &str) -> Result<(ItemKey, Status), String> {
+    match (key.parse::<ItemKey>(), status.parse::<Status>()) {
+        (Ok(key), Ok(status)) => Ok((key, status)),
+        (key, status) => {
+            let mut message = String::new();
+            if let Err(error) = key {
+                writeln!(message, "{error}").unwrap();
+            }
+            if let Err(error) = status {
+                writeln!(message, "{error}").unwrap();
+            }
+            message.push_str(&valid_inputs());
+            Err(message)
+        }
+    }
+}
+
+/// The valid keys and statuses of `molt profile set`, shown when one is
+/// rejected.
+fn valid_inputs() -> String {
+    let mut text = String::from("\nvalid keys:\n");
+    for category in Category::ALL {
+        let names: Vec<_> = category.elements().map(Element::name).collect();
+        writeln!(text, "  {category}: {}", names.join(", ")).unwrap();
+    }
+    text.push_str("  crates: crate:<name>\n");
+    let statuses: Vec<_> = Status::ALL.iter().map(|status| status.name()).collect();
+    writeln!(text, "valid statuses: {}", statuses.join(", ")).unwrap();
+    text
+}
 
 #[cfg(test)]
 mod tests {

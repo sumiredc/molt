@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use super::ProfileCommand;
 use crate::config;
 use crate::profile::element::{Category, Element};
-use crate::profile::status::{ItemKey, Provenance, Status};
+use crate::profile::status::{ItemKey, Provenance, parse_setting};
 use crate::profile::store::{Profile, StoreError, Timestamp};
 
 /// The name of the profile file in the molt directory.
@@ -84,47 +84,6 @@ fn set(path: &Path, key: &str, status: &str) -> Result<(), String> {
     print(&format!("{key}: {status} ({})\n", Provenance::Manual))
 }
 
-/// The key and status of `molt profile set <key> <status>`. When either is
-/// invalid, the message names what is wrong and lists the valid keys and
-/// statuses. `molt init` takes its corrections in the same form.
-pub(crate) fn parse_setting(key: &str, status: &str) -> Result<(ItemKey, Status), String> {
-    match (key.parse::<ItemKey>(), status.parse::<Status>()) {
-        (Ok(key), Ok(status)) => Ok((key, status)),
-        (key, status) => {
-            let mut message = String::new();
-            if let Err(error) = key {
-                writeln!(message, "{error}").unwrap();
-            }
-            if let Err(error) = status {
-                writeln!(message, "{error}").unwrap();
-            }
-            message.push_str(&valid_inputs());
-            Err(message)
-        }
-    }
-}
-
-/// The valid keys and statuses of `molt profile set`, shown when one is
-/// rejected.
-fn valid_inputs() -> String {
-    let mut text = String::from("\nvalid keys:\n");
-    for category in Category::ALL {
-        let names: Vec<_> = elements_of(category).map(Element::name).collect();
-        writeln!(text, "  {category}: {}", names.join(", ")).unwrap();
-    }
-    text.push_str("  crates: crate:<name>\n");
-    let statuses: Vec<_> = Status::ALL.iter().map(|status| status.name()).collect();
-    writeln!(text, "valid statuses: {}", statuses.join(", ")).unwrap();
-    text
-}
-
-fn elements_of(category: Category) -> impl Iterator<Item = Element> {
-    Element::ALL
-        .iter()
-        .copied()
-        .filter(move |element| element.category() == category)
-}
-
 /// The profile as `molt profile show` prints it: per category the status,
 /// provenance and time of each element that is not a base element, then the
 /// crates, then the base elements together, then the history.
@@ -157,7 +116,7 @@ fn render(profile: &Profile) -> String {
             Some(report) => writeln!(text, "{category} (report: {report})").unwrap(),
             None => writeln!(text, "{category}").unwrap(),
         }
-        for element in elements_of(category).filter(|&e| !profile.is_base(e)) {
+        for element in category.elements().filter(|&e| !profile.is_base(e)) {
             row(&mut text, &ItemKey::Element(element));
         }
     }

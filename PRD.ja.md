@@ -308,24 +308,27 @@ stateDiagram-v2
 
 ```mermaid
 flowchart TB
-  cli["cli<br/>clap・Ui トレイト・描画・commands"] --> agent["agent<br/>mainline・subline・tools・prompts"]
-  cli --> onboarding["onboarding<br/>questionnaire・probe・repo_scan・confirm"]
+  cli["cli<br/>clap・描画・commands"] --> agent["agent<br/>mainline・subline・tools・prompts"]
+  cli --> onboarding["onboarding<br/>questionnaire・probe・confirm・prompts"]
   agent --> workspace["workspace<br/>パスの閉じ込め・cargo・git"]
   agent --> checker["checker<br/>visitor・diff・crates・finding"]
   agent --> llm["llm<br/>ChatClient・openai・router・fake"]
   agent --> profile["profile<br/>element・状態・baseline・store"]
   agent --> session["session<br/>jsonl ログ"]
-  agent --> onboarding
-  onboarding --> checker
+  agent --> repo_scan["repo_scan<br/>参照リポジトリの棚卸し・repo-scan.toml"]
   onboarding --> llm
   onboarding --> profile
+  onboarding --> repo_scan
+  repo_scan --> checker
+  repo_scan --> profile
   checker --> profile
-  workspace --> config["config / error"]
-  llm --> config
-  profile --> config
+  session --> llm
+  session --> profile
 ```
 
-図から読み取ること：`checker` と `profile` は I/O を持たず、ネット無しで単体テストできる。LLM と cargo はトレイトの背後にあり、テストでは偽物に差し替える。
+図から読み取ること：`checker` と `profile` は I/O を持たず、ネット無しで単体テストできる。LLM と cargo はトレイトの背後にあり、テストでは偽物に差し替える。`agent` と `onboarding` は横に並び、互いを使わない。両方が要るもの（`repo_scan`）はその下に置く。
+
+図に描かない依存が 2 種類ある。`config`・`error`・`ui`（`Ui` トレイト・`ScriptedUi`・`TerminalUi`）は土台で、ほかのどの module からも使ってよい。土台の中では `config` だけが `error` を使う。`cli` は最上位で、下のどの module も直接使ってよい（`molt check`・`doctor`・`profile`）。`tests/module_deps.rs` はこの図から辺を読み、これ以外の向きの依存がコード（テストを含む）にあるときと、図の辺がもう使われていないときに失敗する。
 
 ### 8.3 データモデル
 

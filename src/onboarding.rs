@@ -2,5 +2,5 @@
 
 pub(crate) mod confirm;
 pub mod probe;
+pub(crate) mod prompts;
 pub mod questionnaire;
-pub(crate) mod repo_scan;

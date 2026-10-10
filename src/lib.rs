@@ -6,5 +6,7 @@ pub mod error;
 pub mod llm;
 pub mod onboarding;
 pub mod profile;
+pub(crate) mod repo_scan;
 pub mod session;
+pub mod ui;
 pub mod workspace;

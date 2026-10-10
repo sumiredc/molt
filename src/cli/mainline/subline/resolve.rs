@@ -3,8 +3,8 @@
 
 use super::names;
 use crate::agent::subline::{Choice, SubLine};
-use crate::cli::ui::{Ui, UiError};
 use crate::profile::status::ItemKey;
+use crate::ui::{Ui, UiError};
 
 /// What the choice is asked with.
 const ASK: &str = "How do you want to go on?";

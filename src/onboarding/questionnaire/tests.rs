@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cli::ui::{ScriptedUi, Step};
 use crate::config::{Api, Config};
 use crate::llm::{ChatClient, FakeChatClient, OpenAiClient, Router};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report};
+use crate::ui::{ScriptedUi, Step};
 
 /// The numbers of the choices, as the user selects them (from 1). "have written" is 1; its
 /// Q&A is tested in `onboarding::probe`.

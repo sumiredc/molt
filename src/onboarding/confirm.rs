@@ -7,11 +7,11 @@ mod tests;
 
 use std::fmt::Write as _;
 
-use crate::cli::profile::parse_setting;
-use crate::cli::ui::{Input, Ui};
 use crate::profile::element::{Category, Element};
+use crate::profile::status::parse_setting;
 use crate::profile::status::{ItemKey, Provenance};
 use crate::profile::store::{Profile, Timestamp};
+use crate::ui::{Input, Ui};
 
 /// The prompt a correction is typed at.
 const PROMPT: &str = "correct> ";

@@ -1,9 +1,10 @@
 //! How a commit of the files molt changed shows on the main line (PRD UC4): the diff and the
 //! message, the warning and the other changes, the approval, and what came of it.
 
+use super::approver::UiApprover;
 use super::diff;
 use crate::agent::mainline::{CommitOutcome, CommitProposal, MainLine, Turn};
-use crate::cli::ui::{Ui, UiApprover, UiError};
+use crate::ui::{Ui, UiError};
 
 /// Shows `proposal` and asks the user to approve it: first whether to commit despite the failing
 /// check, then whether to leave the other changes out, then the commit itself. A no or an

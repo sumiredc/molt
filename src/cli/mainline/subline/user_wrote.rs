@@ -5,9 +5,9 @@ use super::{HINT, Left, indent};
 use crate::agent::mainline::MainLine;
 use crate::agent::subline::{Done, Failure, SubLine};
 use crate::cli::mainline::show_error_of;
-use crate::cli::ui::Ui;
 use crate::llm::ChatError;
 use crate::session::SessionLog;
+use crate::ui::Ui;
 
 /// What the user can do while they write in ③.
 pub(super) const WRITING: &str = "Write it in your editor, then type /done to have molt check it. \

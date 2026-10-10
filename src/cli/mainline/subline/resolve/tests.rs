@@ -10,11 +10,11 @@ use super::super::HINT;
 use super::*;
 use crate::agent::mainline::MainLine;
 use crate::agent::tools::Tools;
-use crate::cli::ui::{ScriptedUi, Step};
 use crate::config::Config;
 use crate::llm::{ChatResponse, FakeChatClient, Message, Router, ToolCall};
 use crate::profile::status::Status;
 use crate::profile::store::Profile;
+use crate::ui::{ScriptedUi, Step};
 use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::path::Root;
 
@@ -280,7 +280,7 @@ struct Recording {
 }
 
 impl Ui for Recording {
-    fn read_line(&mut self, _prompt: &str) -> Result<crate::cli::ui::Input, UiError> {
+    fn read_line(&mut self, _prompt: &str) -> Result<crate::ui::Input, UiError> {
         unreachable!("only selections are asked")
     }
 

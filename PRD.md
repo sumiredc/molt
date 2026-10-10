@@ -308,24 +308,27 @@ What to read from the figure: there is no path to `known` by molt's judgement al
 
 ```mermaid
 flowchart TB
-  cli["cli<br/>clap, Ui trait, rendering, commands"] --> agent["agent<br/>mainline, subline, tools, prompts"]
-  cli --> onboarding["onboarding<br/>questionnaire, probe, repo_scan, confirm"]
+  cli["cli<br/>clap, rendering, commands"] --> agent["agent<br/>mainline, subline, tools, prompts"]
+  cli --> onboarding["onboarding<br/>questionnaire, probe, confirm, prompts"]
   agent --> workspace["workspace<br/>path confinement, cargo, git"]
   agent --> checker["checker<br/>visitor, diff, crates, finding"]
   agent --> llm["llm<br/>ChatClient, openai, router, fake"]
   agent --> profile["profile<br/>element, status, baseline, store"]
   agent --> session["session<br/>jsonl log"]
-  agent --> onboarding
-  onboarding --> checker
+  agent --> repo_scan["repo_scan<br/>stock-taking of the reference repository, repo-scan.toml"]
   onboarding --> llm
   onboarding --> profile
+  onboarding --> repo_scan
+  repo_scan --> checker
+  repo_scan --> profile
   checker --> profile
-  workspace --> config["config / error"]
-  llm --> config
-  profile --> config
+  session --> llm
+  session --> profile
 ```
 
-What to read from the figure: `checker` and `profile` do no I/O and can be unit-tested without a network. The LLM and cargo sit behind traits and are replaced with fakes in tests.
+What to read from the figure: `checker` and `profile` do no I/O and can be unit-tested without a network. The LLM and cargo sit behind traits and are replaced with fakes in tests. `agent` and `onboarding` sit side by side and do not use each other; what both need (`repo_scan`) sits below them.
+
+Two kinds of dependency are not drawn. `config`, `error` and `ui` (the `Ui` trait, `ScriptedUi`, `TerminalUi`) are the base: every other module may use them, and inside the base only `config` uses `error`. `cli` is the top, and may use any module directly (`molt check`, `doctor`, `profile`). `tests/module_deps.rs` reads the edges from this figure, and fails when the code, tests included, depends in any other direction, or when an edge of the figure is no longer used.
 
 ### 8.3 Data model
 
