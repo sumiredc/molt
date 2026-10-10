@@ -5,103 +5,17 @@
 //! from `--ui-script` (`tests/fixtures/fake_pass/`). `cargo` and `git` are the real ones, on a
 //! cargo project with a git repository in a tempdir, so nothing here needs the network.
 
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::Command;
+mod common;
 
-use assert_cmd::cargo::cargo_bin_cmd;
+use std::fs;
+use std::path::Path;
+
 use tempfile::TempDir;
 
-/// The package name of the project in the tempdir. A name of its own, so its build does not
-/// meet another test's crate of the same name.
+use common::{assert_in_order, commit_count, git, in_repository, molt, molt_home, project};
+
+/// The package name of the project in the tempdir.
 const CRATE: &str = "molt_fake_pass_probe";
-
-/// Keeps the developer's own git config out, and gives commits an author by environment, for the
-/// git run here and the one molt runs. Removes the variables that point git at another
-/// repository, which a git hook running the tests would set.
-const GIT_ENV: [(&str, Option<&str>); 11] = [
-    ("GIT_CONFIG_GLOBAL", Some("/dev/null")),
-    ("GIT_CONFIG_NOSYSTEM", Some("1")),
-    ("GIT_AUTHOR_NAME", Some("molt test")),
-    ("GIT_AUTHOR_EMAIL", Some("molt-test@example.com")),
-    ("GIT_COMMITTER_NAME", Some("molt test")),
-    ("GIT_COMMITTER_EMAIL", Some("molt-test@example.com")),
-    ("GIT_DIR", None),
-    ("GIT_WORK_TREE", None),
-    ("GIT_INDEX_FILE", None),
-    ("GIT_OBJECT_DIRECTORY", None),
-    ("GIT_COMMON_DIR", None),
-];
-
-fn with_git_env(command: &mut Command) -> &mut Command {
-    for (key, value) in GIT_ENV {
-        match value {
-            Some(value) => command.env(key, value),
-            None => command.env_remove(key),
-        };
-    }
-    command
-}
-
-/// The stdout of `git <args>` in `dir`, which must succeed.
-fn git(dir: &Path, args: &[&str]) -> String {
-    let output = with_git_env(&mut Command::new("git"))
-        .args(args)
-        .current_dir(dir)
-        .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "git {args:?}: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    String::from_utf8(output.stdout).unwrap()
-}
-
-fn fixture(name: &str) -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("tests/fixtures/fake_pass")
-        .join(name)
-}
-
-/// A cargo project in `dir` with `fn main() {}`, its `Cargo.lock`, and one commit of them all.
-fn project(dir: &Path) -> PathBuf {
-    let project = dir.join("project");
-    fs::create_dir_all(project.join("src")).unwrap();
-    fs::write(
-        project.join("Cargo.toml"),
-        format!("[package]\nname = \"{CRATE}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n"),
-    )
-    .unwrap();
-    fs::write(project.join("src/main.rs"), "fn main() {}\n").unwrap();
-    fs::write(project.join(".gitignore"), "/target\n").unwrap();
-    // `cargo check` writes `Cargo.lock` when it is missing, which would be a change of the user's.
-    let lock = Command::new("cargo")
-        .args(["generate-lockfile", "--offline", "--quiet"])
-        .current_dir(&project)
-        .output()
-        .unwrap();
-    assert!(
-        lock.status.success(),
-        "{}",
-        String::from_utf8_lossy(&lock.stderr)
-    );
-    git(&project, &["init", "--quiet"]);
-    git(&project, &["add", "--", "."]);
-    git(&project, &["commit", "--quiet", "--message=init"]);
-    project
-}
-
-/// Fails unless each of `expected` is found in `stdout`, in order.
-fn assert_in_order(stdout: &str, expected: &[&str]) {
-    let mut rest = stdout;
-    for line in expected {
-        let at = rest
-            .find(line)
-            .unwrap_or_else(|| panic!("{line:?} not found in order in:\n{stdout}"));
-        rest = &rest[at + line.len()..];
-    }
-}
 
 /// The `event` of each line of the session logs in `sessions`, with `boundary` for a rejection
 /// and `status` for `cargo check`, in order.
@@ -131,42 +45,19 @@ fn logged_events(sessions: &Path) -> Vec<String> {
 #[test]
 fn one_pass_from_a_request_through_a_boundary_and_unlock_ends_in_one_approved_commit() {
     let dir = TempDir::new().unwrap();
-    let project = project(dir.path());
-    let home = dir.path().join("molt-home");
-    fs::create_dir(&home).unwrap();
-    // No model can be reached: the key's variable is unset, so only the script answers.
-    fs::write(
-        home.join("config.toml"),
-        "[api]\nbase_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"MOLT_TEST_FAKE_PASS_API_KEY\"\n",
-    )
-    .unwrap();
+    let project = project(dir.path(), CRATE);
+    let home = molt_home(dir.path());
     let profile = dir.path().join("profile.toml");
     fs::write(&profile, "").unwrap();
-    let before = git(&project, &["rev-list", "--count", "HEAD"]);
+    let before = commit_count(&project);
 
-    let mut molt = cargo_bin_cmd!("molt");
-    for (key, value) in GIT_ENV {
-        match value {
-            Some(value) => molt.env(key, value),
-            None => molt.env_remove(key),
-        };
-    }
-    let output = molt
-        .current_dir(&project)
-        .env("MOLT_HOME", &home)
-        .env_remove("MOLT_TEST_FAKE_PASS_API_KEY")
-        .env_remove("XDG_CONFIG_HOME")
-        .env_remove("HOME")
-        .env_remove("MOLT_LOG")
-        // The project has no dependencies, so the `cargo check` molt runs needs no network;
-        // this makes it fail instead of reaching out if that ever changes.
-        .env("CARGO_NET_OFFLINE", "true")
+    let output = molt(&project, &home)
         .arg("--profile")
         .arg(&profile)
         .arg("--ui-script")
-        .arg(fixture("ui.toml"))
+        .arg(in_repository("tests/fixtures/fake_pass/ui.toml"))
         .arg("--fake")
-        .arg(fixture("fake.toml"))
+        .arg(in_repository("tests/fixtures/fake_pass/fake.toml"))
         .output()
         .unwrap();
 
@@ -219,11 +110,7 @@ fn one_pass_from_a_request_through_a_boundary_and_unlock_ends_in_one_approved_co
     // One commit more, with the approved message and molt's change to `src/main.rs`, and nothing
     // left over in the working tree. That a commit leaves out the user's other changes is for
     // the unit tests of `agent::mainline::commit`: there are none here.
-    let after = git(&project, &["rev-list", "--count", "HEAD"]);
-    assert_eq!(
-        after.trim().parse::<u32>().unwrap(),
-        before.trim().parse::<u32>().unwrap() + 1
-    );
+    assert_eq!(commit_count(&project), before + 1);
     assert_eq!(
         git(&project, &["log", "-1", "--format=%s"]),
         "Print 1 with dbg!\n"
