@@ -209,6 +209,32 @@ fn base_elements_are_shown_together_after_the_crates_and_not_in_their_category()
 }
 
 #[test]
+fn without_crates_the_crates_heading_is_not_shown() {
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            element(Element::Clone),
+            Status::Seen,
+            Provenance::SelfReport,
+            at(1),
+            None,
+        )
+        .unwrap();
+    let (ui, _) = run_confirm(&mut profile, vec![save()]);
+    let shown = ui.shown().join("\n");
+    assert!(
+        !shown.lines().any(|line| line.starts_with("crates")),
+        "{shown}"
+    );
+    assert!(
+        shown
+            .lines()
+            .any(|line| line == "base elements (used regardless of status)"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn an_empty_line_saves_the_profile_as_it_was_shown() {
     let mut profile = judged_profile();
     let before = profile.clone();

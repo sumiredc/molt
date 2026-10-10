@@ -1,7 +1,8 @@
 //! The example of `--fake` in `examples/fake/` takes one pass, used as a user is told to use it:
 //! the script and the profile copied out of the checkout, since ① rewrites the profile.
 //!
-//! The user's side is `tests/fixtures/fake_pass/ui.toml`, the inputs the script's comment lists.
+//! The user's side is `tests/fixtures/fake_pass/ui.toml`, the inputs README.md lists under "Try it
+//! without a model", less the staging question: the project here has nothing uncommitted.
 //! What each step of the pass shows and logs is for `tests/fake_pass.rs`; this checks that the
 //! example's script and profile go together from the request to the commit.
 
