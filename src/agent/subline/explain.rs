@@ -54,13 +54,10 @@ pub(crate) fn assemble(boundary: &Boundary, reply: &str, similar: Option<&str>) 
     text
 }
 
-/// Shown in place of the places when the stock-taking beside the profile cannot be read (PRD §8.3).
-pub(crate) const UNREADABLE_SCAN: &str = "Where your reference repository uses them: its record (repo-scan.toml) could not be read. Running `molt init` again fixes it.";
-
 /// Where the reference repository uses the elements of `items` ([`similar`]), from the
 /// stock-taking `molt init` kept beside the profile at `profile_path`, read as it is: the
 /// reference repository is not scanned again. `None` when there is no stock-taking or `items` has
-/// no element; [`UNREADABLE_SCAN`] when there is one that cannot be read.
+/// no element. When there is one that cannot be read, says so ([`unreadable`]).
 pub(crate) fn similar_beside(profile_path: &Path, items: &[ItemKey]) -> Option<String> {
     let path = repo_scan::path_beside(profile_path);
     let scan = match fs::read_to_string(&path) {
@@ -73,8 +70,18 @@ pub(crate) fn similar_beside(profile_path: &Path, items: &[ItemKey]) -> Option<S
         Err(_) => items
             .iter()
             .any(|item| matches!(item, ItemKey::Element(_)))
-            .then(|| UNREADABLE_SCAN.to_owned()),
+            .then(|| unreadable(&path)),
     }
+}
+
+/// Shown in place of the places when the stock-taking at `path` cannot be read. `molt init` stops
+/// at such a file rather than replacing it (PRD §8.3), so the user is told to move it away first.
+fn unreadable(path: &Path) -> String {
+    format!(
+        "Where your reference repository uses them: {} could not be read. Move it away and run \
+         `molt init` again.",
+        path.display()
+    )
 }
 
 /// Where the reference repository of `scan` uses each element of `items`, in their order: at most
@@ -510,7 +517,7 @@ mod similar {
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
-    use super::{NO_COMPARISON, UNREADABLE_SCAN, assemble, similar};
+    use super::{NO_COMPARISON, assemble, similar, similar_beside};
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     /// The heading of the part, which is there exactly when the part is.
@@ -661,10 +668,34 @@ mod similar {
             explanation.starts_with("dbg! prints a value."),
             "{explanation}"
         );
+        let path = repo_scan::path_beside(&profile);
         assert!(
-            explanation.ends_with(&format!("\n\n{UNREADABLE_SCAN}")),
+            explanation.ends_with(&format!(
+                "\n\nWhere your reference repository uses them: {} could not be read. Move it \
+                 away and run `molt init` again.",
+                path.display()
+            )),
             "{explanation}"
         );
+    }
+
+    #[test]
+    fn a_stock_taking_with_a_key_that_is_no_element_is_said_not_to_be_readable() {
+        let (_dir, profile) = profile_dir(Some(
+            "repo = \"/r\"\nat = 1970-01-01T00:00:00Z\ncrates = []\nskipped = []\n\n\
+             [elements]\nnot_an_element = []\n",
+        ));
+
+        let text = similar_beside(&profile, &items(&["dbg_macro"])).unwrap();
+
+        assert!(text.contains("could not be read"), "{text}");
+    }
+
+    #[test]
+    fn a_stock_taking_that_cannot_be_read_says_nothing_at_a_boundary_of_crates_only() {
+        let (_dir, profile) = profile_dir(Some("not = [toml"));
+
+        assert_eq!(similar_beside(&profile, &items(&["crate:tokio"])), None);
     }
 
     #[test]
