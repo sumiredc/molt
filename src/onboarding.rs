@@ -2,4 +2,5 @@
 
 pub(crate) mod confirm;
 pub mod probe;
+pub(crate) mod prompts;
 pub mod questionnaire;

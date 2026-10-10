@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::agent::prompts::init::{self as prompts, Exchange};
+use super::prompts::{self, Exchange};
 use crate::llm::{ChatClient, ChatError, JsonError, Message, Role, Router};
 use crate::profile::element::{Category, Element};
 use crate::repo_scan::RepoScan;

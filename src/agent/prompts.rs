@@ -1,8 +1,9 @@
 //! What molt says to the model: the system prompt, the tool descriptions and the tool results
 //! the loop makes up itself. They are in one place so that tuning them for a model means editing
-//! this file only. They are English; the model is told to answer in the user's language
-//! instead (PRD §3 Language, §8.6): the system prompt says so, and a request that has no input of
-//! the user quotes the user's request as the clue. The user messages do not name the language
+//! this file only (the prompts of `molt init` are in `onboarding::prompts`). They are English;
+//! the model is told to answer in the user's language instead (PRD §3 Language, §8.6): the
+//! system prompt says so, and a request that has no input of the user quotes the user's request
+//! as the clue. The user messages do not name the language
 //! (`in the language of …`): small models read that as a call to pick another language, and
 //! answered an English request in German or Chinese.
 
@@ -12,8 +13,6 @@ use super::mainline::{Boundary, BoundaryCause, Change, CommitOutcome};
 use crate::checker::diff::{DiffLine, line_diff};
 use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
-
-pub(crate) mod init;
 
 /// The system prompt of the main line.
 pub const MAIN_LINE_SYSTEM: &str = "\

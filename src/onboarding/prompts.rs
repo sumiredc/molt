@@ -56,7 +56,8 @@ pub fn question_request(
         ));
     }
     // The language is left to the system prompt, with the input quoted as the clue: naming it
-    // here led small models to answer in another language (see the module doc of `prompts`).
+    // here led small models to answer in another language (see the module doc of
+    // `agent::prompts`).
     if let Some(latest) = latest {
         text.push_str(&format!("\n\nThe user's latest input was:\n{latest}"));
     }
