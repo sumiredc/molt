@@ -621,6 +621,9 @@ fn the_cargo_lock_that_changed_with_the_users_crate_joins_their_files_but_not_th
     assert_eq!(resolution.files()[1].after, "LOCK AFTER\n");
     let review = format!("{:?}", client.requests().pop().unwrap().messages);
     assert!(!review.contains("LOCK"), "{review}");
+    let message = resolution.message();
+    assert!(message.contains("`Cargo.toml`"), "{message}");
+    assert!(!message.contains("Cargo.lock"), "not to re-read: {message}");
 }
 
 #[test]

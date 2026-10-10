@@ -74,7 +74,13 @@ impl Resolution {
     pub fn message(&self) -> String {
         match self.choice {
             Choice::UserWrote => {
-                let paths: Vec<&str> = self.files.iter().map(|file| file.path.as_str()).collect();
+                // The lock is not the user's lines, and the model has no use in reading it.
+                let paths: Vec<&str> = self
+                    .files
+                    .iter()
+                    .map(|file| file.path.as_str())
+                    .filter(|path| *path != LOCK)
+                    .collect();
                 prompts::user_wrote_resolved(&self.items, &paths)
             }
             _ => {
