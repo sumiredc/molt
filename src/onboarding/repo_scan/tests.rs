@@ -305,10 +305,17 @@ fn interrupting_init_leaves_repo_scan_toml_as_it_was() {
 }
 
 #[test]
-fn a_failure_before_the_save_writes_no_repo_scan_toml() {
+fn a_failure_before_the_save_leaves_repo_scan_toml_as_it_was() {
     let setup = Setup::new();
-    setup.write("Cargo.toml", MANIFEST);
-    let mut ui = ScriptedUi::new(vec![Step::Select(1); Category::ALL.len()]);
+    let earlier = earlier_init(&setup);
+    let earlier_profile = fs::read_to_string(setup.profile()).unwrap();
+    setup.write("Cargo.toml", "[dependencies]\nrand = \"0.9\"\n");
+
+    // TODO(#67): fail through `FakeChatClient` once "have written" asks its questions; until
+    // then reporting it is itself the failure before the save.
+    let mut steps = vec![Step::Confirm(true)];
+    steps.extend(vec![Step::Select(1); Category::ALL.len()]);
+    let mut ui = ScriptedUi::new(steps);
     let result = init(
         &mut ui,
         &setup.profile(),
@@ -316,8 +323,11 @@ fn a_failure_before_the_save_writes_no_repo_scan_toml() {
         Some(&setup.repo()),
     );
     assert!(result.is_err());
-    assert!(!setup.scan_file().exists());
-    assert!(!setup.profile().exists());
+    assert_eq!(fs::read_to_string(setup.scan_file()).unwrap(), earlier);
+    assert_eq!(
+        fs::read_to_string(setup.profile()).unwrap(),
+        earlier_profile
+    );
 }
 
 #[test]
@@ -337,6 +347,19 @@ fn init_again_without_a_reference_removes_the_earlier_repo_scan_toml() {
     );
     let profile = Profile::load(&setup.profile()).unwrap();
     assert_eq!(profile.entries().count(), 0);
+}
+
+#[test]
+fn init_again_with_a_repo_that_cannot_be_used_removes_the_earlier_repo_scan_toml() {
+    let setup = Setup::new();
+    earlier_init(&setup);
+    let missing = setup.dir.path().join("no-such-repo");
+
+    let mut steps = vec![Step::Confirm(true)];
+    steps.extend(every_category(DONT_KNOW));
+    let (_, outcome) = init_with(&setup, Some(&missing), steps);
+    assert_eq!(outcome, Outcome::Saved);
+    assert!(!setup.scan_file().exists());
 }
 
 #[test]
@@ -368,6 +391,36 @@ fn a_repo_scan_toml_molt_did_not_write_stops_init_before_anything_is_saved() {
     );
     let error = result.unwrap_err();
     assert!(error.contains("not a stock-taking molt wrote"), "{error}");
+    assert!(ui.asked().is_empty(), "{:?}", ui.asked());
     assert_eq!(fs::read_to_string(setup.scan_file()).unwrap(), theirs);
+    assert!(!setup.profile().exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn a_repo_scan_toml_that_is_a_symbolic_link_stops_init_before_anything_is_saved() {
+    let setup = Setup::new();
+    setup.write("Cargo.toml", MANIFEST);
+    let target = setup.dir.path().join("elsewhere.toml");
+    fs::write(&target, "kept\n").unwrap();
+    fs::create_dir_all(setup.scan_file().parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&target, setup.scan_file()).unwrap();
+
+    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let result = init(
+        &mut ui,
+        &setup.profile(),
+        Ok(&FakeChatClient::new()),
+        Some(&setup.repo()),
+    );
+    let error = result.unwrap_err();
+    assert!(error.contains("symbolic link"), "{error}");
+    assert!(
+        fs::symlink_metadata(setup.scan_file())
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+    assert_eq!(fs::read_to_string(&target).unwrap(), "kept\n");
     assert!(!setup.profile().exists());
 }

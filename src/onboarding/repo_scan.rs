@@ -216,11 +216,19 @@ pub fn mark_crates_known(
 }
 
 /// Checks, before anything is saved, that [`store`] may replace or remove the file at `path`:
-/// there is none, or it is a stock-taking molt wrote. Anything else is the user's and is kept.
+/// there is none, or it is a regular file in the shape of a stock-taking. Anything else (a file
+/// of another shape, a symbolic link) is taken for the user's and kept. Ownership is judged by
+/// shape because molt keeps no record of what it wrote, and the file has one fixed name.
 pub fn check_target(path: &Path) -> Result<(), String> {
+    if is_link(path) {
+        return Err(format!(
+            "{} is a symbolic link; move it away and run `molt init` again",
+            path.display()
+        ));
+    }
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
-        Err(error) if error.kind() == io::ErrorKind::NotFound && !is_link(path) => return Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
     };
     from_toml(&text).map(drop).map_err(|reason| {
@@ -241,9 +249,16 @@ pub enum Stored {
 
 /// Makes the file at `path` match the profile just saved: `scan` when there is one, and no file
 /// when there is none. Call [`check_target`] first.
+///
+/// When writing fails, the earlier file is removed if it can be, so that what remains is no
+/// stock-taking rather than one of another profile.
 pub fn store(path: &Path, scan: Option<&RepoScan>) -> io::Result<Stored> {
     match scan {
-        Some(scan) => write_atomically(path, to_toml(scan).as_bytes()).map(|()| Stored::Written),
+        Some(scan) => write_atomically(path, to_toml(scan).as_bytes())
+            .map(|()| Stored::Written)
+            .inspect_err(|_| {
+                let _ = fs::remove_file(path);
+            }),
         None => match fs::remove_file(path) {
             Ok(()) => Ok(Stored::Removed),
             Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Stored::Nothing),

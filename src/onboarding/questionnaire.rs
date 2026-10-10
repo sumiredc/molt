@@ -50,6 +50,9 @@ pub fn init(
 ) -> Result<Outcome, String> {
     // The Q&A (#67) asks the categories reported "have written" through this client.
     let _client = client?;
+    // Checked again just before saving; here so that the user is not asked anything in vain.
+    repo_scan::check_target(&repo_scan::path_beside(profile_path))
+        .map_err(|error| format!("{error}; no profile was saved"))?;
 
     if profile_path.exists() {
         let question = format!(
