@@ -31,8 +31,8 @@ const PROMPT: &str = "molt> ";
 /// The directory in molt's place (`config::molt_home`) that holds the session logs (PRD §8.8).
 const SESSIONS_DIR: &str = "sessions";
 
-/// The exit code after Ctrl-C at the prompt (128 + SIGINT, as a shell reports it).
-const INTERRUPTED: u8 = 130;
+/// The exit code after the user interrupts with Ctrl-C (128 + SIGINT, as a shell reports it).
+pub(super) const INTERRUPTED: u8 = 130;
 
 pub(super) fn run(
     profile_flag: Option<&Path>,
@@ -82,7 +82,9 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile, PathBuf)
 /// script answers at once, so it is not waited for). The main line does not open when the client
 /// cannot be created, e.g. the script cannot be read or the API key's environment variable is
 /// unset.
-fn connect(fake: Option<&Path>) -> Result<(PathBuf, Config, Box<dyn ChatClient>), String> {
+pub(super) fn connect(
+    fake: Option<&Path>,
+) -> Result<(PathBuf, Config, Box<dyn ChatClient>), String> {
     let home = config::molt_home(|name| std::env::var_os(name)).map_err(|e| e.to_string())?;
     let config = Config::load(&config::config_path(&home)).map_err(|e| e.to_string())?;
     let client: Box<dyn ChatClient> = match fake {
@@ -120,7 +122,7 @@ fn open_log(home: &Path) -> Result<SessionLog, String> {
 }
 
 /// The scripted UI when `--ui-script` is given, otherwise the terminal.
-fn open_ui(ui_script: Option<&Path>) -> Result<Box<dyn Ui>, String> {
+pub(super) fn open_ui(ui_script: Option<&Path>) -> Result<Box<dyn Ui>, String> {
     match ui_script {
         Some(path) => ScriptedUi::load(path)
             .map(|ui| Box::new(ui.echo_to_stdout()) as Box<dyn Ui>)

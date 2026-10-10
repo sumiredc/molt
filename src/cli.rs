@@ -6,6 +6,7 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 
 mod check;
 mod doctor;
+mod init;
 mod mainline;
 mod profile;
 pub mod ui;
@@ -80,15 +81,17 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
         Some(Command::Doctor) => doctor::main(),
+        Some(Command::Init { repo }) => init::run(
+            cli.common.profile.as_deref(),
+            cli.common.fake.as_deref(),
+            cli.common.ui_script.as_deref(),
+            repo.as_deref(),
+        ),
         None => mainline::run(
             cli.common.profile.as_deref(),
             cli.common.fake.as_deref(),
             cli.common.ui_script.as_deref(),
         ),
-        _ => {
-            eprintln!("not implemented yet");
-            ExitCode::FAILURE
-        }
     }
 }
 

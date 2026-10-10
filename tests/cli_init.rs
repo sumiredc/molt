@@ -1,0 +1,88 @@
+//! `molt init` (PRD UC1, §8.6), driven through the binary with `--ui-script`.
+
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::process::Output;
+
+use assert_cmd::cargo::cargo_bin_cmd;
+use tempfile::TempDir;
+
+/// The steps that answer "don't know" for all 10 categories.
+const ALL_DONT_KNOW: &str = "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n]\n";
+
+/// A molt directory with `config.toml` whose `[api]` body is `api`, and a ui script.
+struct Setup {
+    dir: TempDir,
+}
+
+impl Setup {
+    fn with_api(api: &str) -> Self {
+        let dir = TempDir::new().unwrap();
+        let home = dir.path().join("molt-home");
+        fs::create_dir(&home).unwrap();
+        fs::write(home.join("config.toml"), format!("[api]\n{api}")).unwrap();
+        fs::write(dir.path().join("ui.toml"), ALL_DONT_KNOW).unwrap();
+        Self { dir }
+    }
+
+    fn home(&self) -> PathBuf {
+        self.dir.path().join("molt-home")
+    }
+
+    fn profile(&self) -> PathBuf {
+        self.dir.path().join("profile.toml")
+    }
+
+    fn script(&self) -> PathBuf {
+        self.dir.path().join("ui.toml")
+    }
+}
+
+/// Runs `molt init` with the profile at `profile` and the ui script of `setup`.
+fn molt_init(setup: &Setup, profile: &Path) -> Output {
+    cargo_bin_cmd!("molt")
+        .env("MOLT_HOME", setup.home())
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("MOLT_TEST_MISSING_API_KEY")
+        .arg("init")
+        .arg("--profile")
+        .arg(profile)
+        .arg("--ui-script")
+        .arg(setup.script())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn init_with_every_category_dont_know_saves_the_profile_and_exits_0() {
+    let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    let output = molt_init(&setup, &setup.profile());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("Saved the profile"), "{stdout}");
+    let saved = fs::read_to_string(setup.profile()).unwrap();
+    assert!(saved.contains("ownership = \"dont_know\""), "{saved}");
+}
+
+#[test]
+fn init_without_the_api_key_reports_its_variable_and_creates_no_profile() {
+    let setup = Setup::with_api("api_key_env = \"MOLT_TEST_MISSING_API_KEY\"\n");
+    let output = molt_init(&setup, &setup.profile());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert_eq!(output.status.code(), Some(1), "{stderr}");
+    assert!(
+        stderr.contains("`MOLT_TEST_MISSING_API_KEY` is not set"),
+        "{stderr}"
+    );
+    assert!(!setup.profile().exists());
+}
+
+#[test]
+fn init_interrupted_during_the_report_exits_130_and_creates_no_profile() {
+    let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    fs::write(setup.script(), "steps = [{ select = 2 }, \"interrupt\"]\n").unwrap();
+    let output = molt_init(&setup, &setup.profile());
+    assert_eq!(output.status.code(), Some(130));
+    assert!(!setup.profile().exists());
+}
