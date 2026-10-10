@@ -189,9 +189,8 @@ impl<'a> SubLine<'a> {
     /// from the stock-taking `molt init` kept beside the profile at `profile_path` (PRD UC3). It
     /// is read now, as it was recorded at init. Without one, that part is left out.
     pub(crate) fn with_scan_beside(mut self, profile_path: Option<&Path>) -> Self {
-        self.similar = profile_path
-            .and_then(explain::scan_beside)
-            .and_then(|scan| explain::similar(&scan, &self.boundary.items));
+        self.similar =
+            profile_path.and_then(|path| explain::similar_beside(path, &self.boundary.items));
         self
     }
 

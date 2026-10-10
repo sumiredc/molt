@@ -4,6 +4,7 @@
 //! items, from the stock-taking `molt init` kept beside the profile.
 
 use std::fs;
+use std::io;
 use std::path::Path;
 
 use crate::agent::mainline::Boundary;
@@ -53,11 +54,27 @@ pub(crate) fn assemble(boundary: &Boundary, reply: &str, similar: Option<&str>) 
     text
 }
 
-/// The stock-taking `molt init` kept beside the profile at `profile_path`, read as it is: the
-/// reference repository is not scanned again. `None` when there is none, or it cannot be read.
-pub(crate) fn scan_beside(profile_path: &Path) -> Option<RepoScan> {
-    let text = fs::read_to_string(repo_scan::path_beside(profile_path)).ok()?;
-    repo_scan::from_toml(&text).ok()
+/// Shown in place of the places when the stock-taking beside the profile cannot be read (PRD §8.3).
+pub(crate) const UNREADABLE_SCAN: &str = "Where your reference repository uses them: its record (repo-scan.toml) could not be read. Running `molt init` again fixes it.";
+
+/// Where the reference repository uses the elements of `items` ([`similar`]), from the
+/// stock-taking `molt init` kept beside the profile at `profile_path`, read as it is: the
+/// reference repository is not scanned again. `None` when there is no stock-taking or `items` has
+/// no element; [`UNREADABLE_SCAN`] when there is one that cannot be read.
+pub(crate) fn similar_beside(profile_path: &Path, items: &[ItemKey]) -> Option<String> {
+    let path = repo_scan::path_beside(profile_path);
+    let scan = match fs::read_to_string(&path) {
+        Ok(text) => repo_scan::from_toml(&text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return None,
+        Err(error) => Err(error.to_string()),
+    };
+    match scan {
+        Ok(scan) => similar(&scan, items),
+        Err(_) => items
+            .iter()
+            .any(|item| matches!(item, ItemKey::Element(_)))
+            .then(|| UNREADABLE_SCAN.to_owned()),
+    }
 }
 
 /// Where the reference repository of `scan` uses each element of `items`, in their order: at most
@@ -493,7 +510,7 @@ mod similar {
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
-    use super::{NO_COMPARISON, assemble, similar};
+    use super::{NO_COMPARISON, UNREADABLE_SCAN, assemble, similar};
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     /// The heading of the part, which is there exactly when the part is.
@@ -635,7 +652,7 @@ mod similar {
     }
 
     #[test]
-    fn a_stock_taking_that_cannot_be_read_is_left_out_and_the_explanation_still_comes() {
+    fn a_stock_taking_that_cannot_be_read_is_said_so_at_the_end_and_the_explanation_still_comes() {
         let (_dir, profile) = profile_dir(Some("not = [toml"));
 
         let explanation = explain_beside(&profile, "dbg! prints a value.");
@@ -644,7 +661,10 @@ mod similar {
             explanation.starts_with("dbg! prints a value."),
             "{explanation}"
         );
-        assert!(!explanation.contains(HEADING), "{explanation}");
+        assert!(
+            explanation.ends_with(&format!("\n\n{UNREADABLE_SCAN}")),
+            "{explanation}"
+        );
     }
 
     #[test]
