@@ -161,7 +161,10 @@ fn user_wrote_makes_the_items_in_the_users_lines_known_with_wrote_it_as_the_prov
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(resolution.choice(), Choice::UserWrote);
     assert_eq!(resolution.items(), [key("dbg_macro")]);
@@ -187,7 +190,10 @@ fn user_wrote_hands_the_main_line_one_message_with_user_wrote_the_item_names_and
     client.push_chat(Ok(reply("done")));
     let before = user_messages(generate_requests(&client).last().unwrap());
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     let after = user_messages(generate_requests(&client).last().unwrap());
     assert_eq!(after.len(), before.len() + 1, "{after:?}");
@@ -227,7 +233,10 @@ fn at_a_crate_boundary_the_crate_the_user_added_to_cargo_toml_becomes_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     let entry = main_line.profile().entry(&key("crate:serde")).unwrap();
     assert_eq!(entry.status(), Status::Known);
@@ -261,7 +270,10 @@ fn a_crate_the_user_wrote_unlocks_its_other_spelling_in_the_profile_too() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     for spelling in ["crate:serde_json", "crate:serde-json"] {
         assert_eq!(
@@ -291,7 +303,10 @@ fn an_item_on_a_line_the_user_did_not_change_does_not_become_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(resolution.items(), [key("dbg_macro")]);
     assert_eq!(main_line.profile().status(&key("arc")), Status::Unknown);
@@ -330,7 +345,10 @@ fn a_failed_cargo_check_leaves_the_profile_unchanged_and_done_can_be_sent_again(
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(main_line.profile().status(&key("dbg_macro")), Status::Known);
 }
@@ -350,7 +368,10 @@ fn after_a_failed_cargo_check_the_user_can_switch_to_unlock_or_rewrite() {
 
         let resolution = side.resolve(choice, &SessionLog::disabled()).unwrap();
         client.push_chat(Ok(reply("done")));
-        main_line.resolve(&resolution, &mut Refuse).unwrap();
+        main_line
+            .resolve(&resolution, &mut Refuse)
+            .unwrap()
+            .resumed();
 
         let entry = main_line.profile().entry(&key("dbg_macro")).unwrap();
         assert_eq!(entry.provenance(), Provenance::SideLine, "{choice:?}");
@@ -511,7 +532,10 @@ fn the_files_the_user_wrote_join_the_changes_of_the_turn_with_their_content_from
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(resumed.turn.user_written, ["src/debug.rs", "src/main.rs"]);
     let changes: Vec<(&str, Option<&str>, &str)> = resumed
@@ -643,7 +667,10 @@ fn lines_with_no_item_new_to_the_profile_pass_and_make_nothing_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line.resolve(&resolution, &mut Refuse).unwrap();
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert!(resolution.items().is_empty());
     assert!(
@@ -681,7 +708,10 @@ fn a_file_molt_wrote_before_the_boundary_and_the_user_changed_keeps_its_content_
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(resumed.turn.user_written, ["src/lib.rs"]);
     let lib: Vec<(Option<&str>, &str)> = resumed
@@ -713,7 +743,10 @@ fn a_file_the_user_wrote_at_two_boundaries_of_a_turn_is_listed_once() {
             arguments: json!({ "items": ["arc"], "reason": "shared" }).to_string(),
         }],
     }));
-    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
     };
@@ -724,7 +757,10 @@ fn a_file_the_user_wrote_at_two_boundaries_of_a_turn_is_listed_once() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
 
     assert_eq!(resumed.turn.user_written, ["src/main.rs"]);
     let main: Vec<(Option<&str>, &str)> = resumed

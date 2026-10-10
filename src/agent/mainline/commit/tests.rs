@@ -1018,7 +1018,10 @@ fn a_turn_whose_only_change_is_what_the_user_wrote_in_3_gets_a_proposal_of_it() 
         panic!("/done did not pass");
     };
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Answer::no())
+        .unwrap()
+        .resumed();
     assert!(resumed.turn.written.is_empty(), "molt wrote nothing");
     client.push_chat(Ok(reply("Debug 1")));
     let mut answer = Answer::yes();
@@ -1048,7 +1051,10 @@ fn a_file_the_user_wrote_in_3_without_passing_done_is_not_among_the_files_molt_c
         .unwrap();
     client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Answer::no())
+        .unwrap()
+        .resumed();
     client.push_chat(Ok(reply("Add one")));
     let mut answer = Answer::yes();
 
@@ -1082,7 +1088,10 @@ fn lines_the_user_wrote_in_3_without_passing_done_come_along_when_molt_changes_t
         json!({ "path": "src/main.rs", "old_string": "fn main() {", "new_string": "fn main() {\n    println!(\"{}\", 1);" }),
     )));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Answer::no())
+        .unwrap()
+        .resumed();
     client.push_chat(Ok(reply("Print 1")));
     let mut answer = Answer::no();
 
@@ -1115,7 +1124,10 @@ fn a_file_the_user_wrote_in_3_before_switching_to_2_is_not_among_the_files_molt_
         .unwrap();
     client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    let resumed = main_line
+        .resolve(&resolution, &mut Answer::no())
+        .unwrap()
+        .resumed();
     client.push_chat(Ok(reply("Add one")));
     let mut answer = Answer::no();
 

@@ -12,7 +12,7 @@ use self::subline::Left;
 use super::profile;
 use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
 use crate::agent::mainline::{
-    AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
+    AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
 use crate::agent::subline::{Choice, Resolution, Unresolved};
@@ -343,29 +343,39 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
     }
 }
 
-/// Goes on with the turn held at the boundary as the user chose on the side line (UC3, §8.5):
-/// shows how the profile changed, then the rest of the turn as any turn. Returns the next boundary
-/// when the turn stops at one again.
+/// Hands the choice made on the side line to the main line (UC3, §8.5). While items of the
+/// boundary still wait for a choice, says so and returns them for the next side line. Once every
+/// item has one, shows how each choice changed the profile, then the rest of the turn as any turn,
+/// and returns the next boundary when the turn stops at one again.
 fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
-    let names = resolution
-        .items()
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join(", ");
-    match (resolution.choice(), resolution.policy()) {
-        (Choice::Rewrite, Some(policy)) => ui.show(&format!(
-            "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
-        )),
-        (Choice::UserWrote, _) if names.is_empty() => {
-            ui.show("Your lines use nothing your profile did not allow already.")
+    let resumed = match agent.resolve(resolution, &mut UiApprover::new(ui))? {
+        Resolved::Pending(pending) => {
+            ui.show(&format!(
+                "Chosen for {}: {}. The main line goes on once there is a choice for {} too.",
+                names(resolution.answers()),
+                chosen(resolution.choice()),
+                names(&pending.items)
+            ));
+            show_log_error(ui, agent);
+            return Some(pending);
         }
-        (Choice::UserWrote, _) => ui.show(&format!(
-            "Your profile allows {names} now (known: you wrote it)."
-        )),
-        _ => ui.show(&format!("Your profile allows {names} now (known).")),
+        Resolved::Resumed(resumed) => resumed,
+    };
+    for resolution in &resumed.chosen {
+        let names = names(resolution.items());
+        match (resolution.choice(), resolution.policy()) {
+            (Choice::Rewrite, Some(policy)) => ui.show(&format!(
+                "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
+            )),
+            (Choice::UserWrote, _) if names.is_empty() => {
+                ui.show("Your lines use nothing your profile did not allow already.")
+            }
+            (Choice::UserWrote, _) => ui.show(&format!(
+                "Your profile allows {names} now (known: you wrote it)."
+            )),
+            _ => ui.show(&format!("Your profile allows {names} now (known).")),
+        }
     }
-    let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
     if let Err(error) = &resumed.saved {
         ui.show(&format!(
             "Could not save the profile: {error}. The change holds for this session only."
@@ -380,6 +390,24 @@ fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Op
             show_log_error(ui, agent);
             None
         }
+    }
+}
+
+/// `arc, mutex`.
+fn names(items: &[ItemKey]) -> String {
+    items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// What the user chose, in the words of the choices on the side line.
+fn chosen(choice: Choice) -> &'static str {
+    match choice {
+        Choice::Unlock => "understand, then delegate",
+        Choice::Rewrite => "use a construct I know",
+        Choice::UserWrote => "write it myself",
     }
 }
 

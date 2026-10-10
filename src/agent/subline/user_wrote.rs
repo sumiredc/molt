@@ -136,6 +136,7 @@ impl SubLine<'_> {
         Done::Passed {
             resolution: Resolution {
                 choice: Choice::UserWrote,
+                answers: self.boundary.items.clone(),
                 items,
                 policy: None,
                 files,
@@ -160,7 +161,7 @@ impl SubLine<'_> {
             },
         ];
         let request = self.router.request(Role::Generate, messages);
-        log.record_request(&request);
+        log.record_sub_request(&request);
         Ok(self.client.chat(&request)?.content.unwrap_or_default())
     }
 }

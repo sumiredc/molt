@@ -21,7 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
-use super::subline::{Choice, Done, Resolution, SubLine};
+use super::subline::{Choice, Done, Resolution, SubLine, bundle};
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
@@ -104,14 +104,40 @@ struct Held {
     progress: Progress,
     /// The items the user chose ② for in this turn (PRD UC3), as [`checked_key`] spells them.
     rewritten: BTreeSet<ItemKey>,
-    /// Whether the boundary names an item of `rewritten`: it recurred after ② in the same turn.
-    recurred: bool,
+    /// The boundary the turn stopped at, with all its items.
+    boundary: Boundary,
+    /// The choices made so far on the side lines of `boundary`, in order. Nothing of them applies
+    /// until every item of `boundary` has a choice (PRD UC3).
+    chosen: Vec<Resolution>,
 }
 
-/// How the turn held at a boundary went on after the user's choice on the side line.
+/// What a choice on the side line came to.
+#[derive(Debug)]
+pub enum Resolved {
+    /// Items of the boundary still wait for a choice: these, for the next side line. Nothing has
+    /// changed yet: neither the profile nor the main line.
+    Pending(Boundary),
+    /// Every item of the boundary has a choice, and the turn went on.
+    Resumed(Box<Resumed>),
+}
+
+impl Resolved {
+    /// The resumed turn. Panics when items still wait for a choice.
+    #[cfg(test)]
+    pub(crate) fn resumed(self) -> Resumed {
+        match self {
+            Resolved::Resumed(resumed) => *resumed,
+            Resolved::Pending(boundary) => panic!("items still wait for a choice: {boundary:?}"),
+        }
+    }
+}
+
+/// How the turn held at a boundary went on after the user's choices on the side lines.
 #[derive(Debug)]
 pub struct Resumed {
-    /// Saving the profile changed by the choice, when the main line has a path to save it to.
+    /// The choices that went into the turn, in the order made.
+    pub chosen: Vec<Resolution>,
+    /// Saving the profile changed by the choices, when the main line has a path to save it to.
     pub saved: Result<(), StoreError>,
     /// The turn, from its start: the tool calls, files and changes before the boundary count.
     pub turn: Turn,
@@ -310,12 +336,21 @@ impl<'a> MainLine<'a> {
         &self.log
     }
 
-    /// Opens the side line (PRD UC3) at `boundary`, where this main line stopped. It gets the
-    /// boundary and the user's latest request, and nothing else of the main line's message list;
-    /// what is said on it does not come back here.
+    /// Opens the side line (PRD UC3) at `boundary`, where this main line stopped, for the items of
+    /// the category of its first item ([`bundle::first`]): the items of the other categories get
+    /// side lines of their own after it ([`MainLine::resolve`]). It gets those items, the cause of
+    /// the boundary and the user's latest request, and nothing else of the main line's message
+    /// list; what is said on it does not come back here.
     pub fn side_line(&self, boundary: Boundary) -> SubLine<'a> {
+        let boundary = bundle::first(boundary);
         let request = self.latest_request();
-        let recurred = self.held.as_ref().is_some_and(|held| held.recurred);
+        // ② was chosen in this turn for an item of the side line: the boundary recurred.
+        let recurred = self.held.as_ref().is_some_and(|held| {
+            boundary
+                .items
+                .iter()
+                .any(|item| held.rewritten.contains(&checked_key(item)))
+        });
         SubLine::open(
             self.client,
             self.router.clone(),
@@ -350,23 +385,146 @@ impl<'a> MainLine<'a> {
         &self.profile
     }
 
-    /// Goes on with the turn held at a boundary, as the user chose on the side line (PRD UC3,
-    /// §8.5): the profile changes (① `known` and ② `seen` with provenance `side_line`, ③ `known`
-    /// with `wrote_it`) and is saved, `resolution`'s message goes into the message list as the
-    /// only thing from the side line, and the same turn goes on. The files the user changed in ③
-    /// join the turn's changes. `None` when no turn is held at a boundary.
+    /// Takes the user's choice on a side line of the boundary the turn is held at (PRD UC3,
+    /// §8.5). While items of the boundary still wait for a choice, the choice is kept, nothing
+    /// changes, and those items come back for the next side line ([`Resolved::Pending`]). Once
+    /// every item has one, each choice in turn changes the profile (① `known` and ② `seen` with
+    /// provenance `side_line`, ③ `known` with `wrote_it`), which is saved, their messages go into
+    /// the message list as one message, the only thing from the side lines, and the same turn
+    /// goes on. The files the user changed in ③ join the turn's changes. An item counts as chosen
+    /// for when a choice was made on a side line opened for it, or when the user's lines of ③
+    /// used it, since it becomes `known` then. Once the choices stand, each of them, and each
+    /// change of the profile it made, goes to the session log with `line: "sub"` (PRD §8.8); a
+    /// choice dropped by withdrawing the request does not. `None` when no turn is held at a
+    /// boundary.
     pub fn resolve(
         &mut self,
         resolution: &Resolution,
         approver: &mut dyn Approver,
-    ) -> Option<Resumed> {
+    ) -> Option<Resolved> {
+        let held = self.held.as_mut()?;
+        held.chosen.push(resolution.clone());
+        let chosen: BTreeSet<ItemKey> = held
+            .chosen
+            .iter()
+            .flat_map(|resolution| {
+                let wrote = match resolution.choice() {
+                    Choice::UserWrote => resolution.items(),
+                    Choice::Unlock | Choice::Rewrite => &[],
+                };
+                resolution.answers().iter().chain(wrote).map(checked_key)
+            })
+            .collect();
+        let pending: Vec<ItemKey> = held
+            .boundary
+            .items
+            .iter()
+            .filter(|item| !chosen.contains(&checked_key(item)))
+            .cloned()
+            .collect();
+        if !pending.is_empty() {
+            return Some(Resolved::Pending(Boundary {
+                items: pending,
+                cause: held.boundary.cause.clone(),
+            }));
+        }
         let held = self.held.take()?;
+        let at = Timestamp::now();
+        for resolution in &held.chosen {
+            self.log.record(&Event::Choice {
+                choice: resolution.choice().name().to_owned(),
+                items: resolution
+                    .answers()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                policy: resolution.policy().map(str::to_owned),
+                files: resolution
+                    .files()
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect(),
+            });
+            self.apply(resolution, at);
+        }
+        let saved = match &self.profile_path {
+            Some(path) => self.profile.save(path),
+            None => Ok(()),
+        };
+        let mut rewritten = held.rewritten;
+        let mut changes = held.changes;
+        let mut user_written = held.user_written;
+        for resolution in &held.chosen {
+            if resolution.choice() == Choice::Rewrite {
+                rewritten.extend(resolution.items().iter().map(checked_key));
+            }
+            for file in resolution.files() {
+                let tools = &self.tools;
+                if !user_written
+                    .iter()
+                    .any(|path| tools.same_file(path, &file.path))
+                {
+                    user_written.push(file.path.clone());
+                }
+                // A file molt changed earlier in the turn keeps its content from before that.
+                match changes
+                    .iter_mut()
+                    .find(|c| tools.same_file(&c.path, &file.path))
+                {
+                    Some(change) => change.after = file.after.clone(),
+                    None => changes.push(file.clone()),
+                }
+            }
+        }
+        self.messages.push(Message::User {
+            content: held
+                .chosen
+                .iter()
+                .map(Resolution::message)
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        });
+        let turn = Turn {
+            end: TurnEnd::Finished,
+            tool_calls: held.tool_calls,
+            reply: None,
+            written: held.written,
+            compile_fixes: held.compile_fixes,
+            changes,
+            user_written,
+            crate_adds: Vec::new(),
+            check: None,
+            commits: Vec::new(),
+        };
+        let mut progress = Progress {
+            resend_asked: false,
+            broken: false,
+            ..held.progress
+        };
+        let wrote = |resolution: &Resolution| resolution.choice() == Choice::UserWrote;
+        if held.chosen.last().is_some_and(wrote) {
+            // `/done` passes only when `cargo check` passes, and it was the last thing done.
+            self.last_check = Some(true);
+        } else if held.chosen.iter().any(wrote) {
+            // A later side line came after the `/done` that passed, and a `/done` there may have
+            // failed on what is on the disk now: the end of the turn checks the build again.
+            progress.unchecked = true;
+        }
+        let turn = self.run(turn, progress, rewritten, approver);
+        Some(Resolved::Resumed(Box::new(Resumed {
+            chosen: held.chosen,
+            saved,
+            turn,
+        })))
+    }
+
+    /// Changes the profile as `resolution` chose, at `at`, and records each change.
+    fn apply(&mut self, resolution: &Resolution, at: Timestamp) {
         let (to, provenance) = match resolution.choice() {
             Choice::Unlock => (Status::Known, Provenance::SideLine),
             Choice::Rewrite => (Status::Seen, Provenance::SideLine),
             Choice::UserWrote => (Status::Known, Provenance::WroteIt),
         };
-        let at = Timestamp::now();
         let mut items: Vec<ItemKey> = resolution.items().to_vec();
         if to == Status::Known {
             // The check allows a crate only when every spelling of it in the profile (`-` or `_`)
@@ -389,68 +547,23 @@ impl<'a> MainLine<'a> {
             // Only these are changes, and PRD §7 allows each with `side_line` and `wrote_it`, so
             // none is refused.
             // ② leaves a `seen` item as it is, and ① a `known` one.
+            let from = self.profile.status(item);
             if matches!(
-                (self.profile.status(item), to),
+                (from, to),
                 (Status::Unknown, _) | (Status::Seen, Status::Known)
-            ) {
-                let _ = self
-                    .profile
-                    .transition(item.clone(), to, provenance, at, None);
-            }
-        }
-        let saved = match &self.profile_path {
-            Some(path) => self.profile.save(path),
-            None => Ok(()),
-        };
-        let mut rewritten = held.rewritten;
-        if resolution.choice() == Choice::Rewrite {
-            rewritten.extend(resolution.items().iter().map(checked_key));
-        }
-        if resolution.choice() == Choice::UserWrote {
-            // `/done` passes only when `cargo check` passes.
-            self.last_check = Some(true);
-        }
-        let mut changes = held.changes;
-        let mut user_written = held.user_written;
-        for file in resolution.files() {
-            let tools = &self.tools;
-            if !user_written
-                .iter()
-                .any(|path| tools.same_file(path, &file.path))
+            ) && self
+                .profile
+                .transition(item.clone(), to, provenance, at, None)
+                .is_ok()
             {
-                user_written.push(file.path.clone());
-            }
-            // A file molt changed earlier in the turn keeps its content from before that.
-            match changes
-                .iter_mut()
-                .find(|c| tools.same_file(&c.path, &file.path))
-            {
-                Some(change) => change.after = file.after.clone(),
-                None => changes.push(file.clone()),
+                self.log.record(&Event::ProfileChange {
+                    item: item.to_string(),
+                    from,
+                    to,
+                    provenance,
+                });
             }
         }
-        self.messages.push(Message::User {
-            content: resolution.message(),
-        });
-        let turn = Turn {
-            end: TurnEnd::Finished,
-            tool_calls: held.tool_calls,
-            reply: None,
-            written: held.written,
-            compile_fixes: held.compile_fixes,
-            changes,
-            user_written,
-            crate_adds: Vec::new(),
-            check: None,
-            commits: Vec::new(),
-        };
-        let progress = Progress {
-            resend_asked: false,
-            broken: false,
-            ..held.progress
-        };
-        let turn = self.run(turn, progress, rewritten, approver);
-        Some(Resumed { saved, turn })
     }
 
     /// The message list so far, starting with the system prompt.
@@ -503,10 +616,6 @@ impl<'a> MainLine<'a> {
             let end = self.converse(&mut turn, &mut progress, approver);
             if let Some(end) = self.end_turn(end, &mut turn, &mut progress, approver) {
                 if let TurnEnd::Boundary(boundary) = &end {
-                    let recurred = boundary
-                        .items
-                        .iter()
-                        .any(|item| rewritten.contains(&checked_key(item)));
                     self.held = Some(Held {
                         tool_calls: turn.tool_calls.clone(),
                         written: turn.written.clone(),
@@ -515,7 +624,8 @@ impl<'a> MainLine<'a> {
                         user_written: turn.user_written.clone(),
                         progress,
                         rewritten,
-                        recurred,
+                        boundary: boundary.clone(),
+                        chosen: Vec::new(),
                     });
                 } else {
                     self.absorb(&turn.changes, &progress.committed);

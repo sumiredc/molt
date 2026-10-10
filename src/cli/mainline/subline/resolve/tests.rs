@@ -345,3 +345,125 @@ fn choose_offers_1_and_3_only_at_a_boundary_recurring_after_2() {
         ]
     );
 }
+
+#[test]
+fn a_boundary_on_two_categories_asks_on_one_side_line_each_before_the_main_line_goes_on() {
+    let dir = project_with_a_profile();
+    let client = FakeChatClient::new();
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "boundary".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["arc", "dbg_macro", "mutex"], "reason": "needed" })
+                .to_string(),
+        }],
+    }));
+    client.push_chat(Ok(reply("explanation of arc and mutex")));
+    client.push_chat(Ok(reply("explanation of dbg!")));
+    client.push_chat(Ok(reply("done")));
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        [
+            input("share it"),
+            input("/choose"),
+            Step::Select(1),
+            input("/choose"),
+            Step::Select(1),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(
+        ui.asked(),
+        [
+            "molt> ",
+            "molt [sub: arc, mutex]> ",
+            "How do you want to go on?",
+            SUB,
+            "How do you want to go on?",
+            "molt> "
+        ]
+    );
+    let shown = ui.shown();
+    let pending = shown
+        .iter()
+        .position(|text| {
+            text == "Chosen for arc, mutex: understand, then delegate. The main line goes on once there is a choice for dbg_macro too."
+        })
+        .unwrap_or_else(|| panic!("{shown:?}"));
+    assert_eq!(
+        shown[pending + 1],
+        "── side line: dbg_macro ────────────────────────────────────"
+    );
+    let allowed = shown
+        .iter()
+        .position(|text| text == "Your profile allows arc, mutex now (known).")
+        .unwrap_or_else(|| panic!("{shown:?}"));
+    assert_eq!(
+        shown[allowed + 1],
+        "Your profile allows dbg_macro now (known)."
+    );
+    assert_eq!(shown[allowed + 2], "done");
+    assert_eq!(saved_status(&dir), Status::Known);
+    let message = last_main_line_input(&client);
+    assert_eq!(
+        message.matches("BOUNDARY RESOLVED: unlock").count(),
+        2,
+        "{message}"
+    );
+}
+
+#[test]
+fn ctrl_c_on_the_side_line_of_the_next_category_comes_back_to_it_and_abort_drops_the_choice_before()
+{
+    let dir = project_with_a_profile();
+    let client = FakeChatClient::new();
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: "boundary".to_owned(),
+            name: "request_boundary".to_owned(),
+            arguments: json!({ "items": ["arc", "dbg_macro"], "reason": "needed" }).to_string(),
+        }],
+    }));
+    client.push_chat(Ok(reply("explanation of arc")));
+    client.push_chat(Ok(reply("explanation of dbg!")));
+
+    let (code, ui) = run_in(
+        &dir,
+        &client,
+        [
+            input("share it"),
+            input("/choose"),
+            Step::Select(1),
+            Step::Interrupt,
+            input("/side"),
+            input("/abort"),
+            input("/quit"),
+        ],
+    );
+
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(
+        ui.asked(),
+        [
+            "molt> ",
+            "molt [sub: arc]> ",
+            "How do you want to go on?",
+            SUB,
+            "molt> ",
+            SUB,
+            "molt> "
+        ]
+    );
+    assert!(ui.shown().iter().any(|text| text == "Request withdrawn."));
+    assert_eq!(client.requests().len(), 3, "no request after the choice");
+    assert_eq!(
+        fs::read_to_string(dir.path().join("profile.toml")).unwrap(),
+        ""
+    );
+}
