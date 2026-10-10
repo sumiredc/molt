@@ -67,8 +67,9 @@ pub(crate) fn confirm(ui: &mut dyn Ui, profile: &mut Profile) -> Result<Confirme
 }
 
 /// The profile per category: each element that is not a base element with its status, its
-/// provenance and, for the Q&A, the reason of the judgement; then the crates, under the reference
-/// repository they came from (the same for every crate, so shown once); then the base elements.
+/// provenance and, for the Q&A, the reason of the judgement; then the crates, if there are any (with
+/// no `--repo` there are none), under the reference repository they came from (the same for every
+/// crate, so shown once); then the base elements.
 fn table(profile: &Profile) -> String {
     let width = Element::ALL
         .iter()
@@ -105,19 +106,23 @@ fn table(profile: &Profile) -> String {
             row(&mut text, &ItemKey::Element(element));
         }
     }
-    let repo = profile
+    let crates: Vec<&ItemKey> = profile
         .entries()
-        .find(|(_, entry)| entry.provenance() == Provenance::ReferenceRepo)
-        .and_then(|(_, entry)| entry.evidence());
-    match repo {
-        Some(repo) => writeln!(text, "crates (reference_repo: {repo})").unwrap(),
-        None => writeln!(text, "crates").unwrap(),
-    }
-    for (key, _) in profile
-        .entries()
-        .filter(|(key, _)| matches!(key, ItemKey::Crate(_)))
-    {
-        row(&mut text, key);
+        .map(|(key, _)| key)
+        .filter(|key| matches!(key, ItemKey::Crate(_)))
+        .collect();
+    if !crates.is_empty() {
+        let repo = profile
+            .entries()
+            .find(|(_, entry)| entry.provenance() == Provenance::ReferenceRepo)
+            .and_then(|(_, entry)| entry.evidence());
+        match repo {
+            Some(repo) => writeln!(text, "crates (reference_repo: {repo})").unwrap(),
+            None => writeln!(text, "crates").unwrap(),
+        }
+        for key in crates {
+            row(&mut text, key);
+        }
     }
     writeln!(text, "base elements (used regardless of status)").unwrap();
     for &element in Element::ALL.iter().filter(|&&e| profile.is_base(e)) {
