@@ -3,6 +3,8 @@
 //! repository.
 
 #[cfg(test)]
+mod repo_scan_tests;
+#[cfg(test)]
 mod tests;
 
 use std::fs;
@@ -10,10 +12,10 @@ use std::path::Path;
 
 use super::confirm::{self, Confirmed};
 use super::probe::{self, Judgement, Model, Stopped};
-use super::repo_scan::{self, RepoScan, Stored};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report, Timestamp};
+use crate::repo_scan::{self, RepoScan, Stored};
 use crate::ui::Ui;
 
 /// The answers offered for each category, in the order of [`REPORTS`].
@@ -78,7 +80,7 @@ pub fn init(
     };
 
     let at = Timestamp::now();
-    let scan = repo.and_then(|repo| repo_scan::take_stock(ui, repo, at));
+    let scan = repo.and_then(|repo| take_stock(ui, repo, at));
 
     let have_written: Vec<_> = reports
         .iter()
@@ -220,4 +222,33 @@ fn elements_of(category: Category) -> impl Iterator<Item = Element> {
         .iter()
         .copied()
         .filter(move |element| element.category() == category)
+}
+
+/// Takes stock of `repo` and tells the user the result. When `repo` cannot be used, says why and
+/// returns `None`: `molt init` goes on without a reference (UC1).
+fn take_stock(ui: &mut dyn Ui, repo: &Path, at: Timestamp) -> Option<RepoScan> {
+    match repo_scan::scan(repo, at) {
+        Ok(scan) => {
+            let mut message = format!(
+                "Took stock of {}: {} crates it depends on become known, {} elements are used in it.",
+                scan.repo,
+                scan.crates.len(),
+                scan.elements.len()
+            );
+            if !scan.skipped.is_empty() {
+                message.push_str(&format!(
+                    " {} files that could not be read were left out.",
+                    scan.skipped.len()
+                ));
+            }
+            ui.show(&message);
+            Some(scan)
+        }
+        Err(error) => {
+            ui.show(&format!(
+                "{error}; going on without a reference repository."
+            ));
+            None
+        }
+    }
 }

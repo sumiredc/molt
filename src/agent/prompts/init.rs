@@ -1,8 +1,8 @@
 //! What `molt init` says to the model in the Q&A (PRD UC1, §8.7): the `reason` model makes the
 //! questions and the `light` model judges the answers.
 
-use crate::onboarding::repo_scan::RepoScan;
 use crate::profile::element::{Category, Element};
+use crate::repo_scan::RepoScan;
 
 /// The system prompt of the questions (the `reason` model).
 pub const QUESTION_SYSTEM: &str = "\

@@ -3,4 +3,3 @@
 pub(crate) mod confirm;
 pub mod probe;
 pub mod questionnaire;
-pub(crate) mod repo_scan;

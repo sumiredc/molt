@@ -14,10 +14,10 @@ use std::collections::BTreeMap;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::repo_scan::RepoScan;
 use crate::agent::prompts::init::{self as prompts, Exchange};
 use crate::llm::{ChatClient, ChatError, JsonError, Message, Role, Router};
 use crate::profile::element::{Category, Element};
+use crate::repo_scan::RepoScan;
 use crate::ui::{Input, Ui};
 
 /// The questions asked per category at most: 1 question and 1 follow-up (PRD §8.4).

@@ -11,10 +11,10 @@ use std::path::Path;
 use crate::agent::mainline::Boundary;
 use crate::checker;
 use crate::checker::crates::crate_key;
-use crate::onboarding::repo_scan::{self, MAX_PLACES, RepoScan};
 use crate::profile::element::Element;
 use crate::profile::status::{ItemKey, Status};
 use crate::profile::store::Profile;
+use crate::repo_scan::{self, MAX_PLACES, RepoScan};
 
 /// Shown in place of the code without the items when the reply has none.
 pub(crate) const HARD_WITHIN_PROFILE: &str =
@@ -569,9 +569,9 @@ mod similar {
     use crate::agent::tools::{ApprovalRequest, Approver, Tools};
     use crate::config::Config;
     use crate::llm::{ChatResponse, FakeChatClient, Router, ToolCall};
-    use crate::onboarding::repo_scan::{self, Place, RepoScan};
     use crate::profile::status::ItemKey;
     use crate::profile::store::{Profile, Timestamp};
+    use crate::repo_scan::{self, Place, RepoScan};
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
@@ -843,9 +843,9 @@ mod short {
     use crate::agent::tools::Tools;
     use crate::config::Config;
     use crate::llm::{FakeChatClient, Router};
-    use crate::onboarding::repo_scan::{self, Place, RepoScan};
     use crate::profile::status::{ItemKey, Status};
     use crate::profile::store::Timestamp;
+    use crate::repo_scan::{self, Place, RepoScan};
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;

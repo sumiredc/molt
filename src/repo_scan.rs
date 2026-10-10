@@ -5,9 +5,9 @@
 //! `repo-scan.toml` exists exactly when the profile beside it was last saved by `molt init` with
 //! a usable reference repository. It is written or removed only together with that save, so
 //! declining to overwrite, interrupting, or failing before the save leaves it as it was.
-
-#[cfg(test)]
-mod tests;
+//!
+//! Nothing here talks to the user, so that both `onboarding`, which writes it, and `agent`, which
+//! reads it for the side line's explanation, can use it (PRD §8.2).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
@@ -22,7 +22,6 @@ use crate::checker::{crates, visitor};
 use crate::profile::element::Element;
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Timestamp, write_atomically};
-use crate::ui::Ui;
 
 /// The name of the stock-taking file, in the profile's directory.
 pub const FILE_NAME: &str = "repo-scan.toml";
@@ -161,35 +160,6 @@ pub fn scan(repo: &Path, at: Timestamp) -> Result<RepoScan, Unusable> {
     })
 }
 
-/// Takes stock of `repo` and tells the user the result. When `repo` cannot be used, says why and
-/// returns `None`: `molt init` goes on without a reference (UC1).
-pub fn take_stock(ui: &mut dyn Ui, repo: &Path, at: Timestamp) -> Option<RepoScan> {
-    match scan(repo, at) {
-        Ok(scan) => {
-            let mut message = format!(
-                "Took stock of {}: {} crates it depends on become known, {} elements are used in it.",
-                scan.repo,
-                scan.crates.len(),
-                scan.elements.len()
-            );
-            if !scan.skipped.is_empty() {
-                message.push_str(&format!(
-                    " {} files that could not be read were left out.",
-                    scan.skipped.len()
-                ));
-            }
-            ui.show(&message);
-            Some(scan)
-        }
-        Err(error) => {
-            ui.show(&format!(
-                "{error}; going on without a reference repository."
-            ));
-            None
-        }
-    }
-}
-
 /// Makes each crate of `scan` `known` in `profile`, by the reference repository, at `at`.
 /// A crate that already has another status is left as it is.
 pub fn mark_crates_known(
@@ -276,7 +246,7 @@ pub fn store(path: &Path, scan: Option<&RepoScan>) -> io::Result<Stored> {
 
 /// The file's text: the places of an element as one array, one place per line, rather than a
 /// `[[elements.<name>]]` table per place.
-fn to_toml(scan: &RepoScan) -> String {
+pub(crate) fn to_toml(scan: &RepoScan) -> String {
     let body = toml::to_string(scan).expect("every part of a stock-taking has a toml form");
     let mut doc: DocumentMut = body.parse().expect("toml writes toml");
     let mut elements = Table::new();
