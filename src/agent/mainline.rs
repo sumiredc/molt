@@ -376,6 +376,7 @@ impl<'a> MainLine<'a> {
             &self.profile,
         )
         .recurred(recurred)
+        .with_scan_beside(self.profile_path.as_deref())
     }
 
     /// What the user typed for the latest turn.

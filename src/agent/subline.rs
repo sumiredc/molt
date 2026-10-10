@@ -9,6 +9,7 @@ mod explain;
 mod user_wrote;
 
 use std::collections::BTreeMap;
+use std::path::Path;
 
 pub use user_wrote::{Done, Failure};
 
@@ -132,6 +133,9 @@ pub struct SubLine<'a> {
     /// What the model is asked for the comparison with the explanation, when the main line tried
     /// some code: written when the side line opened, from the profile then.
     compare: Option<String>,
+    /// Where the reference repository uses the items, from the stock-taking beside the profile,
+    /// shown after the comparison. `None` when there is no stock-taking.
+    similar: Option<String>,
     /// The system prompt, then the context and the explanation once it came, then each question
     /// and its answer.
     messages: Vec<Message>,
@@ -167,6 +171,7 @@ impl<'a> SubLine<'a> {
             recurred: false,
             context,
             compare,
+            similar: None,
             messages: vec![Message::System {
                 content: prompts::SIDE_LINE_SYSTEM.to_owned(),
             }],
@@ -177,6 +182,16 @@ impl<'a> SubLine<'a> {
     /// `recurred` is true.
     pub(crate) fn recurred(mut self, recurred: bool) -> Self {
         self.recurred = recurred;
+        self
+    }
+
+    /// The same side line, whose explanation shows where the reference repository uses the items,
+    /// from the stock-taking `molt init` kept beside the profile at `profile_path` (PRD UC3). It
+    /// is read now, as it was recorded at init. Without one, that part is left out.
+    pub(crate) fn with_scan_beside(mut self, profile_path: Option<&Path>) -> Self {
+        self.similar = profile_path
+            .and_then(explain::scan_beside)
+            .and_then(|scan| explain::similar(&scan, &self.boundary.items));
         self
     }
 
@@ -277,7 +292,7 @@ impl<'a> SubLine<'a> {
         };
         let user = Message::User { content };
         let answer = self.send(user.clone(), log)?;
-        let explanation = explain::assemble(&self.boundary, &answer);
+        let explanation = explain::assemble(&self.boundary, &answer, self.similar.as_deref());
         self.messages.push(user);
         self.messages.push(Message::Assistant {
             content: Some(answer),

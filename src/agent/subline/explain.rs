@@ -1,9 +1,14 @@
 //! The explanation the user is shown on opening the side line (PRD UC3): the idea of the items,
 //! then a comparison of the 2 ways to write it, the code the main line tried with the items and
-//! the code the `reason` model wrote without them.
+//! the code the `reason` model wrote without them, then where the reference repository uses the
+//! items, from the stock-taking `molt init` kept beside the profile.
+
+use std::fs;
+use std::path::Path;
 
 use crate::agent::mainline::Boundary;
 use crate::checker;
+use crate::onboarding::repo_scan::{self, MAX_PLACES, RepoScan};
 use crate::profile::element::Element;
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
@@ -37,8 +42,62 @@ pub(crate) fn allowed(profile: &Profile) -> Vec<ItemKey> {
 /// the prose of the reply, then the code the main line tried at `boundary` and the first code block
 /// of the reply, the code without the items. When the reply has no code block, or an empty one,
 /// [`HARD_WITHIN_PROFILE`] stands in for it. When the main line tried no code, the model was not
-/// asked for any, and [`NO_COMPARISON`] follows the reply as it is.
-pub(crate) fn assemble(boundary: &Boundary, reply: &str) -> String {
+/// asked for any, and [`NO_COMPARISON`] follows the reply as it is. `similar`, where the reference
+/// repository uses the items ([`similar`]), comes last when there is one.
+pub(crate) fn assemble(boundary: &Boundary, reply: &str, similar: Option<&str>) -> String {
+    let mut text = compare(boundary, reply);
+    if let Some(similar) = similar {
+        text.push_str("\n\n");
+        text.push_str(similar);
+    }
+    text
+}
+
+/// The stock-taking `molt init` kept beside the profile at `profile_path`, read as it is: the
+/// reference repository is not scanned again. `None` when there is none, or it cannot be read.
+pub(crate) fn scan_beside(profile_path: &Path) -> Option<RepoScan> {
+    let text = fs::read_to_string(repo_scan::path_beside(profile_path)).ok()?;
+    repo_scan::from_toml(&text).ok()
+}
+
+/// Where the reference repository of `scan` uses each element of `items`, in their order: at most
+/// [`MAX_PLACES`] places each, as path and line, said to be what `molt init` recorded. Each
+/// element comes once, and one the repository does not use is said to be so. `None` when `items`
+/// has no element: the stock-taking keeps no places for crates.
+pub(crate) fn similar(scan: &RepoScan, items: &[ItemKey]) -> Option<String> {
+    let mut elements: Vec<Element> = Vec::new();
+    for item in items {
+        if let ItemKey::Element(element) = item
+            && !elements.contains(element)
+        {
+            elements.push(*element);
+        }
+    }
+    if elements.is_empty() {
+        return None;
+    }
+    let mut text = format!(
+        "Where your reference repository uses them\n\
+         As `molt init` recorded {} at {}, not scanned again:",
+        scan.repo, scan.at
+    );
+    for element in elements {
+        let name = element.name();
+        let places = scan.elements.get(name).map_or(&[][..], Vec::as_slice);
+        if places.is_empty() {
+            text.push_str(&format!("\n`{name}`: not used there."));
+            continue;
+        }
+        text.push_str(&format!("\n`{name}`:"));
+        for place in places.iter().take(MAX_PLACES) {
+            text.push_str(&format!("\n  {}:{}", place.path, place.line));
+        }
+    }
+    Some(text)
+}
+
+/// The idea and the comparison of [`assemble`].
+fn compare(boundary: &Boundary, reply: &str) -> String {
     let Some(attempted) = boundary.attempted_code() else {
         let reply = reply.trim();
         return if reply.is_empty() {
@@ -409,5 +468,256 @@ mod compare {
             panic!("no explanation in the message list: {:?}", request.messages);
         };
         assert_eq!(content.as_deref(), Some(reply));
+    }
+}
+
+/// Tests of where the reference repository uses the items, in the explanation. The stock-taking
+/// is built by hand. Named so that `cargo test explain::similar` selects them.
+#[cfg(test)]
+mod similar {
+    use std::collections::BTreeMap;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use crate::agent::mainline::{Boundary, BoundaryCause, MainLine, TurnEnd};
+    use crate::agent::tools::{ApprovalRequest, Approver, Tools};
+    use crate::config::Config;
+    use crate::llm::{ChatResponse, FakeChatClient, Router, ToolCall};
+    use crate::onboarding::repo_scan::{self, Place, RepoScan};
+    use crate::profile::status::ItemKey;
+    use crate::profile::store::{Profile, Timestamp};
+    use crate::session::SessionLog;
+    use crate::workspace::cargo::FakeCargo;
+    use crate::workspace::path::Root;
+
+    use super::{NO_COMPARISON, assemble, similar};
+
+    const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
+    /// The heading of the part, which is there exactly when the part is.
+    const HEADING: &str = "Where your reference repository uses them";
+
+    struct Refuse;
+
+    impl Approver for Refuse {
+        fn confirm(&mut self, _request: &ApprovalRequest) -> bool {
+            false
+        }
+    }
+
+    fn places(path: &str, lines: &[usize]) -> Vec<Place> {
+        lines
+            .iter()
+            .map(|line| Place {
+                path: path.to_owned(),
+                line: *line,
+            })
+            .collect()
+    }
+
+    /// A stock-taking of a repository that is not on the disk, where each element of `elements`
+    /// has its places.
+    fn scan(elements: &[(&str, Vec<Place>)]) -> RepoScan {
+        RepoScan {
+            repo: "/no/such/reference".to_owned(),
+            at: Timestamp::from_unix_seconds(0),
+            crates: Vec::new(),
+            skipped: Vec::new(),
+            elements: elements
+                .iter()
+                .map(|(name, places)| ((*name).to_owned(), places.clone()))
+                .collect::<BTreeMap<_, _>>(),
+        }
+    }
+
+    fn items(names: &[&str]) -> Vec<ItemKey> {
+        names.iter().map(|name| name.parse().unwrap()).collect()
+    }
+
+    /// The lines of `text` from the heading of the part.
+    fn part(text: &str) -> Vec<&str> {
+        let at = text
+            .find(HEADING)
+            .unwrap_or_else(|| panic!("no part: {text}"));
+        text[at..].lines().collect()
+    }
+
+    /// The explanation of the side line at the boundary that the model's two `dbg!` writes stop a
+    /// turn at, with the profile saved at `profile_path`, and the `reason` model replying `reply`.
+    fn explain_beside(profile_path: &Path, reply: &str) -> String {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("Cargo.toml"),
+            "[package]\nname = \"demo\"\n",
+        )
+        .unwrap();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let client = FakeChatClient::new();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut main_line = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_profile_path(profile_path.to_owned());
+        for id in ["first", "second"] {
+            client.push_chat(Ok(ChatResponse {
+                content: None,
+                tool_calls: vec![ToolCall {
+                    id: id.to_owned(),
+                    name: "write_file".to_owned(),
+                    arguments: json!({ "path": "src/main.rs", "content": WITH_DBG }).to_string(),
+                }],
+            }));
+        }
+        let boundary = match main_line.turn("debug 1", &mut Refuse).end {
+            TurnEnd::Boundary(boundary) => boundary,
+            end => panic!("the turn did not stop at a boundary: {end:?}"),
+        };
+        let mut side = main_line.side_line(boundary);
+        client.push_chat(Ok(ChatResponse {
+            content: Some(reply.to_owned()),
+            tool_calls: Vec::new(),
+        }));
+        side.explain(&SessionLog::disabled()).unwrap()
+    }
+
+    /// Where the profile is saved, in a directory of its own, with `repo_scan_toml` beside it when
+    /// there is one.
+    fn profile_dir(repo_scan_toml: Option<&str>) -> (TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        if let Some(text) = repo_scan_toml {
+            fs::write(dir.path().join(repo_scan::FILE_NAME), text).unwrap();
+        }
+        let path = dir.path().join("profile.toml");
+        (dir, path)
+    }
+
+    #[test]
+    fn the_places_kept_beside_the_profile_follow_the_comparison_as_the_record_of_init() {
+        let kept = scan(&[("dbg_macro", places("src/lib.rs", &[3, 17]))]);
+        let (_dir, profile) = profile_dir(Some(&toml::to_string(&kept).unwrap()));
+
+        let explanation = explain_beside(
+            &profile,
+            "dbg! prints a value.\n\n```rust\nfn main() {}\n```",
+        );
+
+        let within = explanation
+            .find("Without them, within your profile:")
+            .unwrap();
+        assert!(within < explanation.find(HEADING).unwrap(), "{explanation}");
+        assert_eq!(
+            part(&explanation),
+            [
+                HEADING,
+                "As `molt init` recorded /no/such/reference at 1970-01-01T00:00:00Z, not scanned again:",
+                "`dbg_macro`:",
+                "  src/lib.rs:3",
+                "  src/lib.rs:17",
+            ]
+        );
+    }
+
+    #[test]
+    fn without_a_stock_taking_beside_the_profile_the_part_is_left_out() {
+        let (_dir, profile) = profile_dir(None);
+
+        let explanation = explain_beside(&profile, "dbg! prints a value.");
+
+        assert!(!explanation.contains(HEADING), "{explanation}");
+        assert!(!explanation.contains("molt init"), "{explanation}");
+    }
+
+    #[test]
+    fn a_stock_taking_that_cannot_be_read_is_left_out_and_the_explanation_still_comes() {
+        let (_dir, profile) = profile_dir(Some("not = [toml"));
+
+        let explanation = explain_beside(&profile, "dbg! prints a value.");
+
+        assert!(
+            explanation.starts_with("dbg! prints a value."),
+            "{explanation}"
+        );
+        assert!(!explanation.contains(HEADING), "{explanation}");
+    }
+
+    #[test]
+    fn at_most_three_places_of_an_element_are_shown() {
+        let kept = scan(&[("dbg_macro", places("src/lib.rs", &[1, 2, 3, 4, 5]))]);
+
+        let text = similar(&kept, &items(&["dbg_macro"])).unwrap();
+
+        assert_eq!(
+            part(&text)[2..],
+            [
+                "`dbg_macro`:",
+                "  src/lib.rs:1",
+                "  src/lib.rs:2",
+                "  src/lib.rs:3"
+            ]
+        );
+    }
+
+    #[test]
+    fn each_element_of_a_bundle_gets_its_own_places_once_in_the_order_of_the_boundary() {
+        let kept = scan(&[
+            ("arc", places("src/a.rs", &[10])),
+            ("mutex", places("src/m.rs", &[20, 21])),
+        ]);
+
+        let text = similar(&kept, &items(&["mutex", "arc", "mutex"])).unwrap();
+
+        assert_eq!(
+            part(&text)[2..],
+            [
+                "`mutex`:",
+                "  src/m.rs:20",
+                "  src/m.rs:21",
+                "`arc`:",
+                "  src/a.rs:10",
+            ]
+        );
+    }
+
+    #[test]
+    fn an_element_the_reference_repository_does_not_use_is_said_not_to_be_used() {
+        let kept = scan(&[("arc", places("src/a.rs", &[10]))]);
+
+        let text = similar(&kept, &items(&["arc", "mutex"])).unwrap();
+
+        assert_eq!(part(&text)[4..], ["`mutex`: not used there."]);
+    }
+
+    #[test]
+    fn a_boundary_of_crates_only_has_no_part() {
+        let kept = scan(&[("arc", places("src/a.rs", &[10]))]);
+
+        assert_eq!(similar(&kept, &items(&["crate:tokio"])), None);
+    }
+
+    #[test]
+    fn without_attempted_code_the_part_follows_the_note_that_there_is_no_comparison() {
+        let boundary = Boundary {
+            items: items(&["dbg_macro"]),
+            cause: BoundaryCause::Requested {
+                reason: "dbg! is for it".to_owned(),
+                proposed_code: None,
+            },
+        };
+        let kept = scan(&[("dbg_macro", places("src/lib.rs", &[3]))]);
+        let part = similar(&kept, &boundary.items).unwrap();
+
+        let explanation = assemble(&boundary, "dbg! prints a value.", Some(&part));
+
+        assert_eq!(
+            explanation,
+            format!("dbg! prints a value.\n\n{NO_COMPARISON}\n\n{part}")
+        );
     }
 }
