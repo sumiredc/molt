@@ -1,5 +1,6 @@
 //! The start of `molt init` (PRD UC1): the checks before anything is asked, the user's report
-//! per category, and saving the profile with the stock-taking of the reference repository.
+//! per category, and saving the profile, once confirmed, with the stock-taking of the reference
+//! repository.
 
 #[cfg(test)]
 mod tests;
@@ -7,6 +8,7 @@ mod tests;
 use std::fs;
 use std::path::Path;
 
+use super::confirm::{self, Confirmed};
 use super::probe::{self, Judgement, Model, Stopped};
 use super::repo_scan::{self, RepoScan, Stored};
 use crate::cli::ui::Ui;
@@ -39,11 +41,12 @@ pub enum Outcome {
 /// user says yes, and the user reports on each category. After the report, the reference
 /// repository `repo` (`--repo`) is taken stock of; when it cannot be used, that is said and init
 /// goes on without it. The model is called only for the categories reported "have written", in
-/// the Q&A ([`probe`]), whose judgements are saved as they are.
+/// the Q&A ([`probe`]). Before saving, the user confirms the profile and may correct it
+/// ([`confirm`]).
 ///
 /// The profile and `repo-scan.toml` beside it are written only at the end, together: an error
-/// (including an API failure during the Q&A), declining to overwrite or interrupting leaves both
-/// as they were.
+/// (including an API failure during the Q&A), declining to overwrite or interrupting (also at the
+/// confirmation) leaves both as they were.
 pub fn init(
     ui: &mut dyn Ui,
     profile_path: &Path,
@@ -92,11 +95,13 @@ pub fn init(
         }
     };
 
-    // TODO(#68): let the user confirm and correct the judgements before saving.
     let mut profile = from_reports(&reports, at)?;
     mark_judged_known(&mut profile, &judgements, at)?;
     if let Some(scan) = &scan {
         repo_scan::mark_crates_known(&mut profile, scan, at)?;
+    }
+    if confirm::confirm(ui, &mut profile)? == Confirmed::Interrupted {
+        return Ok(interrupted(ui));
     }
     save(ui, &profile, profile_path, scan.as_ref())?;
     Ok(Outcome::Saved)

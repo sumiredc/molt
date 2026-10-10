@@ -45,8 +45,12 @@ impl Setup {
     }
 }
 
+/// The steps that answer every category with `step`, and then save at the confirmation (an
+/// empty line).
 fn every_category(step: Step) -> Vec<Step> {
-    vec![step; Category::ALL.len()]
+    let mut steps = vec![step; Category::ALL.len()];
+    steps.push(Step::Input(String::new()));
+    steps
 }
 
 /// Runs `molt init` answering "don't know" everywhere, with `repo` as the reference repository.

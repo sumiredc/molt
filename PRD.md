@@ -309,7 +309,7 @@ What to read from the figure: there is no path to `known` by molt's judgement al
 ```mermaid
 flowchart TB
   cli["cli<br/>clap, Ui trait, rendering, commands"] --> agent["agent<br/>mainline, subline, tools, prompts"]
-  cli --> onboarding["onboarding<br/>questionnaire, probe, repo_scan"]
+  cli --> onboarding["onboarding<br/>questionnaire, probe, repo_scan, confirm"]
   agent --> workspace["workspace<br/>path confinement, cargo, git"]
   agent --> checker["checker<br/>visitor, diff, crates, finding"]
   agent --> llm["llm<br/>ChatClient, openai, router, fake"]

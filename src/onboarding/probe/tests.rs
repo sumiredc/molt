@@ -197,6 +197,8 @@ fn the_elements_of_a_have_written_category_are_known_by_qa_or_unknown_as_judged(
     ]));
     let mut steps = reports(&[Category::Ownership]);
     steps.push(answer("I clone strings and call to_owned on &str."));
+    // Saves at the confirmation as judged.
+    steps.push(answer(""));
 
     let before = unix_seconds();
     let (_, outcome) = run_init(steps, &client, &config(true), &path);
