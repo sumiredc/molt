@@ -120,7 +120,7 @@ fn ask(ui: &mut dyn Ui) -> Result<Option<Vec<(Category, Report)>>, String> {
     ui.show("For each category, choose how well you know it.");
     let mut reports = Vec::with_capacity(Category::ALL.len());
     for category in Category::ALL {
-        let names: Vec<_> = elements_of(category).map(Element::name).collect();
+        let names: Vec<_> = category.elements().map(Element::name).collect();
         ui.show(&format!("{category}: {}", names.join(", ")));
         let prompt = format!("How well do you know {category}?");
         match ui
@@ -141,7 +141,7 @@ fn from_reports(reports: &[(Category, Report)], at: Timestamp) -> Result<Profile
     for &(category, report) in reports {
         profile.set_report(category, report);
         if report == Report::CanRead {
-            for element in elements_of(category) {
+            for element in category.elements() {
                 profile
                     .transition(
                         ItemKey::Element(element),
@@ -215,13 +215,6 @@ fn save(
         }
     }
     Ok(())
-}
-
-fn elements_of(category: Category) -> impl Iterator<Item = Element> {
-    Element::ALL
-        .iter()
-        .copied()
-        .filter(move |element| element.category() == category)
 }
 
 /// Takes stock of `repo` and tells the user the result. When `repo` cannot be used, says why and

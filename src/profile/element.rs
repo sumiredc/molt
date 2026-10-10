@@ -56,6 +56,14 @@ impl Category {
             Category::Unsafe => "unsafe",
         }
     }
+
+    /// The elements of this category, in the order of [`Element::ALL`].
+    pub fn elements(self) -> impl Iterator<Item = Element> {
+        Element::ALL
+            .iter()
+            .copied()
+            .filter(move |element| element.category() == self)
+    }
 }
 
 impl fmt::Display for Category {

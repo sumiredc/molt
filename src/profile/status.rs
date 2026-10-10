@@ -251,11 +251,7 @@ pub(crate) fn parse_setting(key: &str, status: &str) -> Result<(ItemKey, Status)
 fn valid_inputs() -> String {
     let mut text = String::from("\nvalid keys:\n");
     for category in Category::ALL {
-        let names: Vec<_> = Element::ALL
-            .iter()
-            .filter(|element| element.category() == category)
-            .map(|element| element.name())
-            .collect();
+        let names: Vec<_> = category.elements().map(Element::name).collect();
         writeln!(text, "  {category}: {}", names.join(", ")).unwrap();
     }
     text.push_str("  crates: crate:<name>\n");

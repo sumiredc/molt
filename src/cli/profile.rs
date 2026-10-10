@@ -84,13 +84,6 @@ fn set(path: &Path, key: &str, status: &str) -> Result<(), String> {
     print(&format!("{key}: {status} ({})\n", Provenance::Manual))
 }
 
-fn elements_of(category: Category) -> impl Iterator<Item = Element> {
-    Element::ALL
-        .iter()
-        .copied()
-        .filter(move |element| element.category() == category)
-}
-
 /// The profile as `molt profile show` prints it: per category the status,
 /// provenance and time of each element that is not a base element, then the
 /// crates, then the base elements together, then the history.
@@ -123,7 +116,7 @@ fn render(profile: &Profile) -> String {
             Some(report) => writeln!(text, "{category} (report: {report})").unwrap(),
             None => writeln!(text, "{category}").unwrap(),
         }
-        for element in elements_of(category).filter(|&e| !profile.is_base(e)) {
+        for element in category.elements().filter(|&e| !profile.is_base(e)) {
             row(&mut text, &ItemKey::Element(element));
         }
     }
