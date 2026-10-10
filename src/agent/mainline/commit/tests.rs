@@ -261,7 +261,11 @@ fn a_git_commit_the_user_does_not_approve_adds_no_commit_and_stages_nothing() {
         " M src/main.rs\n",
         "the diff stays unstaged"
     );
-    assert_eq!(git_subcommands(&main_line), ["status"]);
+    assert_eq!(
+        git_subcommands(&main_line),
+        ["status", "diff"],
+        "only reads before the approval"
+    );
     assert!(
         result_of(&client, "commit").starts_with("not committed: the user did not approve"),
         "{}",
@@ -314,13 +318,13 @@ fn an_approved_git_commit_commits_only_the_files_molt_changed_and_runs_no_push()
     assert_eq!(last_commit_files(dir.path()), ["src/main.rs"]);
     assert_eq!(status(dir.path()), "");
     let subcommands = git_subcommands(&main_line);
-    assert_eq!(subcommands, ["status", "add", "commit"]);
+    assert_eq!(subcommands, ["status", "diff", "add", "commit"]);
     assert!(!subcommands.contains(&"push".to_owned()));
     assert!(result_of(&client, "commit").starts_with("committed: src/main.rs"));
 }
 
 #[test]
-fn the_proposal_shows_each_file_from_before_molt_changed_it_with_the_models_message() {
+fn the_proposal_shows_the_files_against_head_with_the_models_message() {
     let (dir, git) = repository();
     let client = FakeChatClient::new();
     let cargo = cargo(&[true, true]);
@@ -333,16 +337,107 @@ fn the_proposal_shows_each_file_from_before_molt_changed_it_with_the_models_mess
         panic!("{:?}", answer.asked);
     };
     assert_eq!(proposal.message, "Print 1");
-    assert_eq!(
-        proposal.files,
-        [Change {
-            path: "src/main.rs".to_owned(),
-            before: Some(MAIN.to_owned()),
-            after: PRINTS.to_owned(),
-        }]
+    assert_eq!(proposal.files, ["src/main.rs"]);
+    assert!(
+        proposal
+            .diff
+            .contains("-fn main() {}\n+fn main() {\n+    println!(\"{}\", 1);\n+}\n"),
+        "{}",
+        proposal.diff
     );
+    assert_eq!(proposal.new_files, Vec::<(String, String)>::new());
     assert_eq!(proposal.others, Vec::<String>::new());
     assert!(!proposal.check_failing);
+}
+
+#[test]
+fn a_change_the_user_made_before_molt_changed_the_file_is_in_the_diff_the_commit_records() {
+    let (dir, git) = repository();
+    fs::write(dir.path().join("src/main.rs"), "// mine\nfn main() {}\n").unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    client.push_chat(Ok(call(
+        "edit",
+        "edit_file",
+        json!({ "path": "src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() {\n    println!(\"{}\", 1);\n}" }),
+    )));
+    client.push_chat(Ok(reply("done")));
+    let turn = main_line.turn("print 1", &mut Answer::no());
+    client.push_chat(Ok(reply("Print 1")));
+    let mut answer = Answer::yes();
+
+    main_line.offer_commit(&turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert!(proposal.diff.contains("+// mine\n"), "{}", proposal.diff);
+    let committed = git_output(dir.path(), &["show", "--format=", "HEAD"]);
+    assert!(committed.contains("+// mine\n"), "{committed}");
+}
+
+#[test]
+fn a_file_git_does_not_track_is_shown_whole() {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let turn = write_turn(
+        &client,
+        &mut main_line,
+        "src/lib.rs",
+        "pub fn one() {}\n",
+        &mut Answer::no(),
+    );
+    client.push_chat(Ok(reply("Add one")));
+    let mut answer = Answer::no();
+
+    main_line.offer_commit(&turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert_eq!(proposal.diff, "");
+    assert_eq!(
+        proposal.new_files,
+        [("src/lib.rs".to_owned(), "pub fn one() {}\n".to_owned())]
+    );
+}
+
+#[test]
+fn in_a_repository_without_a_commit_every_file_is_shown_whole() {
+    let dir = project();
+    let git = init(dir.path());
+    run_git(dir.path(), &["add", "Cargo.toml", "Cargo.lock"]);
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let turn = write_turn(
+        &client,
+        &mut main_line,
+        "Cargo.toml",
+        &format!("{MANIFEST}# edited\n"),
+        &mut Answer::no(),
+    );
+    client.push_chat(Ok(reply("Edit the manifest")));
+    let mut answer = Answer::yes();
+
+    let outcome = main_line.offer_commit(&turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert_eq!(proposal.diff, "");
+    assert_eq!(
+        proposal.new_files,
+        [("Cargo.toml".to_owned(), format!("{MANIFEST}# edited\n"))]
+    );
+    assert!(
+        matches!(outcome, Some(CommitOutcome::Committed { .. })),
+        "{outcome:?}"
+    );
+    assert_eq!(log(dir.path()), ["Edit the manifest"]);
 }
 
 // Other changes (#22 condition 3)
@@ -695,12 +790,31 @@ fn after_a_finished_turn_that_wrote_and_passed_molt_proposes_the_generate_models
 }
 
 #[test]
+fn ctrl_c_while_waiting_for_the_message_drops_the_proposal() {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let turn = write_turn(
+        &client,
+        &mut main_line,
+        "src/main.rs",
+        PRINTS,
+        &mut Answer::no(),
+    );
+    client.push_chat(Err(ChatError::Interrupted));
+    let mut answer = Answer::yes();
+
+    assert_eq!(main_line.offer_commit(&turn, &mut answer), None);
+
+    assert!(answer.asked.is_empty());
+    assert_eq!(log(dir.path()), ["first"]);
+    assert_eq!(status(dir.path()), " M src/main.rs\n");
+}
+
+#[test]
 fn when_the_model_gives_no_message_the_proposal_has_the_fixed_one() {
-    for response in [
-        Err(ChatError::Interrupted),
-        Ok(reply("  ")),
-        Err(ChatError::FakeExhausted),
-    ] {
+    for response in [Ok(reply("  ")), Err(ChatError::FakeExhausted)] {
         let (dir, git) = repository();
         let client = FakeChatClient::new();
         let cargo = cargo(&[true]);
@@ -838,13 +952,13 @@ fn a_file_changed_again_after_its_commit_is_proposed_from_its_committed_content(
     let [proposal] = &answer.proposals()[..] else {
         panic!("{:?}", answer.asked);
     };
-    assert_eq!(
-        proposal.files,
-        [Change {
-            path: "src/main.rs".to_owned(),
-            before: Some(PRINTS.to_owned()),
-            after: PRINTS_2.to_owned(),
-        }]
+    assert_eq!(proposal.files, ["src/main.rs"]);
+    assert!(
+        proposal
+            .diff
+            .contains("-    println!(\"{}\", 1);\n+    println!(\"{}\", 2);\n"),
+        "{}",
+        proposal.diff
     );
 }
 
@@ -943,21 +1057,112 @@ fn a_file_the_user_wrote_in_3_without_passing_done_is_not_among_the_files_molt_c
     let [proposal] = &answer.proposals()[..] else {
         panic!("{:?}", answer.asked);
     };
-    let paths: Vec<&str> = proposal.files.iter().map(|f| f.path.as_str()).collect();
+    let paths = proposal.files.clone();
     assert_eq!(paths, ["src/lib.rs"]);
     assert_eq!(proposal.others, ["src/main.rs"]);
     assert_eq!(last_commit_files(dir.path()), ["src/lib.rs"]);
     assert_eq!(status(dir.path()), " M src/main.rs\n");
 }
 
+#[test]
+fn lines_the_user_wrote_in_3_without_passing_done_come_along_when_molt_changes_that_file_too() {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    let resolution = side
+        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(call(
+        "edit",
+        "edit_file",
+        json!({ "path": "src/main.rs", "old_string": "fn main() {", "new_string": "fn main() {\n    println!(\"{}\", 1);" }),
+    )));
+    client.push_chat(Ok(reply("done")));
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    client.push_chat(Ok(reply("Print 1")));
+    let mut answer = Answer::no();
+
+    main_line.offer_commit(&resumed.turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert_eq!(proposal.files, ["src/main.rs"]);
+    assert!(
+        proposal.diff.contains("+    dbg!(1);\n"),
+        "{}",
+        proposal.diff
+    );
+}
+
+#[test]
+fn a_file_the_user_wrote_in_3_before_switching_to_2_is_not_among_the_files_molt_changed() {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    // The policy of ② from the light model.
+    client.push_chat(Ok(reply("Print the value with println! instead.")));
+    let resolution = side
+        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
+    client.push_chat(Ok(reply("done")));
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    client.push_chat(Ok(reply("Add one")));
+    let mut answer = Answer::no();
+
+    main_line.offer_commit(&resumed.turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    let paths = proposal.files.clone();
+    assert_eq!(paths, ["src/lib.rs"]);
+    assert_eq!(proposal.others, ["src/main.rs"]);
+}
+
+#[test]
+fn a_file_the_user_wrote_in_3_before_withdrawing_the_request_is_not_among_the_files_molt_changed() {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = FakeCargo::new();
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let _side = main_line.side_line(boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    main_line.withdraw();
+    client.push_chat(Ok(git_commit("commit", "Debug 1")));
+    client.push_chat(Ok(reply("nothing")));
+    let mut answer = Answer::yes();
+
+    let turn = main_line.turn("commit it", &mut answer);
+
+    assert_eq!(turn.commits, [CommitOutcome::NothingToCommit]);
+    assert!(answer.asked.is_empty());
+    assert_eq!(status(dir.path()), " M src/main.rs\n");
+}
+
 // Reading git's and the model's output
 
 #[test]
-fn status_paths_reads_renames_and_quoted_paths() {
+fn status_entries_reads_renames_quoted_paths_and_untracked_files() {
     let status = " M src/main.rs\nR  old.rs -> new.rs\n?? \"caf\\303\\251.rs\"\n?? \"a\\\"b.rs\"\n";
     assert_eq!(
-        status_paths(status),
-        ["src/main.rs", "new.rs", "café.rs", "a\"b.rs"]
+        status_entries(status),
+        [
+            ("src/main.rs".to_owned(), false),
+            ("new.rs".to_owned(), false),
+            ("café.rs".to_owned(), true),
+            ("a\"b.rs".to_owned(), true)
+        ]
     );
 }
 

@@ -10,8 +10,11 @@ use crate::cli::ui::{Ui, UiApprover, UiError};
 /// interruption at any of them is no.
 pub(in crate::cli) fn confirm(ui: &mut dyn Ui, proposal: &CommitProposal) -> Result<bool, UiError> {
     ui.show("To commit:");
-    for file in &proposal.files {
-        let diff = diff::unified(&file.path, file.before.as_deref(), &file.after);
+    if !proposal.diff.trim().is_empty() {
+        ui.show(proposal.diff.trim_end());
+    }
+    for (path, content) in &proposal.new_files {
+        let diff = diff::unified(path, None, content);
         if !diff.is_empty() {
             ui.show(&diff);
         }

@@ -73,6 +73,18 @@ impl Git {
         self.execute(argv)
     }
 
+    /// `git diff HEAD -- <paths>`, without colour or an external diff program: what committing
+    /// `paths` as they are in the working tree records. Every path must resolve under the project
+    /// root; if one does not, git is not run. Fails when the repository has no commit yet.
+    pub fn diff_head(&self, paths: &[impl AsRef<Path>]) -> Result<GitOutput, GitError> {
+        let mut argv = argv(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--"]);
+        for path in paths {
+            let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
+            argv.push(resolved.into_os_string());
+        }
+        self.execute(argv)
+    }
+
     /// `git add -- <paths>`. Every path must resolve under the project root; if one does not,
     /// git is not run. A symlink is resolved first, so its target is staged, the file molt
     /// writes through it.
@@ -347,6 +359,31 @@ mod tests {
         assert!(output.success, "{}", output.stderr);
         assert!(output.stdout.contains("+staged\n"), "{}", output.stdout);
         assert!(!output.stdout.contains("tracked.txt"), "{}", output.stdout);
+    }
+
+    #[test]
+    fn diff_head_shows_the_given_paths_against_head_staged_or_not() {
+        let (dir, git) = repository_with_a_commit();
+        fs::write(dir.path().join("tracked.txt"), "staged\n").unwrap();
+        git.add(&["tracked.txt"]).unwrap();
+        fs::write(dir.path().join("tracked.txt"), "now\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
+        git.add(&["other.txt"]).unwrap();
+
+        let output = git.diff_head(&["tracked.txt"]).unwrap();
+
+        assert!(output.success, "{}", output.stderr);
+        assert!(output.stdout.contains("-old\n+now\n"), "{}", output.stdout);
+        assert!(!output.stdout.contains("other.txt"), "{}", output.stdout);
+    }
+
+    #[test]
+    fn diff_head_fails_without_a_commit() {
+        let (dir, git) = repository();
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git.add(&["a.txt"]).unwrap();
+
+        assert!(!git.diff_head(&["a.txt"]).unwrap().success);
     }
 
     #[test]

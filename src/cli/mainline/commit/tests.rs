@@ -351,6 +351,91 @@ fn a_commit_git_refuses_shows_the_error_and_that_the_files_stay_staged() {
     assert_eq!(status(dir.path()), "M  src/main.rs\n");
 }
 
+/// A [`ScriptedUi`] whose user writes `src/main.rs` in their editor right before `/done`.
+struct WritesOnDone {
+    ui: ScriptedUi,
+    path: std::path::PathBuf,
+    content: &'static str,
+}
+
+impl crate::cli::ui::Ui for WritesOnDone {
+    fn read_line(
+        &mut self,
+        prompt: &str,
+    ) -> Result<crate::cli::ui::Input, crate::cli::ui::UiError> {
+        let input = self.ui.read_line(prompt)?;
+        if matches!(&input, crate::cli::ui::Input::Line(line) if line == "/done") {
+            fs::write(&self.path, self.content).unwrap();
+        }
+        Ok(input)
+    }
+
+    fn show(&mut self, text: &str) {
+        self.ui.show(text);
+    }
+
+    fn select(
+        &mut self,
+        prompt: &str,
+        items: &[&str],
+    ) -> Result<Option<usize>, crate::cli::ui::UiError> {
+        self.ui.select(prompt, items)
+    }
+
+    fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, crate::cli::ui::UiError> {
+        self.ui.confirm(prompt)
+    }
+}
+
+#[test]
+fn after_the_user_wrote_it_in_3_molt_proposes_the_commit_once_the_turn_goes_on_and_ends() {
+    const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
+    let (dir, git) = repository(init);
+    let client = FakeChatClient::new();
+    for id in ["first", "second"] {
+        client.push_chat(Ok(call(
+            id,
+            "write_file",
+            json!({ "path": "src/main.rs", "content": WITH_DBG }),
+        )));
+    }
+    for text in [
+        "explanation",
+        "Write dbg!(1) in main.",
+        "Good use of dbg!.",
+        "The request is done.",
+        "Debug 1",
+    ] {
+        client.push_chat(Ok(reply(text)));
+    }
+    let cargo = cargo(&[true]);
+    let tools = Tools::with_git(Root::new(dir.path()).unwrap(), &cargo, git);
+    let mut agent = MainLine::new(
+        &client,
+        Router::new(&Config::default()),
+        tools,
+        Profile::new(),
+    );
+    let mut ui = WritesOnDone {
+        ui: ScriptedUi::new([
+            input("debug 1"),
+            input("/choose"),
+            Step::Select(3),
+            input("/done"),
+            Step::Confirm(true),
+            input("/quit"),
+        ]),
+        path: dir.path().join("src/main.rs"),
+        content: WITH_DBG,
+    };
+
+    let code = main_line(&mut ui, &mut agent);
+
+    assert_eq!(code, ExitCode::SUCCESS, "{:?}", ui.ui.shown());
+    assert!(shows(ui.ui.shown(), "To commit:"), "{:?}", ui.ui.shown());
+    assert_eq!(log(dir.path()), ["Debug 1", "first"]);
+}
+
 #[test]
 fn git_commit_outside_a_git_repository_says_so_and_asks_nothing() {
     let dir = project();

@@ -10,17 +10,22 @@ use serde_json::{Map, Value};
 use super::{Change, MainLine, Next, Progress, Turn, TurnEnd};
 use crate::agent::prompts;
 use crate::agent::tools::{ApprovalRequest, Approver, GitCommitArgs, ToolError};
-use crate::llm::{Message, Role};
+use crate::llm::{ChatError, Message, Role};
 use crate::workspace::approve;
 
-/// A commit molt asks the user to approve (UC4).
+/// A commit molt asks the user to approve (UC4). What it shows is what the commit records: each
+/// file as it is now against `HEAD`, changes the user made to it before molt did included.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommitProposal {
     pub message: String,
     /// The files to commit: the files molt changed and has not committed that git sees changed,
-    /// in the order first changed, each with its content from before molt first changed it (or
-    /// from its last commit) and now.
-    pub files: Vec<Change>,
+    /// in the order first changed.
+    pub files: Vec<String>,
+    /// What `git diff HEAD` prints for the files to commit that git tracks.
+    pub diff: String,
+    /// The files to commit that git does not track yet, or all of them when the repository has
+    /// no commit yet, with their content: the commit records them whole.
+    pub new_files: Vec<(String, String)>,
     /// The other changes git sees, staged or not, as `git status` names them. They are neither
     /// staged nor committed.
     pub others: Vec<String>,
@@ -73,8 +78,8 @@ impl MainLine<'_> {
         let mut candidates = self.uncommitted.clone();
         merge(self, &mut candidates, &turn.changes, &progress.committed);
         let outcome = match self.stageable(candidates) {
-            Ok((files, others)) => {
-                let outcome = self.propose(args.message, files, others, approver);
+            Ok(stageable) => {
+                let outcome = self.propose(args.message, stageable, approver);
                 if let CommitOutcome::Committed { files, .. } = &outcome {
                     for path in files {
                         if let Some(content) = self.tools.read(path) {
@@ -96,7 +101,8 @@ impl MainLine<'_> {
     /// answered there), and the last `cargo check` passed. The message comes from the `generate`
     /// model, or is a fixed one when the model cannot give one. `None` when there is nothing to
     /// propose: those do not hold, the project is not in a git repository, or nothing molt changed
-    /// differs from what git has.
+    /// differs from what git has; and when the user pressed Ctrl-C while molt waited for the
+    /// message, which drops the proposal.
     pub fn offer_commit(
         &mut self,
         turn: &Turn,
@@ -109,9 +115,9 @@ impl MainLine<'_> {
         {
             return None;
         }
-        let (files, others) = self.stageable(self.uncommitted.clone()).ok()?;
-        let message = self.commit_message(&files);
-        Some(self.propose(message, files, others, approver))
+        let stageable = self.stageable(self.uncommitted.clone()).ok()?;
+        let message = self.commit_message(&stageable.files)?;
+        Some(self.propose(message, stageable, approver))
     }
 
     /// Merges `changes` into the uncommitted files. A file committed in the turn (`committed`)
@@ -124,10 +130,7 @@ impl MainLine<'_> {
 
     /// Splits what git sees changed into the `candidates` it sees changed, with their content
     /// now, and the other paths.
-    fn stageable(
-        &self,
-        mut candidates: Vec<Change>,
-    ) -> Result<(Vec<Change>, Vec<String>), CommitOutcome> {
+    fn stageable(&self, mut candidates: Vec<Change>) -> Result<Stageable, CommitOutcome> {
         let status = match self.tools.git().status() {
             Ok(output) if output.success => output.stdout,
             Ok(output) => {
@@ -142,7 +145,8 @@ impl MainLine<'_> {
                 });
             }
         };
-        let changed = status_paths(&status);
+        let entries = status_entries(&status);
+        let changed: Vec<String> = entries.iter().map(|(path, _)| path.clone()).collect();
         let tools = &self.tools;
         for candidate in &mut candidates {
             if let Some(now) = tools.read(&candidate.path) {
@@ -153,33 +157,68 @@ impl MainLine<'_> {
         if candidates.is_empty() {
             return Err(CommitOutcome::NothingToCommit);
         }
+        let untracked = candidates
+            .iter()
+            .map(|c| {
+                entries
+                    .iter()
+                    .any(|(path, new)| *new && tools.same_file(path, &c.path))
+            })
+            .collect();
         let others = changed
             .into_iter()
             .filter(|path| !candidates.iter().any(|c| tools.same_file(path, &c.path)))
             .collect();
-        Ok((candidates, others))
+        Ok(Stageable {
+            files: candidates,
+            untracked,
+            others,
+        })
     }
 
-    /// Asks the user to approve committing `files` with `message`, and stages and commits only
-    /// them if the user does.
+    /// Shows the user what committing `stageable` with `message` records, and stages and commits
+    /// only its files if the user approves.
     fn propose(
         &mut self,
         message: String,
-        files: Vec<Change>,
-        others: Vec<String>,
+        stageable: Stageable,
         approver: &mut dyn Approver,
     ) -> CommitOutcome {
+        let git = self.tools.git();
+        let (tracked, new): (Vec<_>, Vec<_>) = stageable
+            .files
+            .iter()
+            .zip(&stageable.untracked)
+            .partition(|(_, untracked)| !**untracked);
+        let tracked: Vec<&str> = tracked.iter().map(|(c, _)| c.path.as_str()).collect();
+        let mut new: Vec<&Change> = new.into_iter().map(|(c, _)| c).collect();
+        let diff = if tracked.is_empty() {
+            String::new()
+        } else {
+            match git.diff_head(&tracked) {
+                Ok(output) if output.success => output.stdout,
+                // No `HEAD` yet: every file is recorded whole.
+                _ => {
+                    new = stageable.files.iter().collect();
+                    String::new()
+                }
+            }
+        };
         let proposal = CommitProposal {
             message,
-            files,
-            others,
+            files: stageable.files.iter().map(|c| c.path.clone()).collect(),
+            diff,
+            new_files: new
+                .into_iter()
+                .map(|c| (c.path.clone(), c.after.clone()))
+                .collect(),
+            others: stageable.others,
             check_failing: self.last_check != Some(true),
         };
         if !approver.confirm(&ApprovalRequest::GitCommit(proposal.clone())) {
             return CommitOutcome::NotApproved;
         }
-        let paths: Vec<&str> = proposal.files.iter().map(|f| f.path.as_str()).collect();
-        let git = self.tools.git();
+        let paths: Vec<&str> = proposal.files.iter().map(String::as_str).collect();
         match git.add(&paths) {
             Ok(output) if output.success => {}
             Ok(output) => {
@@ -220,8 +259,9 @@ impl MainLine<'_> {
     }
 
     /// The message of a commit of `files` from the `generate` model, or a fixed one when it fails
-    /// or gives none (Ctrl-C while waiting for it included).
-    fn commit_message(&self, files: &[Change]) -> String {
+    /// or gives none. `None` after Ctrl-C while waiting for it: the user stopped the request, as
+    /// on the main line.
+    fn commit_message(&self, files: &[Change]) -> Option<String> {
         let messages = vec![
             Message::System {
                 content: prompts::COMMIT_MESSAGE_SYSTEM.to_owned(),
@@ -232,14 +272,26 @@ impl MainLine<'_> {
         ];
         let request = self.router.request(Role::Generate, messages);
         self.log.record_request(&request);
-        self.client
-            .chat(&request)
-            .ok()
-            .and_then(|response| response.content)
-            .map(|content| unfenced(&content))
-            .filter(|message| !message.is_empty())
-            .unwrap_or_else(|| prompts::fixed_commit_message(files))
+        let content = match self.client.chat(&request) {
+            Err(ChatError::Interrupted) => return None,
+            Ok(response) => response.content,
+            Err(_) => None,
+        };
+        Some(
+            content
+                .map(|content| unfenced(&content))
+                .filter(|message| !message.is_empty())
+                .unwrap_or_else(|| prompts::fixed_commit_message(files)),
+        )
     }
+}
+
+/// The files molt changed that git sees changed, in the order first changed, whether git tracks
+/// each, and the other paths git sees changed.
+struct Stageable {
+    files: Vec<Change>,
+    untracked: Vec<bool>,
+    others: Vec<String>,
 }
 
 /// Merges `changes` into `into`: a file already there keeps its content from before and takes the
@@ -299,17 +351,19 @@ fn unfenced(content: &str) -> String {
     inner.trim().to_owned()
 }
 
-/// The paths in the output of `git status --porcelain=v1`: the new path of a rename, and paths in
-/// quotes unquoted.
-fn status_paths(status: &str) -> Vec<String> {
+/// The paths in the output of `git status --porcelain=v1`, each with whether git does not track
+/// it (`??`): the new path of a rename, and paths in quotes unquoted.
+fn status_entries(status: &str) -> Vec<(String, bool)> {
     status
         .lines()
-        .filter_map(|line| line.get(3..))
-        .map(|path| match path.split_once(" -> ") {
-            Some((_, to)) => to,
-            None => path,
+        .filter_map(|line| Some((line.get(3..)?, line.starts_with("??"))))
+        .map(|(path, untracked)| {
+            let path = match path.split_once(" -> ") {
+                Some((_, to)) => to,
+                None => path,
+            };
+            (unquote(path), untracked)
         })
-        .map(unquote)
         .collect()
 }
 
