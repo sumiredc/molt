@@ -1,5 +1,5 @@
-//! The start of `molt init` (PRD UC1): the checks before anything is asked, and the user's report
-//! per category.
+//! The start of `molt init` (PRD UC1): the checks before anything is asked, the user's report
+//! per category, and saving the profile with the stock-taking of the reference repository.
 
 #[cfg(test)]
 mod tests;
@@ -7,6 +7,7 @@ mod tests;
 use std::fs;
 use std::path::Path;
 
+use super::repo_scan::{self, RepoScan, Stored};
 use crate::cli::ui::Ui;
 use crate::llm::ChatClient;
 use crate::profile::element::{Category, Element};
@@ -35,17 +36,23 @@ pub enum Outcome {
 /// `client` is the result of creating the client for the configured endpoint. When it could not
 /// be created (e.g. the endpoint needs an API key and its environment variable is unset), nothing
 /// is asked and no profile is created. Otherwise an existing profile is overwritten only when the
-/// user says yes, and the user reports on each category. The model is called only for the
-/// categories reported "have written".
+/// user says yes, and the user reports on each category. After the report, the reference
+/// repository `repo` (`--repo`) is taken stock of; when it cannot be used, that is said and init
+/// goes on without it. The model is called only for the categories reported "have written".
 ///
-/// An error leaves the profile as it was.
+/// The profile and `repo-scan.toml` beside it are written only at the end, together: an error,
+/// declining to overwrite or interrupting leaves both as they were.
 pub fn init(
     ui: &mut dyn Ui,
     profile_path: &Path,
     client: Result<&dyn ChatClient, String>,
+    repo: Option<&Path>,
 ) -> Result<Outcome, String> {
     // The Q&A (#67) asks the categories reported "have written" through this client.
     let _client = client?;
+    // Checked again just before saving; here so that the user is not asked anything in vain.
+    repo_scan::check_target(&repo_scan::path_beside(profile_path))
+        .map_err(|error| format!("{error}; no profile was saved"))?;
 
     if profile_path.exists() {
         let question = format!(
@@ -66,6 +73,10 @@ pub fn init(
         return Ok(interrupted(ui));
     };
 
+    let at = Timestamp::now();
+    // TODO(#67): pass the elements found in the reference repository to the questions.
+    let scan = repo.and_then(|repo| repo_scan::take_stock(ui, repo, at));
+
     let have_written: Vec<_> = reports
         .iter()
         .filter(|(_, report)| *report == Report::HaveWritten)
@@ -79,9 +90,11 @@ pub fn init(
         ));
     }
 
-    let profile = from_reports(&reports, Timestamp::now())?;
-    save(&profile, profile_path)?;
-    ui.show(&format!("Saved the profile to {}.", profile_path.display()));
+    let mut profile = from_reports(&reports, at)?;
+    if let Some(scan) = &scan {
+        repo_scan::mark_crates_known(&mut profile, scan, at)?;
+    }
+    save(ui, &profile, profile_path, scan.as_ref())?;
     Ok(Outcome::Saved)
 }
 
@@ -133,14 +146,43 @@ fn from_reports(reports: &[(Category, Report)], at: Timestamp) -> Result<Profile
     Ok(profile)
 }
 
-/// Saves `profile` at `path`, creating its directory first: molt's directory may not exist yet
-/// on the first `molt init`.
-fn save(profile: &Profile, path: &Path) -> Result<(), String> {
+/// Saves `profile` at `path` and makes `repo-scan.toml` beside it match: `scan` when there is
+/// one, no file when there is none. The directory is created first: molt's directory may not
+/// exist yet on the first `molt init`. A `repo-scan.toml` that molt did not write stops the save
+/// before anything is written.
+fn save(
+    ui: &mut dyn Ui,
+    profile: &Profile,
+    path: &Path,
+    scan: Option<&RepoScan>,
+) -> Result<(), String> {
+    let scan_path = repo_scan::path_beside(path);
+    repo_scan::check_target(&scan_path)
+        .map_err(|error| format!("{error}; no profile was saved"))?;
     if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
         fs::create_dir_all(dir)
             .map_err(|error| format!("cannot create {}: {error}", dir.display()))?;
     }
-    profile.save(path).map_err(|error| error.to_string())
+    profile.save(path).map_err(|error| error.to_string())?;
+    ui.show(&format!("Saved the profile to {}.", path.display()));
+    match repo_scan::store(&scan_path, scan) {
+        Ok(Stored::Written) => ui.show(&format!(
+            "Saved the stock-taking of the reference repository to {}.",
+            scan_path.display()
+        )),
+        Ok(Stored::Removed) => ui.show(&format!(
+            "Removed {}: the new profile has no reference repository.",
+            scan_path.display()
+        )),
+        Ok(Stored::Nothing) => {}
+        Err(error) => {
+            return Err(format!(
+                "the profile was saved, but {} could not be updated: {error}; run `molt init` again",
+                scan_path.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn elements_of(category: Category) -> impl Iterator<Item = Element> {

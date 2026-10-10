@@ -477,7 +477,9 @@ fn resolve_links(path: &Path, depth: u32) -> io::Result<PathBuf> {
 /// Distinguishes temporary files of concurrent saves within one process.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
+/// Writes `contents` to `target` through a temporary file in the same directory and a rename,
+/// so a failure leaves the previous file as it was.
+pub(crate) fn write_atomically(target: &Path, contents: &[u8]) -> io::Result<()> {
     let dir = match target.parent() {
         Some(dir) if !dir.as_os_str().is_empty() => dir,
         _ => Path::new("."),

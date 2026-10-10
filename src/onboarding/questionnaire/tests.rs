@@ -59,7 +59,7 @@ fn elements_of(category: Category) -> impl Iterator<Item = Element> {
 }
 
 fn run(ui: &mut ScriptedUi, path: &Path, client: &FakeChatClient) -> Result<Outcome, String> {
-    init(ui, path, Ok(client))
+    init(ui, path, Ok(client), None)
 }
 
 #[test]
@@ -163,6 +163,7 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
             .as_ref()
             .map(|c| c as &dyn ChatClient)
             .map_err(Clone::clone),
+        None,
     );
     let error = result.unwrap_err();
     assert!(error.contains("MOLT_TEST_MISSING_API_KEY"), "{error}");
