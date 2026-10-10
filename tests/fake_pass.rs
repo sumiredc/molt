@@ -2,8 +2,9 @@
 //! a rejection → a boundary → the side line → ① → a write → `cargo check` → an approved commit.
 //!
 //! The binary runs as a user runs it, with the model's side from `--fake` and the user's side
-//! from `--ui-script` (`tests/fixtures/fake_pass/`). `cargo` and `git` are the real ones, on a
-//! cargo project with a git repository in a tempdir, so nothing here needs the network.
+//! from `--ui-script` (`examples/fake/one_pass.toml` and `tests/fixtures/fake_pass/ui.toml`).
+//! `cargo` and `git` are the real ones, on a cargo project with a git repository in a tempdir, so
+//! nothing here needs the network.
 
 mod common;
 
@@ -57,7 +58,7 @@ fn one_pass_from_a_request_through_a_boundary_and_unlock_ends_in_one_approved_co
         .arg("--ui-script")
         .arg(in_repository("tests/fixtures/fake_pass/ui.toml"))
         .arg("--fake")
-        .arg(in_repository("tests/fixtures/fake_pass/fake.toml"))
+        .arg(in_repository("examples/fake/one_pass.toml"))
         .output()
         .unwrap();
 

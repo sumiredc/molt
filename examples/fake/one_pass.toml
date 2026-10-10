@@ -1,0 +1,44 @@
+# molt --fake の台本の見本。モデルの代わりに、molt が送るリクエストへ上から順に 1 つずつ答える。
+# 依頼 → 却下 → 境界 → 副線 → ① → 書き込み → cargo check → commit 承認、の 1 周を通す。
+# 依頼の文は読まないので、何を頼んでもこの台本どおりに src/main.rs が書き換わる。
+#
+# 合わせるプロファイルは同じディレクトリの profile.toml（dbg_macro が known でないもの）。
+# 1 周で利用者が入力するもの:
+#   1. molt> に依頼を書く（例: Print 1 to stderr with dbg! in src/main.rs.）
+#   2. 副線の molt [sub: dbg_macro]> に /choose
+#   3. 3 択に 1（① 理解して任せる）
+#   4. Commit with this message? に y
+#   5. molt> に /quit
+# 作業ツリーに molt が変えていない変更があると、4 の前に
+# "Stage and commit only the files molt changed?" が出る。y で molt の変えたファイルだけを commit する。
+#
+# tests/fake_pass.rs がこの台本で 1 周を通す。応答を変えたらテストも直す。
+
+# 本線: dbg_macro が known でないプロファイルでは dbg! を使えないので、molt はこの書き込みを却下する。
+[[responses]]
+tool_calls = [
+  { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
+]
+
+# 書き直しも dbg! を使う。2 回目の却下でターンが境界で止まる。
+[[responses]]
+tool_calls = [
+  { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    let _ = dbg!(1);\n}\n" } },
+]
+
+# 副線での dbg_macro の説明。
+[[responses]]
+content = "`dbg!` prints the value of an expression with its file and line to stderr, and returns the value."
+
+# ① の後、同じターンが続く。dbg! が known になったので、書き込みが通る。
+[[responses]]
+tool_calls = [
+  { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
+]
+
+[[responses]]
+tool_calls = [{ name = "finish", arguments = { summary = "Printed 1 with `dbg!`." } }]
+
+# cargo check が通った後に molt が提案する commit メッセージ。
+[[responses]]
+content = "Print 1 with dbg!"
