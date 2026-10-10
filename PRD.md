@@ -243,9 +243,9 @@ What to read from the figure: an element becomes `known` only through ① and �
 
 A commit contains only what the user approved after seeing the diff and the proposed message.
 
-- Precondition: molt has written, and `cargo check` passes. The current directory is a git repository
-- Main flow: the user asks (or molt proposes) → molt shows the diff of the files it changed (including `Cargo.toml` and `Cargo.lock` changed by `cargo add`) and a proposed message → approval → stage only that content and commit. The files molt changed also include the files the user wrote in ③ on the side line (UC3); their lines go into the diff and the commit as part of one change
-- Alternative flow: other unstaged changes are mixed in → report it and confirm with the user whether to stage only the files molt changed
+- Precondition: molt has written (the files the user wrote in ③ count as written), and `cargo check` passes. The current directory is a git repository
+- Main flow: the user asks (or molt proposes) → molt shows the diff of the files it changed (including `Cargo.toml` and `Cargo.lock` changed by `cargo add`) and a proposed message → approval → stage only that content and commit. The files molt changed also include the files the user wrote in ③ on the side line (UC3); their lines go into the diff and the commit as part of one change. A file changed in ③ that never passed `/done` (the user switched to ① or ② or withdrew the request) is not among them unless molt changed it too. molt proposes at the end of a turn that changed files, when the model is done and the last `cargo check` passes, in a git repository with something to commit; otherwise it proposes nothing and says nothing. The proposed message comes from the generate model, or is `molt: <the files>` when the model cannot give one
+- Alternative flow: other changes, unstaged or staged, are mixed in → report them and confirm with the user whether to stage and commit only the files molt changed. The other changes stay as they are
 - Exception flow: not approved → do nothing. The diff stays in the working tree
 - Exception flow: nothing to commit → report it and do nothing
 - Exception flow: the last `cargo check` is still failing → warn about that fact and confirm whether to commit anyway
