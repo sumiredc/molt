@@ -5,7 +5,9 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::ui::{ScriptedUi, Step};
-use crate::llm::FakeChatClient;
+use crate::config::Config;
+use crate::llm::{ChatError, FakeChatClient, Router};
+use crate::onboarding::probe::Model;
 use crate::onboarding::questionnaire::{Outcome, init};
 use crate::profile::element::Category;
 
@@ -50,8 +52,23 @@ fn every_category(step: Step) -> Vec<Step> {
 /// Runs `molt init` answering "don't know" everywhere, with `repo` as the reference repository.
 fn init_with(setup: &Setup, repo: Option<&Path>, steps: Vec<Step>) -> (ScriptedUi, Outcome) {
     let mut ui = ScriptedUi::new(steps);
-    let outcome = init(&mut ui, &setup.profile(), Ok(&FakeChatClient::new()), repo).unwrap();
+    let outcome = init(
+        &mut ui,
+        &setup.profile(),
+        model(&FakeChatClient::new()),
+        repo,
+    )
+    .unwrap();
     (ui, outcome)
+}
+
+fn model(client: &FakeChatClient) -> Result<Model<'_>, String> {
+    static ROUTER: std::sync::LazyLock<Router> =
+        std::sync::LazyLock::new(|| Router::new(&Config::default()));
+    Ok(Model {
+        client,
+        router: &ROUTER,
+    })
 }
 
 fn crate_entry(profile: &Profile, name: &str) -> (Status, Provenance) {
@@ -311,18 +328,23 @@ fn a_failure_before_the_save_leaves_repo_scan_toml_as_it_was() {
     let earlier_profile = fs::read_to_string(setup.profile()).unwrap();
     setup.write("Cargo.toml", "[dependencies]\nrand = \"0.9\"\n");
 
-    // TODO(#67): fail through `FakeChatClient` once "have written" asks its questions; until
-    // then reporting it is itself the failure before the save.
-    let mut steps = vec![Step::Confirm(true)];
-    steps.extend(vec![Step::Select(1); Category::ALL.len()]);
+    // "have written" for the first category, whose question fails at the API.
+    let mut steps = vec![Step::Confirm(true), Step::Select(1)];
+    steps.extend(every_category(DONT_KNOW).into_iter().skip(1));
+    let client = FakeChatClient::new();
+    client.push_chat(Err(ChatError::Status {
+        status: 429,
+        body: "rate limited".to_owned(),
+    }));
     let mut ui = ScriptedUi::new(steps);
     let result = init(
         &mut ui,
         &setup.profile(),
-        Ok(&FakeChatClient::new()),
+        model(&client),
         Some(&setup.repo()),
     );
-    assert!(result.is_err());
+    let error = result.unwrap_err();
+    assert!(error.contains("429"), "{error}");
     assert_eq!(fs::read_to_string(setup.scan_file()).unwrap(), earlier);
     assert_eq!(
         fs::read_to_string(setup.profile()).unwrap(),
@@ -386,7 +408,7 @@ fn a_repo_scan_toml_molt_did_not_write_stops_init_before_anything_is_saved() {
     let result = init(
         &mut ui,
         &setup.profile(),
-        Ok(&FakeChatClient::new()),
+        model(&FakeChatClient::new()),
         Some(&setup.repo()),
     );
     let error = result.unwrap_err();
@@ -410,7 +432,7 @@ fn a_repo_scan_toml_that_is_a_symbolic_link_stops_init_before_anything_is_saved(
     let result = init(
         &mut ui,
         &setup.profile(),
-        Ok(&FakeChatClient::new()),
+        model(&FakeChatClient::new()),
         Some(&setup.repo()),
     );
     let error = result.unwrap_err();

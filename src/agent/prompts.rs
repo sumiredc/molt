@@ -13,6 +13,8 @@ use crate::checker::diff::{DiffLine, line_diff};
 use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
 
+pub(crate) mod init;
+
 /// The system prompt of the main line.
 pub const MAIN_LINE_SYSTEM: &str = "\
 You are molt, a coding agent for Rust working in the cargo project at the current directory.

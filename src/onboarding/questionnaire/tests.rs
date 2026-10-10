@@ -5,14 +5,14 @@ use tempfile::TempDir;
 
 use super::*;
 use crate::cli::ui::{ScriptedUi, Step};
-use crate::config::Api;
-use crate::llm::{FakeChatClient, OpenAiClient};
+use crate::config::{Api, Config};
+use crate::llm::{ChatClient, FakeChatClient, OpenAiClient, Router};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report};
 
-/// The numbers of the choices, as the user selects them (from 1).
-const HAVE_WRITTEN: Step = Step::Select(1);
+/// The numbers of the choices, as the user selects them (from 1). "have written" is 1; its
+/// Q&A is tested in `onboarding::probe`.
 const CAN_READ: Step = Step::Select(2);
 const DONT_KNOW: Step = Step::Select(3);
 
@@ -59,7 +59,16 @@ fn elements_of(category: Category) -> impl Iterator<Item = Element> {
 }
 
 fn run(ui: &mut ScriptedUi, path: &Path, client: &FakeChatClient) -> Result<Outcome, String> {
-    init(ui, path, Ok(client), None)
+    let router = Router::new(&Config::default());
+    init(
+        ui,
+        path,
+        Ok(Model {
+            client,
+            router: &router,
+        }),
+        None,
+    )
 }
 
 #[test]
@@ -154,6 +163,7 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
         timeout_secs: 1,
     };
     let client = OpenAiClient::new(&api, |_| None).map_err(|error| error.to_string());
+    let router = Router::new(&Config::default());
     let (_dir, path) = no_profile();
     let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
     let result = init(
@@ -161,7 +171,10 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
         &path,
         client
             .as_ref()
-            .map(|c| c as &dyn ChatClient)
+            .map(|c| Model {
+                client: c as &dyn ChatClient,
+                router: &router,
+            })
             .map_err(Clone::clone),
         None,
     );
@@ -219,15 +232,4 @@ fn interrupting_the_report_saves_nothing() {
         Ok(Outcome::Interrupted)
     );
     assert!(!path.exists());
-}
-
-#[test]
-fn a_category_reported_have_written_saves_nothing_until_its_questions_can_be_asked() {
-    let (_dir, path) = no_profile();
-    let client = FakeChatClient::new();
-    let mut ui = ScriptedUi::new(only(Category::Ownership, HAVE_WRITTEN));
-    let error = run(&mut ui, &path, &client).unwrap_err();
-    assert!(error.contains("ownership"), "{error}");
-    assert!(!path.exists());
-    assert!(client.requests().is_empty());
 }

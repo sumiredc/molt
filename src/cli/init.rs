@@ -5,6 +5,8 @@ use std::process::ExitCode;
 
 use super::mainline::{INTERRUPTED, connect, open_ui};
 use super::profile;
+use crate::llm::Router;
+use crate::onboarding::probe::Model;
 use crate::onboarding::questionnaire::{self, Outcome};
 
 pub(super) fn run(
@@ -22,12 +24,15 @@ pub(super) fn run(
             return ExitCode::FAILURE;
         }
     };
-    let connected = connect(fake);
-    let client = connected
+    let connected = connect(fake).map(|(_, config, client)| (Router::new(&config), client));
+    let model = connected
         .as_ref()
-        .map(|(_, _, client)| client.as_ref())
+        .map(|(router, client)| Model {
+            client: client.as_ref(),
+            router,
+        })
         .map_err(Clone::clone);
-    match questionnaire::init(ui.as_mut(), &path, client, repo) {
+    match questionnaire::init(ui.as_mut(), &path, model, repo) {
         Ok(Outcome::Saved | Outcome::Kept) => ExitCode::SUCCESS,
         Ok(Outcome::Interrupted) => ExitCode::from(INTERRUPTED),
         Err(message) => {
