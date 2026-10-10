@@ -13,9 +13,9 @@ molt keeps a profile of the Rust constructs you understand. When a request needs
 
 ## Install
 
-From the root of this repository:
-
 ```sh
+git clone https://github.com/sumiredc/molt
+cd molt
 cargo install --locked --path .
 ```
 
@@ -28,7 +28,7 @@ molt doctor
 molt init
 ```
 
-`molt doctor` checks what the endpoint and models support and records it in `config.toml`. `molt init` asks how well you know each category of constructs, asks about the categories you have written, shows the profile, and saves it when you enter an empty line. `molt init --repo PATH` also reads which crates a repository of yours uses.
+`molt doctor` checks what the endpoint and models support and records it in `config.toml` (recommended: molt sends `json_schema` and `reasoning_effort` only to the models it has found to support them). `molt init` asks about the Rust you know and saves your profile after you confirm it. `molt init --repo PATH` also reads which crates a repository of yours uses.
 
 ## Develop with molt
 
@@ -50,7 +50,7 @@ When a request needs an item your profile does not allow yet, molt stops and ope
 | ② Use a construct I know | The item becomes `seen`, and molt rewrites without it |
 | ③ Write it myself | molt shows where to write what. Write it and type `/done`; molt runs `cargo check` and reviews your lines, and the items in them become `known` |
 
-`/abort` withdraws the request, leaving files and the profile as they were. After Ctrl-C on the side line, molt waits paused at the boundary: `/side` goes back to the side line, and `/abort` withdraws the request. The full flow is in [PRD UC3](PRD.md#uc3-choose-at-a-boundary-side-line).
+`/abort` withdraws the request and changes nothing more; what molt already wrote for it stays and is shown with `cargo check`. After Ctrl-C on the side line, `/side` goes back to it. The full flow is in [PRD UC3](PRD.md#uc3-choose-at-a-boundary-side-line).
 
 ## Limitations
 
@@ -60,7 +60,7 @@ What molt does not guarantee is listed in [PRD §4](PRD.md#4-non-guarantees); fo
 
 Settings live in `config.toml` in molt's directory; [`examples/config.toml`](examples/config.toml) shows where that directory is (`MOLT_HOME`, `XDG_CONFIG_HOME`), every key with its default, and how to point at a local endpoint. The API key is read from the environment variable named by `api_key_env`.
 
-Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and molt prints both paths when it ends ([PRD §8.8](PRD.md#88-persistence)).
+Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and `molt` prints both paths when it ends with `/quit` or Ctrl-D ([PRD §8.8](PRD.md#88-persistence)).
 
 ## Try it without a model
 

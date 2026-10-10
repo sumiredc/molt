@@ -13,9 +13,9 @@ molt は、利用者が理解している Rust の書き方をプロファイル
 
 ## インストール
 
-このリポジトリの直下で:
-
 ```sh
+git clone https://github.com/sumiredc/molt
+cd molt
 cargo install --locked --path .
 ```
 
@@ -28,7 +28,7 @@ molt doctor
 molt init
 ```
 
-`molt doctor` は接続先とモデルが何に対応しているかを確かめ、`config.toml` に記録する。`molt init` は書き方の分類ごとにどれだけ知っているかを尋ね、書いたことのある分類について質問し、プロファイルを見せ、空行を入れると保存する。`molt init --repo PATH` では、自分のリポジトリが使っている crate も読む。
+`molt doctor` は接続先とモデルが何に対応しているかを確かめ、`config.toml` に記録する（推奨。molt は `json_schema` と `reasoning_effort` を、対応すると確かめたモデルにだけ送る）。`molt init` は利用者が知っている Rust について尋ね、確認のあとプロファイルを保存する。`molt init --repo PATH` では、自分のリポジトリが使っている crate も読む。
 
 ## molt で開発する
 
@@ -46,11 +46,11 @@ molt
 
 | 選択 | 何が起きるか |
 |---|---|
-| ① 理解して任せる | 要素が `known` になり、molt は以後それを使う |
-| ② 知っている書き方にする | 要素が `seen` になり、molt はそれを使わずに書き直す |
-| ③ 自分で書く | molt がどこに何を書くかを示す。書いて `/done` を打つと、molt が `cargo check` を実行して利用者の行をレビューし、その行の要素が `known` になる |
+| ① 理解して任せる（`Understand, then delegate`） | 要素が `known` になり、molt は以後それを使う |
+| ② 知っている書き方にする（`Use a construct I know`） | 要素が `seen` になり、molt はそれを使わずに書き直す |
+| ③ 自分で書く（`Write it myself`） | molt がどこに何を書くかを示す。書いて `/done` を打つと、molt が `cargo check` を実行して利用者の行をレビューし、その行の要素が `known` になる |
 
-`/abort` は依頼を取り下げ、ファイルもプロファイルも元のままにする。副線で Ctrl-C を押すと、molt は境界で一時停止したまま待つ。`/side` で副線に戻り、`/abort` で依頼を取り下げる。流れの全体は [PRD の UC3](PRD.ja.md#uc3-境界で選ぶ副線) にある。
+`/abort` は依頼を取り下げ、それ以上何も変えない。molt がその依頼で書いたものは残り、`cargo check` の結果とともに表示される。副線で Ctrl-C を押したあとは、`/side` で副線に戻る。流れの全体は [PRD の UC3](PRD.ja.md#uc3-境界で選ぶ副線) にある。
 
 ## 制限
 
@@ -60,7 +60,7 @@ molt が保証しないことは [PRD §4](PRD.ja.md#4-保証しないこと) �
 
 設定は molt のディレクトリの `config.toml` に置く。[`examples/config.toml`](examples/config.toml) に、そのディレクトリの場所（`MOLT_HOME`、`XDG_CONFIG_HOME`）、全キーと既定値、ローカルの接続先に向ける方法がある。API キーは `api_key_env` に書いた名前の環境変数から読む。
 
-`MOLT_LOG` を空でも `0` でもない値にすると、LLM へのリクエスト本文も書き出す。書き出し先は molt のディレクトリの `sessions/<time>-<pid>.requests.jsonl` で、session log の `sessions/<time>-<pid>.jsonl` の隣に置かれ、molt は終わるときに両方のパスを表示する（[PRD §8.8](PRD.ja.md#88-永続化)）。
+`MOLT_LOG` を空でも `0` でもない値にすると、LLM へのリクエスト本文も書き出す。書き出し先は molt のディレクトリの `sessions/<time>-<pid>.requests.jsonl` で、session log の `sessions/<time>-<pid>.jsonl` の隣に置かれ、`molt` を `/quit` か Ctrl-D で終えると両方のパスを表示する（[PRD §8.8](PRD.ja.md#88-永続化)）。
 
 ## モデル無しで試す
 
