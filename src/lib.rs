@@ -7,4 +7,5 @@ pub mod llm;
 pub mod onboarding;
 pub mod profile;
 pub mod session;
+pub mod ui;
 pub mod workspace;

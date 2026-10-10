@@ -19,10 +19,10 @@ use serde::{Deserialize, Serialize};
 use toml_edit::{Array, DocumentMut, InlineTable, Item, Table};
 
 use crate::checker::{crates, visitor};
-use crate::cli::ui::Ui;
 use crate::profile::element::Element;
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Timestamp, write_atomically};
+use crate::ui::Ui;
 
 /// The name of the stock-taking file, in the profile's directory.
 pub const FILE_NAME: &str = "repo-scan.toml";

@@ -10,11 +10,11 @@ use super::super::super::tests::{input, project, reply};
 use super::super::super::{PAUSED, main_line};
 use super::*;
 use crate::agent::tools::Tools;
-use crate::cli::ui::{Input, ScriptedUi, Step, UiError};
 use crate::config::Config;
 use crate::llm::{ChatResponse, FakeChatClient, Message, Router, ToolCall};
 use crate::profile::status::{Provenance, Status};
 use crate::profile::store::Profile;
+use crate::ui::{Input, ScriptedUi, Step, UiError};
 use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::path::Root;
 

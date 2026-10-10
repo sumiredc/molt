@@ -1,6 +1,7 @@
 //! `molt` without a subcommand: checks UC2's preconditions, then opens the main line in the cargo
 //! project at cwd (PRD §8.6).
 
+mod approver;
 pub(super) mod commit;
 mod diff;
 mod subline;
@@ -8,9 +9,9 @@ mod subline;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use self::approver::UiApprover;
 use self::subline::Left;
 use super::profile;
-use super::ui::{Input, ScriptedUi, TerminalUi, Ui, UiApprover};
 use crate::agent::mainline::{
     AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
@@ -22,6 +23,7 @@ use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::{self, SessionLog};
+use crate::ui::{Input, ScriptedUi, TerminalUi, Ui};
 use crate::workspace::cargo::{Cargo, CargoError, CargoOutput};
 use crate::workspace::path::Root;
 
@@ -481,8 +483,8 @@ mod tests {
     use tempfile::TempDir;
 
     use super::*;
-    use crate::cli::ui::Step;
     use crate::llm::{ChatResponse, FakeChatClient};
+    use crate::ui::Step;
     use crate::workspace::cargo::FakeCargo;
 
     pub(super) fn project() -> TempDir {
@@ -692,8 +694,8 @@ mod turn {
 mod approval {
     use super::tests::{input, project, reply};
     use super::*;
-    use crate::cli::ui::Step;
     use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::ui::Step;
     use crate::workspace::cargo::{CargoOutput, FakeCargo};
 
     #[test]
@@ -742,8 +744,8 @@ mod write {
 
     use super::tests::{input, project, reply};
     use super::*;
-    use crate::cli::ui::Step;
     use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::ui::Step;
     use crate::workspace::cargo::FakeCargo;
 
     fn write_main(id: &str, content: &str) -> ChatResponse {
@@ -987,10 +989,10 @@ mod turn_end {
 
     use super::tests::{input, project, reply};
     use super::*;
-    use crate::cli::ui::Step;
     use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
     use crate::profile::status::{Provenance, Status};
     use crate::profile::store::Timestamp;
+    use crate::ui::Step;
     use crate::workspace::cargo::{CargoCall, CargoOutput, CrateName, FakeCargo, Subcommand};
 
     fn write_main(id: &str, content: &str) -> ChatResponse {
@@ -1381,8 +1383,8 @@ mod session_path {
 
     use super::tests::{input, project};
     use super::*;
-    use crate::cli::ui::Step;
     use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::ui::Step;
     use crate::workspace::cargo::FakeCargo;
 
     /// What the main line showed on `steps` with a session log in a tempdir, and the paths of

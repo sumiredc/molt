@@ -11,10 +11,10 @@ use std::path::Path;
 use super::confirm::{self, Confirmed};
 use super::probe::{self, Judgement, Model, Stopped};
 use super::repo_scan::{self, RepoScan, Stored};
-use crate::cli::ui::Ui;
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report, Timestamp};
+use crate::ui::Ui;
 
 /// The answers offered for each category, in the order of [`REPORTS`].
 const ANSWERS: [&str; 3] = ["have written", "can read", "don't know"];

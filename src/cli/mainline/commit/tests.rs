@@ -8,10 +8,10 @@ use tempfile::TempDir;
 use super::super::main_line;
 use crate::agent::mainline::MainLine;
 use crate::agent::tools::Tools;
-use crate::cli::ui::{ScriptedUi, Step};
 use crate::config::Config;
 use crate::llm::{ChatResponse, FakeChatClient, Router, ToolCall};
 use crate::profile::store::Profile;
+use crate::ui::{ScriptedUi, Step};
 use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::git::Git;
 use crate::workspace::git::testing::{git_in, init, init_without_identity, without_repository};
@@ -358,13 +358,10 @@ struct WritesOnDone {
     content: &'static str,
 }
 
-impl crate::cli::ui::Ui for WritesOnDone {
-    fn read_line(
-        &mut self,
-        prompt: &str,
-    ) -> Result<crate::cli::ui::Input, crate::cli::ui::UiError> {
+impl crate::ui::Ui for WritesOnDone {
+    fn read_line(&mut self, prompt: &str) -> Result<crate::ui::Input, crate::ui::UiError> {
         let input = self.ui.read_line(prompt)?;
-        if matches!(&input, crate::cli::ui::Input::Line(line) if line == "/done") {
+        if matches!(&input, crate::ui::Input::Line(line) if line == "/done") {
             fs::write(&self.path, self.content).unwrap();
         }
         Ok(input)
@@ -378,11 +375,11 @@ impl crate::cli::ui::Ui for WritesOnDone {
         &mut self,
         prompt: &str,
         items: &[&str],
-    ) -> Result<Option<usize>, crate::cli::ui::UiError> {
+    ) -> Result<Option<usize>, crate::ui::UiError> {
         self.ui.select(prompt, items)
     }
 
-    fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, crate::cli::ui::UiError> {
+    fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, crate::ui::UiError> {
         self.ui.confirm(prompt)
     }
 }

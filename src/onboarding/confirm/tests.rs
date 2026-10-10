@@ -5,7 +5,6 @@ use serde_json::json;
 use tempfile::TempDir;
 
 use super::*;
-use crate::cli::ui::{ScriptedUi, Step};
 use crate::config::Config;
 use crate::llm::types::ChatResponse;
 use crate::llm::{ChatError, FakeChatClient, Router};
@@ -14,6 +13,7 @@ use crate::onboarding::questionnaire::{Outcome, init};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Report, Timestamp};
+use crate::ui::{ScriptedUi, Step};
 
 const HAVE_WRITTEN: Step = Step::Select(1);
 const CAN_READ: Step = Step::Select(2);

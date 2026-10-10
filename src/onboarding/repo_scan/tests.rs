@@ -4,12 +4,12 @@ use std::path::{Path, PathBuf};
 use tempfile::TempDir;
 
 use super::*;
-use crate::cli::ui::{ScriptedUi, Step};
 use crate::config::Config;
 use crate::llm::{ChatError, FakeChatClient, Router};
 use crate::onboarding::probe::Model;
 use crate::onboarding::questionnaire::{Outcome, init};
 use crate::profile::element::Category;
+use crate::ui::{ScriptedUi, Step};
 
 const DONT_KNOW: Step = Step::Select(3);
 
