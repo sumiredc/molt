@@ -181,6 +181,34 @@ fn the_profile_is_shown_per_category_with_status_provenance_and_the_reason_of_th
 }
 
 #[test]
+fn base_elements_are_shown_together_after_the_crates_and_not_in_their_category() {
+    let mut profile = Profile::new();
+    profile.set_report(Category::ErrorHandling, Report::CanRead);
+    for key in [element(Element::Result), element(Element::Unwrap)] {
+        profile
+            .transition(key, Status::Seen, Provenance::SelfReport, at(1), None)
+            .unwrap();
+    }
+    let (ui, _) = run_confirm(&mut profile, vec![save()]);
+    let shown = ui.shown().join("\n");
+    let lines: Vec<&str> = shown.lines().collect();
+    let find = |words: &[&str]| -> Vec<usize> {
+        (0..lines.len())
+            .filter(|&i| lines[i].split_whitespace().eq(words.iter().copied()))
+            .collect()
+    };
+    let heading = |text: &str| lines.iter().position(|line| *line == text).unwrap();
+    let error_handling = heading("error_handling (report: can_read)");
+    let base = heading("base elements (used regardless of status)");
+    let unwrap = find(&["unwrap", "seen", "self_report"]);
+    assert_eq!(unwrap.len(), 1, "{shown}");
+    assert!(error_handling < unwrap[0] && unwrap[0] < base, "{shown}");
+    let result = find(&["result", "seen", "self_report"]);
+    assert_eq!(result.len(), 1, "{shown}");
+    assert!(base < result[0], "{shown}");
+}
+
+#[test]
 fn an_empty_line_saves_the_profile_as_it_was_shown() {
     let mut profile = judged_profile();
     let before = profile.clone();

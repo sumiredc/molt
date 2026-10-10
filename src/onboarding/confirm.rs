@@ -52,6 +52,8 @@ pub(crate) fn confirm(ui: &mut dyn Ui, profile: &mut Profile) -> Result<Confirme
                         None,
                     ) {
                         Ok(()) => ui.show(&format!("{key}: {status} ({})", Provenance::Manual)),
+                        // `manual` may set any status (PRD §7), so this is not reached today;
+                        // a rejection would be shown and change nothing, as a bad input is.
                         Err(error) => ui.show(&error.to_string()),
                     }
                 }
