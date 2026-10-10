@@ -7,9 +7,9 @@ mod tests;
 use std::fs;
 use std::path::Path;
 
+use super::probe::{self, Judgement, Model, Stopped};
 use super::repo_scan::{self, RepoScan, Stored};
 use crate::cli::ui::Ui;
-use crate::llm::ChatClient;
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report, Timestamp};
@@ -33,23 +33,24 @@ pub enum Outcome {
 
 /// Runs `molt init` up to saving the profile at `profile_path`.
 ///
-/// `client` is the result of creating the client for the configured endpoint. When it could not
+/// `model` is the result of creating the client for the configured endpoint. When it could not
 /// be created (e.g. the endpoint needs an API key and its environment variable is unset), nothing
 /// is asked and no profile is created. Otherwise an existing profile is overwritten only when the
 /// user says yes, and the user reports on each category. After the report, the reference
 /// repository `repo` (`--repo`) is taken stock of; when it cannot be used, that is said and init
-/// goes on without it. The model is called only for the categories reported "have written".
+/// goes on without it. The model is called only for the categories reported "have written", in
+/// the Q&A ([`probe`]), whose judgements are saved as they are.
 ///
-/// The profile and `repo-scan.toml` beside it are written only at the end, together: an error,
-/// declining to overwrite or interrupting leaves both as they were.
+/// The profile and `repo-scan.toml` beside it are written only at the end, together: an error
+/// (including an API failure during the Q&A), declining to overwrite or interrupting leaves both
+/// as they were.
 pub fn init(
     ui: &mut dyn Ui,
     profile_path: &Path,
-    client: Result<&dyn ChatClient, String>,
+    model: Result<Model<'_>, String>,
     repo: Option<&Path>,
 ) -> Result<Outcome, String> {
-    // The Q&A (#67) asks the categories reported "have written" through this client.
-    let _client = client?;
+    let model = model?;
     // Checked again just before saving; here so that the user is not asked anything in vain.
     repo_scan::check_target(&repo_scan::path_beside(profile_path))
         .map_err(|error| format!("{error}; no profile was saved"))?;
@@ -74,23 +75,26 @@ pub fn init(
     };
 
     let at = Timestamp::now();
-    // TODO(#67): pass the elements found in the reference repository to the questions.
     let scan = repo.and_then(|repo| repo_scan::take_stock(ui, repo, at));
 
     let have_written: Vec<_> = reports
         .iter()
         .filter(|(_, report)| *report == Report::HaveWritten)
-        .map(|(category, _)| category.name())
+        .map(|&(category, _)| category)
         .collect();
-    if !have_written.is_empty() {
-        // TODO(#67): ask about these categories and judge their elements from the answers.
-        return Err(format!(
-            "the questions for the categories reported \"have written\" ({}) are not implemented yet; no profile was saved",
-            have_written.join(", ")
-        ));
-    }
+    let judgements = if have_written.is_empty() {
+        Vec::new()
+    } else {
+        match probe::probe(ui, model, &have_written, scan.as_ref()) {
+            Ok(judgements) => judgements,
+            Err(Stopped::Interrupted) => return Ok(interrupted(ui)),
+            Err(Stopped::Failed(cause)) => return Err(format!("{cause}; no profile was saved")),
+        }
+    };
 
+    // TODO(#68): let the user confirm and correct the judgements before saving.
     let mut profile = from_reports(&reports, at)?;
+    mark_judged_known(&mut profile, &judgements, at)?;
     if let Some(scan) = &scan {
         repo_scan::mark_crates_known(&mut profile, scan, at)?;
     }
@@ -144,6 +148,27 @@ fn from_reports(reports: &[(Category, Report)], at: Timestamp) -> Result<Profile
         }
     }
     Ok(profile)
+}
+
+/// Makes each element `judgements` judged known `known`, by the Q&A, at `at`, with the reason of
+/// the judgement as its evidence. The others stay `unknown`.
+fn mark_judged_known(
+    profile: &mut Profile,
+    judgements: &[Judgement],
+    at: Timestamp,
+) -> Result<(), String> {
+    for judgement in judgements.iter().filter(|judgement| judgement.known) {
+        profile
+            .transition(
+                ItemKey::Element(judgement.element),
+                Status::Known,
+                Provenance::Qa,
+                at,
+                judgement.reason.clone(),
+            )
+            .map_err(|error| error.to_string())?;
+    }
+    Ok(())
 }
 
 /// Saves `profile` at `path` and makes `repo-scan.toml` beside it match: `scan` when there is

@@ -137,3 +137,37 @@ fn init_with_a_missing_repo_reports_it_and_saves_the_profile_without_a_reference
     assert!(setup.profile().exists());
     assert!(!setup.dir.path().join("repo-scan.toml").exists());
 }
+
+#[test]
+fn init_with_a_have_written_category_asks_and_judges_through_fake_and_saves_the_known_by_qa() {
+    let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    fs::write(
+        setup.script(),
+        "steps = [\n{ select = 1 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"I clone strings.\" },\n]\n",
+    )
+    .unwrap();
+    let fake = setup.dir.path().join("fake.toml");
+    fs::write(
+        &fake,
+        r#"[[responses]]
+content = "How have you used clone and the other ownership tools?"
+
+[[responses]]
+content = '{"elements": [{"element": "clone", "verdict": "known", "reason": "clones strings"}, {"element": "to_owned", "verdict": "unknown", "reason": "-"}, {"element": "drop", "verdict": "unknown", "reason": "-"}, {"element": "mem_take", "verdict": "unknown", "reason": "-"}, {"element": "mem_replace", "verdict": "unknown", "reason": "-"}, {"element": "mem_swap", "verdict": "unknown", "reason": "-"}]}'
+"#,
+    )
+    .unwrap();
+
+    let output = molt_init_with(
+        &setup,
+        &setup.profile(),
+        &["--fake".as_ref(), fake.as_os_str()],
+    );
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("How have you used clone"), "{stdout}");
+    assert!(stdout.contains("ownership: known: clone;"), "{stdout}");
+    let saved = fs::read_to_string(setup.profile()).unwrap();
+    assert!(saved.contains("provenance = \"qa\""), "{saved}");
+    assert!(saved.contains("clones strings"), "{saved}");
+}
