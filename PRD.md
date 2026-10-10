@@ -335,6 +335,7 @@ What to read from the figure: `checker` and `profile` do no I/O and can be unit-
 - `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`. ParseError is treated as a compile-type failure, not a boundary
 - The inside of a macro invocation is invisible to syn. The arguments of the std macros that take Rust expressions (the `print!`, `format!` / `write!`, `vec!`, `assert!`, `dbg!`, `matches!` and `panic!` families; not `asm!`) are parsed as expressions and patterns and checked like the code around them, each finding on the line of its own token. Inline arguments of a format string (`{x}`) are not read, since they can only be names. Arguments that do not parse in the macro's shape are not seen, and the invocation is then also a `macro_call` finding. The inside of any other macro stays invisible → its invocation is itself a finding unless it is a base element or `known`
 - New crates are detected from both the diff of dependency keys in `Cargo.toml` and the first segment of paths in the source (anything other than std / core / crate / self / super / the project's own modules)
+- The stock-taking of the reference repository (the dependencies in its `Cargo.toml`, and for each element up to 3 places where it is used, as path and line) is saved in `repo-scan.toml`, in the same directory as the resolved profile, as a snapshot taken at init. The code is the source of truth for its shape
 
 ### 8.4 The write path
 
