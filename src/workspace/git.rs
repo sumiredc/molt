@@ -57,9 +57,10 @@ impl Git {
         }
     }
 
-    /// `git status --porcelain=v1`: a format the user's git config does not change.
+    /// `git status --porcelain=v1 --untracked-files=all`: a format the user's git config does not
+    /// change, with each untracked file on a line of its own, even in an untracked directory.
     pub fn status(&self) -> Result<GitOutput, GitError> {
-        self.execute(argv(&["status", "--porcelain=v1"]))
+        self.execute(argv(&["status", "--porcelain=v1", "--untracked-files=all"]))
     }
 
     /// `git diff`, or `git diff --cached` for [`DiffScope::Staged`], without colour or an
@@ -69,6 +70,18 @@ impl Git {
             DiffScope::Unstaged => argv(&["diff", "--no-color", "--no-ext-diff"]),
             DiffScope::Staged => argv(&["diff", "--no-color", "--no-ext-diff", "--cached"]),
         };
+        self.execute(argv)
+    }
+
+    /// `git diff HEAD -- <paths>`, without colour or an external diff program: what committing
+    /// `paths` as they are in the working tree records. Every path must resolve under the project
+    /// root; if one does not, git is not run. Fails when the repository has no commit yet.
+    pub fn diff_head(&self, paths: &[impl AsRef<Path>]) -> Result<GitOutput, GitError> {
+        let mut argv = argv(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--"]);
+        for path in paths {
+            let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
+            argv.push(resolved.into_os_string());
+        }
         self.execute(argv)
     }
 
@@ -84,20 +97,32 @@ impl Git {
         self.execute(argv)
     }
 
-    /// `git commit --message=<message>`: records what is staged. A commit needs the user's
-    /// approval (PRD §3, §8.4):
+    /// `git commit --message=<message> -- <paths>`: records the content of `paths` only, as they
+    /// are in the working tree, and leaves anything else staged as it is. A path git does not
+    /// track yet must be added first. Every path must resolve under the project root; if one does
+    /// not, git is not run. A commit needs the user's approval (PRD §3, §8.4):
     ///
     /// ```compile_fail
     /// use molt::workspace::git::Git;
     /// use molt::workspace::path::Root;
     ///
     /// let git = Git::new(Root::new(".").unwrap());
-    /// git.commit("message");
+    /// git.commit("message", &["src/main.rs"]);
     /// ```
-    pub fn commit(&self, message: &str, _approval: Approval) -> Result<GitOutput, GitError> {
+    pub fn commit(
+        &self,
+        message: &str,
+        paths: &[impl AsRef<Path>],
+        _approval: Approval,
+    ) -> Result<GitOutput, GitError> {
         let mut message_arg = OsString::from("--message=");
         message_arg.push(message);
-        self.execute(vec![OsString::from("commit"), message_arg])
+        let mut argv = vec![OsString::from("commit"), message_arg, OsString::from("--")];
+        for path in paths {
+            let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
+            argv.push(resolved.into_os_string());
+        }
+        self.execute(argv)
     }
 
     /// Every argv run so far, in order, without the leading `git`.
@@ -198,6 +223,42 @@ pub(crate) mod testing {
         git.envs = TEST_ENV.to_vec();
         git
     }
+
+    /// A `Git` in `dir`, which is in no repository: like [`init`]'s, but without `git init`, and
+    /// git does not look for a repository above `dir`.
+    pub(crate) fn without_repository(dir: &Path) -> Git {
+        let mut git = Git::new(Root::new(dir).unwrap());
+        let parent = dir.parent().unwrap().to_str().unwrap().to_owned();
+        git.envs = TEST_ENV.to_vec();
+        git.envs
+            .push(("GIT_CEILING_DIRECTORIES", Some(parent.leak())));
+        git
+    }
+
+    /// Like [`init`], but the `Git` has no author: `user.name` is set nowhere, and the repository
+    /// tells git not to guess one from the system (`user.useConfigOnly`), so a commit fails as
+    /// it does for a user who never set `user.name` (UC4).
+    pub(crate) fn init_without_identity(dir: &Path) -> Git {
+        let mut git = init(dir);
+        let status = git_in(dir, &["config", "user.useConfigOnly", "true"])
+            .status()
+            .unwrap();
+        assert!(status.success());
+        git.envs = TEST_ENV
+            .into_iter()
+            .filter(|(key, _)| {
+                !key.starts_with("GIT_AUTHOR_") && !key.starts_with("GIT_COMMITTER_")
+            })
+            .chain([
+                ("GIT_AUTHOR_NAME", None),
+                ("GIT_AUTHOR_EMAIL", None),
+                ("GIT_COMMITTER_NAME", None),
+                ("GIT_COMMITTER_EMAIL", None),
+                ("EMAIL", None),
+            ])
+            .collect();
+        git
+    }
 }
 
 #[cfg(test)]
@@ -263,6 +324,19 @@ mod tests {
     }
 
     #[test]
+    fn status_lists_each_file_in_an_untracked_directory() {
+        let (dir, git) = repository();
+        fs::create_dir(dir.path().join("new")).unwrap();
+        fs::write(dir.path().join("new/a.txt"), "").unwrap();
+        fs::write(dir.path().join("new/b.txt"), "").unwrap();
+
+        let output = git.status().unwrap();
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout, "?? new/a.txt\n?? new/b.txt\n");
+    }
+
+    #[test]
     fn unstaged_diff_shows_a_change_in_the_working_tree() {
         let (dir, git) = repository_with_a_commit();
         fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
@@ -285,6 +359,31 @@ mod tests {
         assert!(output.success, "{}", output.stderr);
         assert!(output.stdout.contains("+staged\n"), "{}", output.stdout);
         assert!(!output.stdout.contains("tracked.txt"), "{}", output.stdout);
+    }
+
+    #[test]
+    fn diff_head_shows_the_given_paths_against_head_staged_or_not() {
+        let (dir, git) = repository_with_a_commit();
+        fs::write(dir.path().join("tracked.txt"), "staged\n").unwrap();
+        git.add(&["tracked.txt"]).unwrap();
+        fs::write(dir.path().join("tracked.txt"), "now\n").unwrap();
+        fs::write(dir.path().join("other.txt"), "other\n").unwrap();
+        git.add(&["other.txt"]).unwrap();
+
+        let output = git.diff_head(&["tracked.txt"]).unwrap();
+
+        assert!(output.success, "{}", output.stderr);
+        assert!(output.stdout.contains("-old\n+now\n"), "{}", output.stdout);
+        assert!(!output.stdout.contains("other.txt"), "{}", output.stdout);
+    }
+
+    #[test]
+    fn diff_head_fails_without_a_commit() {
+        let (dir, git) = repository();
+        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        git.add(&["a.txt"]).unwrap();
+
+        assert!(!git.diff_head(&["a.txt"]).unwrap().success);
     }
 
     #[test]
@@ -325,27 +424,48 @@ mod tests {
     }
 
     #[test]
-    fn commit_with_approval_records_only_what_is_staged() {
+    fn commit_records_only_the_given_paths_and_leaves_the_rest_as_it_is() {
         let (dir, git) = repository_with_a_commit();
         fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+        fs::write(dir.path().join("mine.txt"), "").unwrap();
         fs::write(dir.path().join("staged.txt"), "").unwrap();
-        git.add(&["staged.txt"]).unwrap();
+        git.add(&["mine.txt", "staged.txt"]).unwrap();
 
-        let output = git.commit("Add staged.txt", approve()).unwrap();
+        let output = git
+            .commit("Add mine.txt", &["mine.txt"], approve())
+            .unwrap();
 
         assert!(output.success, "{}", output.stderr);
-        assert_eq!(log(dir.path()), ["Add staged.txt", "first"]);
-        assert_eq!(last_commit_files(dir.path()), ["staged.txt"]);
+        assert_eq!(log(dir.path()), ["Add mine.txt", "first"]);
+        assert_eq!(last_commit_files(dir.path()), ["mine.txt"]);
+        assert_eq!(
+            git.status().unwrap().stdout,
+            "A  staged.txt\n M tracked.txt\n"
+        );
     }
 
     #[test]
-    fn commit_with_nothing_staged_fails_without_a_new_commit() {
+    fn commit_of_an_unchanged_path_fails_without_a_new_commit() {
         let (dir, git) = repository_with_a_commit();
 
-        let output = git.commit("Nothing", approve()).unwrap();
+        let output = git.commit("Nothing", &["tracked.txt"], approve()).unwrap();
 
         assert!(!output.success);
         assert_eq!(log(dir.path()), ["first"]);
+    }
+
+    #[test]
+    fn commit_with_a_path_outside_the_root_runs_no_git() {
+        let (dir, git) = repository();
+        fs::write(dir.path().join("a.txt"), "").unwrap();
+
+        let result = git.commit("Add", &["a.txt", "../outside.txt"], approve());
+
+        assert!(
+            matches!(result, Err(GitError::Path(PathError::OutsideRoot { .. }))),
+            "{result:?}"
+        );
+        assert_eq!(git.invocations(), Vec::<Vec<OsString>>::new());
     }
 
     #[test]
@@ -354,7 +474,7 @@ mod tests {
         fs::write(dir.path().join("a.txt"), "").unwrap();
         git.add(&["a.txt"]).unwrap();
 
-        let output = git.commit("--amend", approve()).unwrap();
+        let output = git.commit("--amend", &["a.txt"], approve()).unwrap();
 
         assert!(output.success, "{}", output.stderr);
         assert_eq!(log(dir.path()), ["--amend", "first"]);
@@ -370,7 +490,7 @@ mod tests {
             git.diff(DiffScope::Unstaged).unwrap(),
             git.add(&["a.txt"]).unwrap(),
             git.diff(DiffScope::Staged).unwrap(),
-            git.commit("Add a.txt", approve()).unwrap(),
+            git.commit("Add a.txt", &["a.txt"], approve()).unwrap(),
         ];
 
         for output in &outputs {
@@ -380,16 +500,18 @@ mod tests {
 
         let a_txt = dir.path().canonicalize().unwrap().join("a.txt");
         let mut add = argv(&["add", "--"]);
-        add.push(a_txt.into_os_string());
+        add.push(a_txt.clone().into_os_string());
+        let mut commit = argv(&["commit", "--message=Add a.txt", "--"]);
+        commit.push(a_txt.into_os_string());
         let invocations = git.invocations();
         assert_eq!(
             invocations,
             [
-                argv(&["status", "--porcelain=v1"]),
+                argv(&["status", "--porcelain=v1", "--untracked-files=all"]),
                 argv(&["diff", "--no-color", "--no-ext-diff"]),
                 add,
                 argv(&["diff", "--no-color", "--no-ext-diff", "--cached"]),
-                argv(&["commit", "--message=Add a.txt"]),
+                commit,
             ]
         );
         // Only the four operations reach git, so no argv pushes.

@@ -17,6 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
+use crate::agent::mainline::CommitProposal;
 use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
 use crate::profile::store::Profile;
@@ -33,26 +34,29 @@ pub use args::{
     RunCargoArgs, WriteFileArgs,
 };
 
-/// The tools [`Tools::dispatch`] runs.
-const DISPATCHED: [&str; 6] = [
+/// The tools [`Tools::dispatch`] runs. `git_commit` is run by the main line, which knows the files
+/// molt changed (UC4).
+const DISPATCHED: [&str; 5] = [
     "list_files",
     "read_file",
     "run_cargo",
     "git_status",
     "git_diff",
-    "git_commit",
 ];
 
 /// An operation that runs only after the user approves it (PRD §3, §8.4).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ApprovalRequest {
     CargoAdd(CrateName),
-    GitCommit { message: String },
+    /// A commit of the files molt changed (UC4).
+    GitCommit(CommitProposal),
 }
 
 /// Asks the user whether to run an operation that needs approval.
 pub trait Approver {
-    /// Whether the user approves `request`.
+    /// Whether the user approves `request`. For [`ApprovalRequest::GitCommit`], the user has seen
+    /// the diff of each file and the message first, and approving also means going on despite
+    /// the warning and with the other changes that the proposal carries (UC4).
     fn confirm(&mut self, request: &ApprovalRequest) -> bool;
 }
 
@@ -140,9 +144,9 @@ impl<'a> Tools<'a> {
         Self { root, cargo, git }
     }
 
-    /// Runs the tool `name` with `arguments`. `approver` is asked before `run_cargo add` and
-    /// `git_commit`, and neither runs unless it approves. `write_file`, `edit_file` and any
-    /// other name are rejected as unknown tools.
+    /// Runs the tool `name` with `arguments`. `approver` is asked before `run_cargo add`, which
+    /// does not run unless it approves. `write_file`, `edit_file`, `git_commit` and any other
+    /// name are rejected as unknown tools.
     pub fn dispatch(
         &self,
         name: &str,
@@ -166,7 +170,6 @@ impl<'a> Tools<'a> {
                 };
                 Ok(git_result(self.git.diff(scope)?))
             }
-            "git_commit" => self.git_commit(parse(name, arguments)?, approver),
             _ => Err(ToolError::UnknownTool(UnknownTool {
                 name: name.to_owned(),
                 valid: DISPATCHED.iter().map(|name| (*name).to_owned()).collect(),
@@ -270,6 +273,18 @@ impl<'a> Tools<'a> {
             own_modules: &own_modules,
         };
         Some(checker::check_file(&resolved, old, new, &ctx))
+    }
+
+    /// git in the project, for the commit of the files molt changed (UC4).
+    pub(crate) fn git(&self) -> &Git {
+        &self.git
+    }
+
+    /// The tools on `root` with `git` in place of a plain one, for tests that run git with an
+    /// environment of their own.
+    #[cfg(test)]
+    pub(crate) fn with_git(root: Root, cargo: &'a dyn CargoRunner, git: Git) -> Self {
+        Self { root, cargo, git }
     }
 
     /// Runs `cargo check` in the project, as the loop does at the end of a turn that wrote
@@ -453,20 +468,6 @@ impl<'a> Tools<'a> {
             &output.stderr,
         ))
     }
-
-    fn git_commit(
-        &self,
-        args: GitCommitArgs,
-        approver: &mut dyn Approver,
-    ) -> Result<String, ToolError> {
-        let request = ApprovalRequest::GitCommit {
-            message: args.message.clone(),
-        };
-        if !approver.confirm(&request) {
-            return Err(ToolError::NotApproved);
-        }
-        Ok(git_result(self.git.commit(&args.message, approve())?))
-    }
 }
 
 fn parse<T: DeserializeOwned>(tool: &str, arguments: &Map<String, Value>) -> Result<T, ToolError> {
@@ -596,8 +597,6 @@ impl Error for ToolError {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
-
     use serde_json::json;
     use tempfile::TempDir;
 
@@ -709,17 +708,6 @@ mod tests {
     fn stage(dir: &TempDir, path: &str) {
         let status = git_in(dir.path(), &["add", path]).status().unwrap();
         assert!(status.success());
-    }
-
-    fn log(dir: &TempDir) -> Vec<String> {
-        let output = git_in(dir.path(), &["log", "--format=%s"])
-            .output()
-            .unwrap();
-        String::from_utf8(output.stdout)
-            .unwrap()
-            .lines()
-            .map(str::to_owned)
-            .collect()
     }
 
     // list_files
@@ -953,7 +941,7 @@ mod tests {
         assert_eq!(cargo.calls(), []);
     }
 
-    // git_status, git_diff, git_commit
+    // git_status, git_diff
 
     #[test]
     fn git_status_returns_the_status_of_the_repository() {
@@ -990,58 +978,6 @@ mod tests {
         assert!(unstaged.contains("-staged\n+unstaged\n"), "{unstaged}");
         assert!(staged.contains("+staged\n"), "{staged}");
         assert!(!staged.contains("unstaged"), "{staged}");
-    }
-
-    #[test]
-    fn git_commit_commits_what_is_staged_after_the_user_approves() {
-        let dir = tempfile::tempdir().unwrap();
-        let cargo = FakeCargo::new();
-        let tools = tools_on_git(&dir, &cargo);
-        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
-        stage(&dir, "a.txt");
-        let mut answer = Answer::yes();
-
-        let result = tools.dispatch(
-            "git_commit",
-            &arguments(json!({ "message": "Add a.txt" })),
-            &mut answer,
-        );
-
-        assert!(result.unwrap().starts_with("succeeded\n"));
-        assert_eq!(
-            answer.asked,
-            [ApprovalRequest::GitCommit {
-                message: "Add a.txt".to_owned()
-            }]
-        );
-        assert_eq!(log(&dir), ["Add a.txt"]);
-        // Only the commit reached git, so nothing was pushed.
-        assert_eq!(
-            tools.git.invocations(),
-            [vec![
-                OsString::from("commit"),
-                OsString::from("--message=Add a.txt")
-            ]]
-        );
-    }
-
-    #[test]
-    fn git_commit_does_not_commit_when_the_user_declines() {
-        let dir = tempfile::tempdir().unwrap();
-        let cargo = FakeCargo::new();
-        let tools = tools_on_git(&dir, &cargo);
-        fs::write(dir.path().join("a.txt"), "a\n").unwrap();
-        stage(&dir, "a.txt");
-
-        let result = tools.dispatch(
-            "git_commit",
-            &arguments(json!({ "message": "Add a.txt" })),
-            &mut Answer::no(),
-        );
-
-        assert!(matches!(result, Err(ToolError::NotApproved)), "{result:?}");
-        assert_eq!(log(&dir), Vec::<String>::new());
-        assert_eq!(tools.git.invocations(), Vec::<Vec<OsString>>::new());
     }
 
     // names and arguments

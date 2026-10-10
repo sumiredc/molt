@@ -43,7 +43,8 @@ pub enum Event {
     },
     /// The model called a tool. `arguments` are as the model sent them.
     ToolCall { name: String, arguments: String },
-    /// molt ran `cargo check` at the end of a turn, or when a request was withdrawn. The model's
+    /// molt ran `cargo check` at the end of a turn, when a request was withdrawn, or before a
+    /// `git_commit` after a write (UC4). The model's
     /// own `run_cargo` calls are recorded as [`Event::ToolCall`] only.
     CargoCheck(CargoCheck),
 }

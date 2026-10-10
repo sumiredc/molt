@@ -5,7 +5,7 @@
 
 use std::fmt::Display;
 
-use super::mainline::{Boundary, BoundaryCause, Change};
+use super::mainline::{Boundary, BoundaryCause, Change, CommitOutcome};
 use crate::checker::diff::{DiffLine, line_diff};
 use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
@@ -49,8 +49,10 @@ pub const GIT_STATUS: &str = "Show `git status` of the project.";
 pub const GIT_DIFF: &str = "Show `git diff` of the project: the unstaged changes, or the \
      staged ones.";
 pub const GIT_DIFF_STAGED: &str = "Show the staged changes instead of the unstaged ones.";
-pub const GIT_COMMIT: &str = "Commit the staged changes. Asks the user for approval first and \
-     commits only if the user approves.";
+pub const GIT_COMMIT: &str = "Commit the files molt changed in this session that are not \
+     committed yet, with `message`. Call it only when the user asks for a commit. molt shows the \
+     user the diff and the message and commits only if the user approves; other changes in the \
+     working tree are left out.";
 pub const GIT_COMMIT_MESSAGE: &str = "The commit message.";
 pub const REQUEST_BOUNDARY: &str = "Stop and hand the request to the user when it cannot be \
      done well without items outside the user's profile. The user then chooses how to go on. \
@@ -230,6 +232,86 @@ pub fn crate_not_added(name: &str, why: &str) -> String {
         "note: `cargo add {name}` failed: {why}\nDo not call `run_cargo add` for it: write the \
          code without it, or call `finish` and tell the user."
     )
+}
+
+/// What the model gets back from `git_commit` (UC4).
+pub fn commit_result(outcome: &CommitOutcome) -> String {
+    match outcome {
+        CommitOutcome::Committed { files, output } => {
+            let mut result = format!("committed: {}", files.join(", "));
+            if !output.trim().is_empty() {
+                result.push('\n');
+                result.push_str(output.trim_end());
+            }
+            result
+        }
+        CommitOutcome::NotApproved => {
+            "not committed: the user did not approve the commit. Do not call `git_commit` again \
+             unless the user asks."
+                .to_owned()
+        }
+        CommitOutcome::NothingToCommit => "not committed: none of the files molt changed in this \
+             session differs from what git has."
+            .to_owned(),
+        CommitOutcome::NotARepository(error) => {
+            format!("not committed: the project is not in a git repository.\n{error}")
+        }
+        CommitOutcome::Failed { staged, error } => {
+            let staging = if *staged {
+                " The files stay staged."
+            } else {
+                ""
+            };
+            format!("failed: nothing was committed.{staging}\n{error}")
+        }
+    }
+}
+
+/// The system prompt for the message of a commit molt proposes (UC4: the `generate` model).
+pub const COMMIT_MESSAGE_SYSTEM: &str = "\
+You write git commit messages.
+Write a subject line of at most 72 characters that says what the change does. Add a blank line and a short body only when the subject cannot say why.
+Answer with the message only: no quotes, no code fences, no explanation.";
+
+/// The lines of the diff the `generate` model gets to write a commit message from.
+pub const COMMIT_DIFF_LINES: usize = 200;
+
+/// What the `generate` model is asked for the message of a commit: the user's request, if any, and
+/// what the commit records, as the user is shown it: `diff` (`git diff HEAD`) and each of
+/// `new_files` whole, at most [`COMMIT_DIFF_LINES`] lines in all.
+pub fn commit_message_request(
+    request: Option<&str>,
+    diff: &str,
+    new_files: &[(String, String)],
+) -> String {
+    let mut text = String::new();
+    if let Some(request) = request {
+        text.push_str(&format!("The user's latest request was:\n{request}\n\n"));
+    }
+    text.push_str("Write the commit message for these changes:\n");
+    let mut lines: Vec<String> = diff.lines().map(str::to_owned).collect();
+    for (path, content) in new_files {
+        lines.push(format!("\n`{path}` (a new file):"));
+        lines.extend(content.lines().map(|line| format!("+{line}")));
+    }
+    for line in lines.iter().take(COMMIT_DIFF_LINES) {
+        text.push_str(line);
+        text.push('\n');
+    }
+    if lines.len() > COMMIT_DIFF_LINES {
+        let more = lines.len() - COMMIT_DIFF_LINES;
+        text.push_str(&format!("... {more} more lines\n"));
+    }
+    text.push_str(
+        "\nWrite it in the language of the user's request above, not in the language of this \
+         message.",
+    );
+    text
+}
+
+/// The message of a commit molt proposes when the `generate` model cannot give one (UC4).
+pub fn fixed_commit_message(files: &[String]) -> String {
+    format!("molt: {}", files.join(", "))
 }
 
 /// The system prompt of the side line (PRD UC3). The side line has a message list of its own, so

@@ -6,13 +6,13 @@
 use serde_json::json;
 
 use super::{
-    AddOutcome, COMPILE_FIX_BUDGET, Change, CrateAdd, MANIFEST, MainLine, Progress, Turn, TurnEnd,
-    Withdrawal, check_event,
+    AddOutcome, COMPILE_FIX_BUDGET, Change, CrateAdd, LOCKFILE, MANIFEST, MainLine, Progress, Turn,
+    TurnEnd, Withdrawal, check_event,
 };
 use crate::agent::prompts;
 use crate::agent::tools::{Approver, ToolError};
 use crate::llm::{Message, ToolCall};
-use crate::workspace::cargo::CrateName;
+use crate::workspace::cargo::{CargoError, CargoOutput, CrateName};
 
 impl MainLine<'_> {
     /// Ends the model's part of the turn, which stopped at `end`. Returns how the turn ends, or
@@ -38,9 +38,8 @@ impl MainLine<'_> {
         } else {
             Vec::new()
         };
-        self.update_changes(&mut turn.changes, progress.manifest_before.as_deref());
-        let check = self.tools.cargo_check();
-        self.log.record(&check_event(&check));
+        let check = self.checked();
+        self.update_changes(&mut turn.changes, progress);
         let failed = match &check {
             Ok(output) if !output.success => Some(prompts::check_failed(
                 &output.stdout,
@@ -90,8 +89,9 @@ impl MainLine<'_> {
 
     /// Withdraws the request of the turn held at a boundary (UC3's `/abort`): nothing more is
     /// changed and nothing goes to the model, but what was written before the boundary is
-    /// checked with `cargo check` and handed back to be shown (PRD §3 Verification). Empty when
-    /// no turn is held, or the held turn changed nothing.
+    /// checked with `cargo check` and handed back to be shown (PRD §3 Verification). It stays on
+    /// disk, so it joins the uncommitted files (UC4). Empty when no turn is held, or the held turn
+    /// changed nothing.
     pub fn withdraw(&mut self) -> Withdrawal {
         let Some(mut held) = self.held.take() else {
             return Withdrawal {
@@ -105,9 +105,9 @@ impl MainLine<'_> {
                 check: None,
             };
         }
-        self.update_changes(&mut held.changes, held.progress.manifest_before.as_deref());
-        let check = self.tools.cargo_check();
-        self.log.record(&check_event(&check));
+        let check = self.checked();
+        self.update_changes(&mut held.changes, &held.progress);
+        self.absorb(&held.changes, &held.progress.committed);
         Withdrawal {
             changes: held.changes,
             check: Some(check),
@@ -159,28 +159,45 @@ impl MainLine<'_> {
         notes
     }
 
+    /// Runs `cargo check`, records it in the session log and keeps whether it passed.
+    pub(super) fn checked(&mut self) -> Result<CargoOutput, CargoError> {
+        let check = self.tools.cargo_check();
+        self.log.record(&check_event(&check));
+        self.last_check = Some(matches!(&check, Ok(output) if output.success));
+        check
+    }
+
     /// Reads the content of each changed file back from the disk, where `run_cargo fmt` may have
     /// changed it since it was written, and puts the `Cargo.toml` at the root among the changes
-    /// when it is no longer what it was when the turn started, as after `cargo add`.
-    fn update_changes(&self, changes: &mut Vec<Change>, manifest_before: Option<&str>) {
+    /// when it is no longer what it was when the turn started, as after `cargo add`. When
+    /// `Cargo.toml` is among them, so is the `Cargo.lock` at the root if cargo changed it since
+    /// the turn started (PRD UC4, §11).
+    pub(super) fn update_changes(&self, changes: &mut Vec<Change>, progress: &Progress) {
         for change in changes.iter_mut() {
             if let Some(now) = self.tools.read(&change.path) {
                 change.after = now;
             }
         }
-        let Some(now) = self.tools.read(MANIFEST) else {
+        self.join_if_changed(changes, MANIFEST, progress.manifest_before.as_deref());
+        let tools = &self.tools;
+        if changes.iter().any(|c| tools.same_file(&c.path, MANIFEST)) {
+            self.join_if_changed(changes, LOCKFILE, progress.lock_before.as_deref());
+        }
+    }
+
+    /// Puts the file at `path` among `changes` with its content now, if it is not there yet and
+    /// is no longer `before`.
+    fn join_if_changed(&self, changes: &mut Vec<Change>, path: &str, before: Option<&str>) {
+        let Some(now) = self.tools.read(path) else {
             return;
         };
         let tools = &self.tools;
-        match changes
-            .iter_mut()
-            .find(|c| tools.same_file(&c.path, MANIFEST))
-        {
+        match changes.iter_mut().find(|c| tools.same_file(&c.path, path)) {
             Some(change) => change.after = now,
-            None if manifest_before != Some(now.as_str()) => {
+            None if before != Some(now.as_str()) => {
                 changes.push(Change {
-                    path: MANIFEST.to_owned(),
-                    before: manifest_before.map(str::to_owned),
+                    path: path.to_owned(),
+                    before: before.map(str::to_owned),
                     after: now,
                 });
             }

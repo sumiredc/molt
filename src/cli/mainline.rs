@@ -1,6 +1,7 @@
 //! `molt` without a subcommand: checks UC2's preconditions, then opens the main line in the cargo
 //! project at cwd (PRD §8.6).
 
+pub(super) mod commit;
 mod diff;
 mod subline;
 
@@ -141,10 +142,13 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
                 let turn = agent.turn(&line, &mut UiApprover::new(ui));
                 show_turn(ui, &turn);
                 show_log_error(ui, agent);
-                if let TurnEnd::Boundary(boundary) = turn.end
-                    && let Some(code) = at_boundary(ui, agent, boundary)
-                {
-                    return code;
+                if let TurnEnd::Boundary(boundary) = turn.end {
+                    if let Some(code) = at_boundary(ui, agent, boundary) {
+                        return code;
+                    }
+                } else {
+                    commit::offer(ui, agent, &turn);
+                    show_log_error(ui, agent);
                 }
             }
             Ok(Input::Eof) => return ExitCode::SUCCESS,
@@ -159,7 +163,8 @@ fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
 
 /// Shows what the model said last. When the turn stopped instead of finishing, also shows why,
 /// the tool calls and the files written so far. Then the diff of each file molt changed and the
-/// result of `cargo check` (PRD §3 Verification).
+/// result of `cargo check` (PRD §3 Verification), and what came of each commit the model asked
+/// for (UC4).
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     if let Some(reply) = &turn.reply {
         ui.show(reply);
@@ -168,6 +173,9 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     // At a boundary the turn is held for the user's choice, not done: nothing was checked yet.
     if !matches!(turn.end, TurnEnd::Boundary(_)) {
         show_changes(ui, turn);
+    }
+    for outcome in &turn.commits {
+        commit::show_outcome(ui, outcome);
     }
 }
 
@@ -367,7 +375,11 @@ fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Op
     show_log_error(ui, agent);
     match resumed.turn.end {
         TurnEnd::Boundary(boundary) => Some(boundary),
-        _ => None,
+        _ => {
+            commit::offer(ui, agent, &resumed.turn);
+            show_log_error(ui, agent);
+            None
+        }
     }
 }
 
