@@ -502,6 +502,23 @@ fn the_end_of_the_input_at_the_answer_saves_nothing_as_an_interruption() {
 }
 
 #[test]
+fn a_failure_to_read_the_answer_reports_its_cause_and_saves_nothing() {
+    let (_dir, path) = no_profile();
+    let client = FakeChatClient::new();
+    client.push_chat(reply("question"));
+    // The script answers the question with a confirmation, which the Ui cannot read as a line.
+    let mut steps = reports(&[Category::Ownership]);
+    steps.push(Step::Confirm(true));
+
+    let (_, outcome) = run_init(steps, &client, &config(true), &path);
+    let error = outcome.unwrap_err();
+    assert!(error.contains("ui script"), "{error}");
+    assert!(error.contains("no profile was saved"), "{error}");
+    assert!(!path.exists());
+    assert_eq!(client.requests().len(), 1, "nothing is judged");
+}
+
+#[test]
 fn an_interruption_while_waiting_for_the_model_saves_nothing() {
     let (_dir, path) = no_profile();
     let client = FakeChatClient::new();
