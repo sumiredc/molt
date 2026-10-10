@@ -15,6 +15,7 @@ use serde::Serialize;
 
 use crate::llm::ChatRequest;
 use crate::llm::openai::request_body;
+use crate::profile::status::{Provenance, Status};
 use crate::profile::store::Timestamp;
 
 /// The environment variable that enables writing the request bodies.
@@ -27,7 +28,8 @@ pub fn request_bodies_enabled(var: impl Fn(&str) -> Option<OsString>) -> bool {
 
 /// One event of the session log. The `event` key of its line names the kind.
 ///
-/// Events of the main line carry no `line` key.
+/// Events of the main line carry no `line` key. Those of the side line ([`Event::Choice`] and
+/// [`Event::ProfileChange`]) carry `line: "sub"` (PRD §8.8).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum Event {
@@ -47,7 +49,41 @@ pub enum Event {
     /// `git_commit` after a write (UC4). The model's
     /// own `run_cargo` calls are recorded as [`Event::ToolCall`] only.
     CargoCheck(CargoCheck),
+    /// The user's choice at a boundary on the side line (PRD UC3) stands: ① or ② was chosen, or
+    /// ③'s `/done` passed. `items` are those the side line was opened for, `policy` is the
+    /// one-line policy of ②, and `files` are those the user changed in ③.
+    Choice {
+        choice: String,
+        items: Vec<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        policy: Option<String>,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        files: Vec<String>,
+    },
+    /// The user's choices on the side line changed the status of `item` in the profile.
+    ProfileChange {
+        item: String,
+        from: Status,
+        to: Status,
+        provenance: Provenance,
+    },
 }
+
+impl Event {
+    /// The line the event happened on: [`SUB`] for the side line, `None` for the main line.
+    fn line(&self) -> Option<&'static str> {
+        match self {
+            Event::Choice { .. } | Event::ProfileChange { .. } => Some(SUB),
+            Event::Detected { .. }
+            | Event::Rejected { .. }
+            | Event::ToolCall { .. }
+            | Event::CargoCheck(_) => None,
+        }
+    }
+}
+
+/// The `line` of what happened on the side line, in the events and in the request bodies.
+const SUB: &str = "sub";
 
 /// An item the check detected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -85,6 +121,8 @@ pub enum CargoCheck {
 #[derive(Serialize)]
 struct Line<'a, T: Serialize> {
     at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    line: Option<&'static str>,
     #[serde(flatten)]
     body: &'a T,
 }
@@ -183,18 +221,27 @@ impl SessionLog {
         self.requests.as_ref().map(|sink| sink.path.as_path())
     }
 
-    /// Appends `event` as one line.
+    /// Appends `event` as one line, with `line: "sub"` when it is an event of the side line.
     pub fn record(&self, event: &Event) {
         if let Some(sink) = &self.events {
-            sink.write(event);
+            sink.write(event.line(), event);
         }
     }
 
-    /// Appends the body of `request` as it is sent to the chat API, when `MOLT_LOG` enabled it.
-    /// The headers, and the API key in them, are not part of it.
+    /// Appends the body of `request`, sent to the chat API by the main line, when `MOLT_LOG`
+    /// enabled it. The headers, and the API key in them, are not part of it.
     pub fn record_request(&self, request: &ChatRequest) {
         if let Some(sink) = &self.requests {
-            sink.write(&request_body(request));
+            sink.write(None, &request_body(request));
+        }
+    }
+
+    /// Appends the body of `request`, sent by the side line, as [`SessionLog::record_request`]
+    /// does but with `line: "sub"` beside it, so that it tells from the main line's even when
+    /// both lines use the same model.
+    pub fn record_sub_request(&self, request: &ChatRequest) {
+        if let Some(sink) = &self.requests {
+            sink.write(Some(SUB), &request_body(request));
         }
     }
 
@@ -223,13 +270,14 @@ impl Sink {
         })
     }
 
-    fn write(&self, body: &impl Serialize) {
+    fn write(&self, line: Option<&'static str>, body: &impl Serialize) {
         let mut file = self.file.borrow_mut();
         let Some(writer) = file.as_mut() else {
             return;
         };
         let line = Line {
             at: Timestamp::now().to_string(),
+            line,
             body,
         };
         let result = serde_json::to_string(&line)

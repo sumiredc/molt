@@ -1,9 +1,10 @@
-//! Tests of several items at one boundary (PRD UC3's exception flow). Named so that
-//! `cargo test subline::bundle` selects them.
+//! Tests of several items at one boundary (PRD UC3's exception flow) and of the side-line events in
+//! the session log (PRD §8.8). Named so that `cargo test subline::bundle` selects them.
 
 use std::fs;
+use std::path::Path;
 
-use serde_json::json;
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 use super::super::{Choice, Done, Resolution};
@@ -16,6 +17,8 @@ use crate::profile::store::Profile;
 use crate::session::SessionLog;
 use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::path::Root;
+
+const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
 
 struct Refuse;
 
@@ -75,6 +78,17 @@ fn reply(text: &str) -> ChatResponse {
     }
 }
 
+fn write_main(id: &str, content: &str) -> ChatResponse {
+    ChatResponse {
+        content: None,
+        tool_calls: vec![ToolCall {
+            id: id.to_owned(),
+            name: "write_file".to_owned(),
+            arguments: json!({ "path": "src/main.rs", "content": content }).to_string(),
+        }],
+    }
+}
+
 /// Runs a turn on "share it" that the model stops at a boundary on `items` with
 /// `request_boundary`.
 fn stop_at(client: &FakeChatClient, main_line: &mut MainLine, items: &[&str]) -> Boundary {
@@ -115,6 +129,15 @@ fn generate_requests(client: &FakeChatClient) -> Vec<ChatRequest> {
         .filter(|request| request.model == generate)
         .collect()
 }
+
+fn lines(path: &Path) -> Vec<Value> {
+    fs::read_to_string(path)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
 #[test]
 fn the_side_line_opens_for_the_items_of_the_category_of_the_first_item() {
     let dir = project();
@@ -435,4 +458,189 @@ fn a_choice_for_an_item_of_a_bundle_that_recurred_after_rewrite_offers_no_rewrit
 
     assert!(dbg.is_recurrence());
     assert_eq!(dbg.choices(), [Choice::Unlock, Choice::UserWrote]);
+}
+
+#[test]
+fn each_choice_and_profile_change_is_logged_with_line_sub_and_the_main_line_events_are_not() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line =
+        main_line(&client, &cargo, &dir).with_log(SessionLog::create(logs.path(), false).unwrap());
+    let boundary = stop_at(&client, &mut main_line, &["arc", "dbg_macro", "mutex"]);
+    let unlock = choose(&main_line, boundary, Choice::Unlock);
+    let next = pending(main_line.resolve(&unlock, &mut Refuse).unwrap());
+    client.push_chat(Ok(reply("Print with println! instead.")));
+    let rewrite = choose(&main_line, next, Choice::Rewrite);
+    client.push_chat(Ok(write_main("after", "fn main() {}\n")));
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&rewrite, &mut Refuse).unwrap().resumed();
+
+    let events = lines(main_line.log().path().unwrap());
+    let kinds: Vec<(&str, Option<&str>)> = events
+        .iter()
+        .map(|event| (event["event"].as_str().unwrap(), event["line"].as_str()))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            ("tool_call", None),
+            ("choice", Some("sub")),
+            ("profile_change", Some("sub")),
+            ("profile_change", Some("sub")),
+            ("choice", Some("sub")),
+            ("profile_change", Some("sub")),
+            ("tool_call", None),
+            ("cargo_check", None),
+        ]
+    );
+    assert_eq!(
+        events[1],
+        json!({ "at": events[1]["at"], "line": "sub", "event": "choice", "choice": "unlock", "items": ["arc", "mutex"] })
+    );
+    assert_eq!(
+        events[4],
+        json!({ "at": events[4]["at"], "line": "sub", "event": "choice", "choice": "rewrite", "items": ["dbg_macro"], "policy": "Print with println! instead." })
+    );
+    let changes: Vec<(&str, &str, &str, &str)> = [&events[2], &events[3], &events[5]]
+        .into_iter()
+        .map(|event| {
+            (
+                event["item"].as_str().unwrap(),
+                event["from"].as_str().unwrap(),
+                event["to"].as_str().unwrap(),
+                event["provenance"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        changes,
+        [
+            ("arc", "unknown", "known", "side_line"),
+            ("mutex", "unknown", "known", "side_line"),
+            ("dbg_macro", "unknown", "seen", "side_line"),
+        ]
+    );
+}
+
+#[test]
+fn write_it_myself_is_logged_with_its_files_and_the_items_that_became_known_with_line_sub() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line =
+        main_line(&client, &cargo, &dir).with_log(SessionLog::create(logs.path(), false).unwrap());
+    let boundary = stop_at(&client, &mut main_line, &["dbg_macro"]);
+    let mut side = main_line.side_line(boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    client.push_chat(Ok(reply("review")));
+    let Done::Passed { resolution, .. } = main_line.done(&mut side) else {
+        panic!("/done did not pass");
+    };
+    client.push_chat(Ok(reply("done")));
+
+    main_line
+        .resolve(&resolution, &mut Refuse)
+        .unwrap()
+        .resumed();
+
+    let events = lines(main_line.log().path().unwrap());
+    let sub: Vec<&Value> = events
+        .iter()
+        .filter(|event| event.get("line").is_some())
+        .collect();
+    assert_eq!(
+        sub,
+        [
+            &json!({ "at": sub[0]["at"], "line": "sub", "event": "choice", "choice": "user_wrote", "items": ["dbg_macro"], "files": ["src/main.rs"] }),
+            &json!({ "at": sub[1]["at"], "line": "sub", "event": "profile_change", "item": "dbg_macro", "from": "unknown", "to": "known", "provenance": "wrote_it" }),
+        ]
+    );
+}
+
+#[test]
+fn a_choice_that_changes_no_status_logs_no_profile_change() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            key("dbg_macro"),
+            Status::Seen,
+            Provenance::Manual,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile)
+        .with_log(SessionLog::create(logs.path(), false).unwrap());
+    let boundary = stop_at(&client, &mut main_line, &["dbg_macro"]);
+    client.push_chat(Ok(reply("policy")));
+    let rewrite = choose(&main_line, boundary, Choice::Rewrite);
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&rewrite, &mut Refuse).unwrap().resumed();
+
+    let events = lines(main_line.log().path().unwrap());
+    let kinds: Vec<&str> = events
+        .iter()
+        .map(|event| event["event"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, ["tool_call", "choice"]);
+}
+
+#[test]
+fn the_request_bodies_of_the_side_line_carry_line_sub_and_those_of_the_main_line_do_not() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line =
+        main_line(&client, &cargo, &dir).with_log(SessionLog::create(logs.path(), true).unwrap());
+    let boundary = stop_at(&client, &mut main_line, &["dbg_macro"]);
+    let mut side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("explanation")));
+    client.push_chat(Ok(reply("answer")));
+    client.push_chat(Ok(reply("policy")));
+    side.explain(main_line.log()).unwrap();
+    side.ask("where does it print?", main_line.log()).unwrap();
+    let rewrite = side.resolve(Choice::Rewrite, main_line.log()).unwrap();
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&rewrite, &mut Refuse).unwrap().resumed();
+
+    let bodies = lines(main_line.log().requests_path().unwrap());
+    let sides: Vec<Option<&str>> = bodies.iter().map(|body| body["line"].as_str()).collect();
+    assert_eq!(
+        sides,
+        [None, Some("sub"), Some("sub"), Some("sub"), None],
+        "the turn, the explanation, the answer, the policy, the turn going on"
+    );
+}
+
+#[test]
+fn a_choice_dropped_by_withdrawing_the_request_is_not_logged() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line =
+        main_line(&client, &cargo, &dir).with_log(SessionLog::create(logs.path(), false).unwrap());
+    let boundary = stop_at(&client, &mut main_line, &["arc", "dbg_macro"]);
+    let unlock = choose(&main_line, boundary, Choice::Unlock);
+    pending(main_line.resolve(&unlock, &mut Refuse).unwrap());
+
+    main_line.withdraw();
+
+    let events = lines(main_line.log().path().unwrap());
+    assert!(
+        events.iter().all(|event| event.get("line").is_none()),
+        "{events:?}"
+    );
 }

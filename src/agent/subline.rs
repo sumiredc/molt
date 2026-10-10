@@ -229,7 +229,7 @@ impl<'a> SubLine<'a> {
         };
         messages.push(Message::User { content });
         let request = self.router.request(Role::Light, messages);
-        log.record_request(&request);
+        log.record_sub_request(&request);
         let content = match self.client.chat(&request) {
             Ok(response) => response.content,
             Err(ChatError::Interrupted) => return Err(Unresolved::Interrupted),
@@ -305,7 +305,7 @@ impl<'a> SubLine<'a> {
         let mut messages = self.messages.clone();
         messages.push(user);
         let request = self.router.request(Role::Reason, messages);
-        log.record_request(&request);
+        log.record_sub_request(&request);
         let response = self.client.chat(&request)?;
         Ok(response.content.unwrap_or_default())
     }

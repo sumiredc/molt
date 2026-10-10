@@ -393,7 +393,10 @@ impl<'a> MainLine<'a> {
     /// the message list as one message, the only thing from the side lines, and the same turn
     /// goes on. The files the user changed in ③ join the turn's changes. An item counts as chosen
     /// for when a choice was made on a side line opened for it, or when the user's lines of ③
-    /// used it, since it becomes `known` then. `None` when no turn is held at a boundary.
+    /// used it, since it becomes `known` then. Once the choices stand, each of them, and each
+    /// change of the profile it made, goes to the session log with `line: "sub"` (PRD §8.8); a
+    /// choice dropped by withdrawing the request does not. `None` when no turn is held at a
+    /// boundary.
     pub fn resolve(
         &mut self,
         resolution: &Resolution,
@@ -428,6 +431,20 @@ impl<'a> MainLine<'a> {
         let held = self.held.take()?;
         let at = Timestamp::now();
         for resolution in &held.chosen {
+            self.log.record(&Event::Choice {
+                choice: resolution.choice().name().to_owned(),
+                items: resolution
+                    .answers()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect(),
+                policy: resolution.policy().map(str::to_owned),
+                files: resolution
+                    .files()
+                    .iter()
+                    .map(|file| file.path.clone())
+                    .collect(),
+            });
             self.apply(resolution, at);
         }
         let saved = match &self.profile_path {
@@ -501,7 +518,7 @@ impl<'a> MainLine<'a> {
         })))
     }
 
-    /// Changes the profile as `resolution` chose, at `at`.
+    /// Changes the profile as `resolution` chose, at `at`, and records each change.
     fn apply(&mut self, resolution: &Resolution, at: Timestamp) {
         let (to, provenance) = match resolution.choice() {
             Choice::Unlock => (Status::Known, Provenance::SideLine),
@@ -530,13 +547,21 @@ impl<'a> MainLine<'a> {
             // Only these are changes, and PRD §7 allows each with `side_line` and `wrote_it`, so
             // none is refused.
             // ② leaves a `seen` item as it is, and ① a `known` one.
+            let from = self.profile.status(item);
             if matches!(
-                (self.profile.status(item), to),
+                (from, to),
                 (Status::Unknown, _) | (Status::Seen, Status::Known)
-            ) {
-                let _ = self
-                    .profile
-                    .transition(item.clone(), to, provenance, at, None);
+            ) && self
+                .profile
+                .transition(item.clone(), to, provenance, at, None)
+                .is_ok()
+            {
+                self.log.record(&Event::ProfileChange {
+                    item: item.to_string(),
+                    from,
+                    to,
+                    provenance,
+                });
             }
         }
     }

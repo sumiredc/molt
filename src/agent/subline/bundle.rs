@@ -33,7 +33,8 @@ pub(crate) fn first(boundary: Boundary) -> Boundary {
     }
 }
 
-/// Tests of bundling the items of one boundary, and of choosing for each bundle before the main
-/// line goes on. Named so that `cargo test subline::bundle` selects them.
+/// Tests of bundling the items of one boundary, of choosing for each bundle before the main line
+/// goes on, and of the side-line events in the session log. Named so that
+/// `cargo test subline::bundle` selects them.
 #[cfg(test)]
 mod tests;
