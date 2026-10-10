@@ -8,7 +8,7 @@ mod check;
 mod doctor;
 mod init;
 mod mainline;
-pub(crate) mod profile;
+mod profile;
 
 /// A Rust coding agent that writes code only in the ways its user can understand.
 #[derive(Debug, Parser)]
