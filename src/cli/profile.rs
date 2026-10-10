@@ -69,23 +69,7 @@ fn show(path: &Path) -> Result<(), String> {
 /// Sets `key` to `status` by hand. An invalid key or status is rejected before
 /// the profile is read, so the file is left as it was.
 fn set(path: &Path, key: &str, status: &str) -> Result<(), String> {
-    let parsed_key = key.parse::<ItemKey>();
-    let parsed_status = status.parse::<Status>();
-    let (key, status) = match (parsed_key, parsed_status) {
-        (Ok(key), Ok(status)) => (key, status),
-        (key, status) => {
-            let mut message = String::new();
-            if let Err(error) = key {
-                writeln!(message, "{error}").unwrap();
-            }
-            if let Err(error) = status {
-                writeln!(message, "{error}").unwrap();
-            }
-            message.push_str(&valid_inputs());
-            return Err(message);
-        }
-    };
-
+    let (key, status) = parse_setting(key, status)?;
     let mut profile = load(path)?;
     profile
         .transition(
@@ -98,6 +82,26 @@ fn set(path: &Path, key: &str, status: &str) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     profile.save(path).map_err(|error| error.to_string())?;
     print(&format!("{key}: {status} ({})\n", Provenance::Manual))
+}
+
+/// The key and status of `molt profile set <key> <status>`. When either is
+/// invalid, the message names what is wrong and lists the valid keys and
+/// statuses. `molt init` takes its corrections in the same form.
+pub(crate) fn parse_setting(key: &str, status: &str) -> Result<(ItemKey, Status), String> {
+    match (key.parse::<ItemKey>(), status.parse::<Status>()) {
+        (Ok(key), Ok(status)) => Ok((key, status)),
+        (key, status) => {
+            let mut message = String::new();
+            if let Err(error) = key {
+                writeln!(message, "{error}").unwrap();
+            }
+            if let Err(error) = status {
+                writeln!(message, "{error}").unwrap();
+            }
+            message.push_str(&valid_inputs());
+            Err(message)
+        }
+    }
 }
 
 /// The valid keys and statuses of `molt profile set`, shown when one is
