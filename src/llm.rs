@@ -3,11 +3,13 @@
 
 pub mod fake;
 pub(crate) mod fake_script;
+pub(crate) mod interrupt;
 pub mod openai;
 pub mod router;
 pub mod types;
 
 pub use fake::FakeChatClient;
+pub(crate) use interrupt::Interrupt;
 pub use openai::OpenAiClient;
 pub use router::{JsonError, Role, Router};
 pub use types::{

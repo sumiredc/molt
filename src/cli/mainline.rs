@@ -14,10 +14,10 @@ use crate::agent::mainline::{
     AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine,
     TOOL_CALL_BUDGET, Turn, TurnEnd,
 };
-use crate::agent::subline::{Choice, SubLine};
+use crate::agent::subline::{Resolution, Unresolved};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
-use crate::llm::{ChatClient, OpenAiClient, Router, fake_script};
+use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::{self, SessionLog};
@@ -77,17 +77,29 @@ fn preconditions(profile_flag: Option<&Path>) -> Result<(Root, Profile, PathBuf)
 }
 
 /// Reads `config.toml` and creates the client: the responses of the `--fake` script at `fake`,
-/// otherwise the configured endpoint. The main line does not open when the client cannot be
-/// created, e.g. the script cannot be read or the API key's environment variable is unset.
+/// otherwise the configured endpoint, whose request Ctrl-C drops while molt waits for it (the
+/// script answers at once, so it is not waited for). The main line does not open when the client
+/// cannot be created, e.g. the script cannot be read or the API key's environment variable is
+/// unset.
 fn connect(fake: Option<&Path>) -> Result<(PathBuf, Config, Box<dyn ChatClient>), String> {
     let home = config::molt_home(|name| std::env::var_os(name)).map_err(|e| e.to_string())?;
     let config = Config::load(&config::config_path(&home)).map_err(|e| e.to_string())?;
     let client: Box<dyn ChatClient> = match fake {
         Some(path) => Box::new(fake_script::load(path).map_err(|e| e.to_string())?),
-        None => Box::new(
-            OpenAiClient::new(&config.api, |name| std::env::var(name).ok())
-                .map_err(|e| e.to_string())?,
-        ),
+        None => {
+            let client = OpenAiClient::new(&config.api, |name| std::env::var(name).ok())
+                .map_err(|e| e.to_string())?;
+            // Before the first line is read: rustyline restores the SIGINT action it found.
+            match Interrupt::on_sigint() {
+                Ok(interrupt) => Box::new(client.with_interrupt(interrupt)),
+                Err(error) => {
+                    eprintln!(
+                        "cannot catch Ctrl-C while waiting for the model ({error}); Ctrl-C then ends molt"
+                    );
+                    Box::new(client)
+                }
+            }
+        }
     };
     Ok((home, config, client))
 }
@@ -118,7 +130,7 @@ fn open_ui(ui_script: Option<&Path>) -> Result<Box<dyn Ui>, String> {
     }
 }
 
-/// Reads requests until `/quit` or Ctrl-D (exit 0) or Ctrl-C (exit non-zero), and runs a turn
+/// Reads requests until `/quit` or Ctrl-D (exit 0) or Ctrl-C at the prompt (exit non-zero), and runs a turn
 /// of `agent` for each. A blank line is not sent to the model.
 fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
     loop {
@@ -279,13 +291,20 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 withdraw(ui, agent);
                 return None;
             }
-            Left::Chose(choice) => {
-                // When the turn went on to its end, the main line takes the next request (`None`).
-                // At another boundary, the side line opens there.
-                let boundary = resolve(ui, agent, &side, choice)?;
-                side = agent.side_line(boundary);
-                continue;
-            }
+            Left::Chose(choice) => match side.resolve(choice, agent.log()) {
+                Ok(resolution) => {
+                    // When the turn went on to its end, the main line takes the next request
+                    // (`None`). At another boundary, the side line opens there.
+                    let boundary = resolve(ui, agent, &resolution)?;
+                    side = agent.side_line(boundary);
+                    continue;
+                }
+                // Ctrl-C while waiting for the policy of ②: nothing changed, so the main line is
+                // paused at the boundary as after Ctrl-C on the side line.
+                Err(Unresolved::Interrupted) => show_log_error(ui, agent),
+                // `subline::run` offers only the choices of `side`.
+                Err(Unresolved::NotOffered) => return None,
+            },
             Left::Interrupted => {}
             Left::Eof => return Some(ExitCode::SUCCESS),
             Left::Failed => return Some(ExitCode::FAILURE),
@@ -310,17 +329,10 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
     }
 }
 
-/// Goes on with the turn held at the boundary of `side` as the user chose there (UC3, §8.5): shows
-/// how the profile changed, then the rest of the turn as any turn. Returns the next boundary when
-/// the turn stops at one again.
-fn resolve(
-    ui: &mut dyn Ui,
-    agent: &mut MainLine,
-    side: &SubLine,
-    choice: Choice,
-) -> Option<Boundary> {
-    // `subline::run` offers only the choices of `side`, so the resolution is there.
-    let resolution = side.resolve(choice, agent.log())?;
+/// Goes on with the turn held at the boundary as the user chose on the side line (UC3, §8.5):
+/// shows how the profile changed, then the rest of the turn as any turn. Returns the next boundary
+/// when the turn stops at one again.
+fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
     let names = resolution
         .items()
         .iter()
@@ -333,7 +345,7 @@ fn resolve(
             "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
         )),
     }
-    let resumed = agent.resolve(&resolution, &mut UiApprover::new(ui))?;
+    let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
     if let Err(error) = &resumed.saved {
         ui.show(&format!(
             "Could not save the profile: {error}. The change holds for this session only."
@@ -1277,5 +1289,73 @@ mod session_log {
         assert_eq!(shown[0], "one");
         assert!(shown[1].starts_with(&warning), "{shown:?}");
         assert_eq!(shown[2], "two");
+    }
+}
+
+/// Ctrl-C while the main line waits for the model: the turn stops there, what was written stays,
+/// and the prompt comes back (PRD §8.1). The client returns [`ChatError::Interrupted`] as the real
+/// one does on Ctrl-C. Named so that `cargo test while_waiting` selects them.
+#[cfg(test)]
+mod while_waiting {
+    use std::fs;
+
+    use serde_json::json;
+
+    use super::tests::{input, project, reply};
+    use super::*;
+    use crate::llm::{ChatError, ChatResponse, FakeChatClient, ToolCall};
+    use crate::workspace::cargo::{CargoOutput, FakeCargo};
+
+    const PRINT_1: &str = "fn main() {\n    println!(\"1\");\n}\n";
+
+    #[test]
+    fn an_interruption_stops_the_turn_keeps_what_was_written_and_the_prompt_comes_back() {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "w".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/main.rs", "content": PRINT_1 }).to_string(),
+            }],
+        }));
+        client.push_chat(Err(ChatError::Interrupted));
+        client.push_chat(Ok(reply("back again")));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(CargoOutput {
+            success: true,
+            stdout: String::new(),
+            stderr: String::new(),
+        }));
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        );
+        let mut ui = ScriptedUi::new([input("print 1"), input("again"), input("/quit")]);
+
+        let code = main_line(&mut ui, &mut agent);
+
+        assert_eq!(code, ExitCode::SUCCESS);
+        let shown = ui.shown();
+        assert_eq!(
+            shown[..3],
+            [
+                "Stopped: the request to the model was interrupted",
+                "Tool calls in this turn: write_file (1)",
+                "Files written in this turn: src/main.rs",
+            ]
+        );
+        assert_eq!(shown.last().map(String::as_str), Some("back again"));
+        assert_eq!(ui.asked(), ["molt> ", "molt> ", "molt> "]);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            PRINT_1
+        );
     }
 }

@@ -6,6 +6,7 @@ mod resolve;
 use super::show_error_of;
 use crate::agent::subline::{Choice, SubLine};
 use crate::cli::ui::{Input, Ui};
+use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
 use crate::session::SessionLog;
 
@@ -23,7 +24,8 @@ pub(super) enum Left {
     Chose(Choice),
     /// `/abort`: the request is to be withdrawn.
     Aborted,
-    /// Ctrl-C: the main line goes back to being paused at the boundary.
+    /// Ctrl-C, at the prompt or while waiting for the model: the main line goes back to being
+    /// paused at the boundary.
     Interrupted,
     /// Ctrl-D: the main line ends.
     Eof,
@@ -41,6 +43,10 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
     if !side.explained() {
         match side.explain(log) {
             Ok(explanation) => ui.show(&indent(&explanation)),
+            Err(ChatError::Interrupted) => {
+                show_error_of(ui, log);
+                return leave(ui, Left::Interrupted);
+            }
             Err(error) => ui.show(&indent(&format!("Could not get the explanation: {error}"))),
         }
         show_error_of(ui, log);
@@ -71,6 +77,10 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
                 } else {
                     match side.ask(line, log) {
                         Ok(answer) => ui.show(&indent(&answer)),
+                        Err(ChatError::Interrupted) => {
+                            show_error_of(ui, log);
+                            break Left::Interrupted;
+                        }
                         Err(error) => {
                             ui.show(&indent(&format!("Could not get an answer: {error}")))
                         }
@@ -86,6 +96,11 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
             }
         }
     };
+    leave(ui, left)
+}
+
+/// Shows the banner of leaving the side line, and returns `left`.
+fn leave(ui: &mut dyn Ui, left: Left) -> Left {
     ui.show(&banner("back to the main line"));
     left
 }
@@ -503,5 +518,159 @@ mod open {
     #[test]
     fn indent_puts_2_spaces_before_each_line_but_blank_ones() {
         assert_eq!(indent("a\n\n  b\n"), "  a\n\n    b");
+    }
+
+    /// Ctrl-C while the side line waits for the model (UC3's exception flow): the request is
+    /// dropped and the main line is paused at the boundary, with nothing changed. The client
+    /// returns [`ChatError::Interrupted`] as the real one does on Ctrl-C. Named so that
+    /// `cargo test while_waiting` selects them.
+    mod while_waiting {
+        use super::*;
+
+        #[test]
+        fn interrupting_the_explanation_pauses_the_main_line_and_side_asks_for_it_again() {
+            let client = stops_at_a_boundary_then(&[]);
+            client.push_chat(Err(ChatError::Interrupted));
+            client.push_chat(Ok(reply("explanation")));
+            let (code, ui) = run(
+                &client,
+                [
+                    input("debug 1"),
+                    input("/side"),
+                    input("/abort"),
+                    input("/quit"),
+                ],
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(
+                ui.shown()[2..],
+                [
+                    ENTER,
+                    LEAVE,
+                    PAUSED,
+                    ENTER,
+                    "  explanation",
+                    HINT_SHOWN,
+                    LEAVE,
+                    "Request withdrawn."
+                ]
+            );
+            assert_eq!(ui.asked(), ["molt> ", "molt> ", SUB, "molt> "]);
+            let requests = client.requests();
+            assert_eq!(requests.len(), 4, "the explanation is asked for once more");
+            assert_eq!(requests[3], requests[2]);
+        }
+
+        #[test]
+        fn an_interrupted_question_is_left_out_of_the_side_line_and_the_main_line_is_paused() {
+            let client = stops_at_a_boundary_then(&["explanation"]);
+            client.push_chat(Err(ChatError::Interrupted));
+            client.push_chat(Ok(reply("answer 2")));
+            let (code, ui) = run(
+                &client,
+                [
+                    input("debug 1"),
+                    input("q1"),
+                    input("/side"),
+                    input("q2"),
+                    input("/abort"),
+                    input("/quit"),
+                ],
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(
+                ui.shown()[5..],
+                [
+                    LEAVE,
+                    PAUSED,
+                    ENTER,
+                    HINT_SHOWN,
+                    "  answer 2",
+                    LEAVE,
+                    "Request withdrawn."
+                ]
+            );
+            let requests = client.requests();
+            assert_eq!(requests.len(), 5);
+            let next = format!("{:?}", requests[4].messages);
+            assert!(next.contains("q2"), "{next}");
+            assert!(!next.contains("q1"), "{next}");
+        }
+
+        #[test]
+        fn interrupting_the_explanation_changes_neither_the_files_nor_the_profile() {
+            let client = stops_at_a_boundary_then(&[]);
+            client.push_chat(Err(ChatError::Interrupted));
+            let dir = project_with_a_profile();
+            let before = snapshot(dir.path());
+            let cargo = FakeCargo::new();
+
+            let (code, _) = run_in(&dir, &client, &cargo, [input("debug 1"), Step::Eof]);
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(snapshot(dir.path()), before);
+            assert!(cargo.calls().is_empty());
+        }
+
+        #[test]
+        fn interrupting_a_question_changes_neither_the_files_nor_the_profile() {
+            let client = stops_at_a_boundary_then(&["explanation"]);
+            client.push_chat(Err(ChatError::Interrupted));
+            let dir = project_with_a_profile();
+            let before = snapshot(dir.path());
+            let cargo = FakeCargo::new();
+
+            let (code, _) = run_in(
+                &dir,
+                &client,
+                &cargo,
+                [input("debug 1"), input("q1"), Step::Eof],
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(snapshot(dir.path()), before);
+            assert!(cargo.calls().is_empty());
+        }
+
+        #[test]
+        fn interrupting_the_policy_of_rewrite_changes_nothing_and_pauses_the_main_line() {
+            let client = stops_at_a_boundary_then(&["explanation"]);
+            client.push_chat(Err(ChatError::Interrupted));
+            let dir = project_with_a_profile();
+            let before = snapshot(dir.path());
+            let cargo = FakeCargo::new();
+
+            let (code, ui) = run_in(
+                &dir,
+                &client,
+                &cargo,
+                [
+                    input("debug 1"),
+                    input("/choose"),
+                    Step::Select(2),
+                    input("/side"),
+                    input("/abort"),
+                    input("/quit"),
+                ],
+            );
+
+            assert_eq!(code, ExitCode::SUCCESS);
+            assert_eq!(
+                ui.shown()[5..],
+                [
+                    LEAVE,
+                    PAUSED,
+                    ENTER,
+                    HINT_SHOWN,
+                    LEAVE,
+                    "Request withdrawn."
+                ]
+            );
+            assert_eq!(client.requests().len(), 4, "nothing sent after the policy");
+            assert_eq!(snapshot(dir.path()), before);
+            assert!(cargo.calls().is_empty());
+        }
     }
 }

@@ -6,10 +6,12 @@ use std::fmt;
 use std::net::IpAddr;
 use std::time::Duration;
 
+use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use super::ChatClient;
+use super::interrupt::Interrupt;
 use super::types::{
     ChatError, ChatRequest, ChatResponse, Message, ResponseFormat, ToolCall, ToolChoice,
 };
@@ -23,6 +25,8 @@ pub struct OpenAiClient {
     base_url: String,
     /// `None` なら Authorization ヘッダを送らない。
     api_key: Option<ApiKey>,
+    /// `Some` なら、chat の応答を待つ間の中断を受ける。
+    interrupt: Option<Interrupt>,
 }
 
 /// API キー。`Debug` に値を出さない（PRD §3）。
@@ -75,7 +79,16 @@ impl OpenAiClient {
             http,
             base_url: api.base_url.trim_end_matches('/').to_owned(),
             api_key,
+            interrupt: None,
         })
+    }
+
+    /// chat の応答を待つ間に `interrupt` が上がったら、応答を待たずに [`ChatError::Interrupted`]
+    /// を返すようにする。要求は別のスレッドで送り、中断したらその応答は捨てる（接続は切らないので、
+    /// エンドポイントは生成を続けうる）。
+    pub(crate) fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
+        self.interrupt = Some(interrupt);
+        self
     }
 
     fn endpoint(&self, path: &str) -> String {
@@ -92,13 +105,12 @@ impl OpenAiClient {
         }
     }
 
-    /// 応答の本文を、API キーを伏せて読む。2xx 以外なら [`ChatError::Status`] にする。
+    /// 受けた本文の API キーを伏せる。2xx 以外なら [`ChatError::Status`] にする。
     ///
     /// 2xx の本文も伏せる。形が合わないと serde_json のエラーが本文の値を含み、
     /// [`ChatError::InvalidResponse`] に入るため。
-    fn read_body(&self, response: reqwest::blocking::Response) -> Result<String, ChatError> {
-        let status = response.status();
-        let body = self.redact(response.text().map_err(ChatError::Request)?);
+    fn read_body(&self, (status, text): (StatusCode, String)) -> Result<String, ChatError> {
+        let body = self.redact(text);
         if !status.is_success() {
             return Err(ChatError::Status {
                 status: status.as_u16(),
@@ -144,20 +156,34 @@ fn plain_http_host_off_this_machine(base_url: &str) -> Option<String> {
     })
 }
 
+/// 要求を送り、応答の状態と本文を受け取る。
+fn exchange(builder: reqwest::blocking::RequestBuilder) -> Result<(StatusCode, String), ChatError> {
+    let response = builder.send().map_err(ChatError::Request)?;
+    let status = response.status();
+    let text = response.text().map_err(ChatError::Request)?;
+    Ok((status, text))
+}
+
 impl ChatClient for OpenAiClient {
     fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
         let builder = self
             .http
             .post(self.endpoint("chat/completions"))
             .json(&request_body(request));
-        let response = self.authorize(builder).send().map_err(ChatError::Request)?;
-        parse_chat_response(&self.read_body(response)?)
+        let builder = self.authorize(builder);
+        let exchanged = match &self.interrupt {
+            Some(interrupt) => interrupt
+                .wait(move || exchange(builder))
+                .unwrap_or(Err(ChatError::Interrupted))?,
+            None => exchange(builder)?,
+        };
+        parse_chat_response(&self.read_body(exchanged)?)
     }
 
     fn models(&self) -> Result<Vec<String>, ChatError> {
         let builder = self.http.get(self.endpoint("models"));
-        let response = self.authorize(builder).send().map_err(ChatError::Request)?;
-        parse_models_response(&self.read_body(response)?)
+        let exchanged = exchange(self.authorize(builder))?;
+        parse_models_response(&self.read_body(exchanged)?)
     }
 }
 
@@ -326,6 +352,7 @@ mod tests {
     use std::io::{BufRead, BufReader, Read, Write};
     use std::net::TcpListener;
     use std::thread::{self, JoinHandle};
+    use std::time::Instant;
 
     const KEY: &str = "sk-test-0123456789abcdef";
 
@@ -777,6 +804,53 @@ mod tests {
             matches!(&error, ChatError::Request(source) if source.is_timeout()),
             "{error:?}"
         );
+        server.join().unwrap();
+    }
+
+    // --- 応答を待つ間の中断 ---
+
+    #[test]
+    fn an_interrupt_while_waiting_returns_interrupted_without_waiting_for_the_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        // 接続は受けるが応答しない
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let interrupt = Interrupt::new();
+        let raiser = interrupt.clone();
+        let client = OpenAiClient::new(&api(&base_url, "", 30), no_env)
+            .unwrap()
+            .with_interrupt(interrupt);
+        let started = Instant::now();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_millis(200));
+            raiser.raise();
+        });
+
+        let error = client.chat(&request("m", vec![user("hi")])).unwrap_err();
+
+        assert!(matches!(error, ChatError::Interrupted), "{error:?}");
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_chat_that_can_be_interrupted_still_returns_the_response() {
+        let (base_url, server) = serve_once(200, &fixture_text("response_text.json"));
+        let client = OpenAiClient::new(&api(&base_url, "", 5), no_env)
+            .unwrap()
+            .with_interrupt(Interrupt::new());
+
+        let response = client.chat(&request("m", vec![user("hi")])).unwrap();
+
+        assert_eq!(response.content.as_deref(), Some("Hello."));
         server.join().unwrap();
     }
 

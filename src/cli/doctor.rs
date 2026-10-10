@@ -156,11 +156,13 @@ fn is_configuration_error(error: &ChatError) -> bool {
 ///
 /// 届かない・タイムアウト（`Request`）、認証の拒否（401・403）、混雑（408・429）、
 /// エンドポイント側の障害（5xx）は、モデルが機能を持つかと関係なく起きるので、機能の判定に使わない。
+/// 中断（`Interrupted`）は、doctor が Ctrl-C を受けるハンドラを入れないので起きない。来たら同じく止める。
 fn is_connection_failure(error: &ChatError) -> bool {
     match error {
         ChatError::Request(_)
         | ChatError::MissingApiKey { .. }
-        | ChatError::ApiKeyOverPlainHttp { .. } => true,
+        | ChatError::ApiKeyOverPlainHttp { .. }
+        | ChatError::Interrupted => true,
         ChatError::Status { status, .. } => {
             matches!(status, 401 | 403 | 408 | 429) || *status >= 500
         }
