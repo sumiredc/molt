@@ -32,12 +32,22 @@ fn existing_profile() -> (TempDir, PathBuf) {
     (dir, path)
 }
 
-/// The steps that answer every category with `step`, in the order they are asked.
-fn every_category(step: Step) -> Vec<Step> {
-    vec![step; Category::ALL.len()]
+/// The empty line that saves at the confirmation; its corrections are tested in
+/// `onboarding::confirm`.
+fn save() -> Step {
+    Step::Input(String::new())
 }
 
-/// The steps that answer `category` with `step` and every other category "don't know".
+/// The steps that answer every category with `step`, in the order they are asked, and then save
+/// at the confirmation.
+fn every_category(step: Step) -> Vec<Step> {
+    let mut steps = vec![step; Category::ALL.len()];
+    steps.push(save());
+    steps
+}
+
+/// The steps that answer `category` with `step` and every other category "don't know", and then
+/// save at the confirmation.
 fn only(category: Category, step: Step) -> Vec<Step> {
     Category::ALL
         .iter()
@@ -48,6 +58,7 @@ fn only(category: Category, step: Step) -> Vec<Step> {
                 DONT_KNOW
             }
         })
+        .chain([save()])
         .collect()
 }
 
@@ -76,7 +87,13 @@ fn asks_the_ten_categories_in_order() {
     let (_dir, path) = no_profile();
     let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
     run(&mut ui, &path, &FakeChatClient::new()).unwrap();
-    assert_eq!(ui.asked().len(), Category::ALL.len(), "{:?}", ui.asked());
+    // Then the confirmation.
+    assert_eq!(
+        ui.asked().len(),
+        Category::ALL.len() + 1,
+        "{:?}",
+        ui.asked()
+    );
     for (asked, category) in ui.asked().iter().zip(Category::ALL) {
         assert!(asked.contains(category.name()), "{asked}");
     }

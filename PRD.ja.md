@@ -309,7 +309,7 @@ stateDiagram-v2
 ```mermaid
 flowchart TB
   cli["cli<br/>clap・Ui トレイト・描画・commands"] --> agent["agent<br/>mainline・subline・tools・prompts"]
-  cli --> onboarding["onboarding<br/>questionnaire・probe・repo_scan"]
+  cli --> onboarding["onboarding<br/>questionnaire・probe・repo_scan・confirm"]
   agent --> workspace["workspace<br/>パスの閉じ込め・cargo・git"]
   agent --> checker["checker<br/>visitor・diff・crates・finding"]
   agent --> llm["llm<br/>ChatClient・openai・router・fake"]

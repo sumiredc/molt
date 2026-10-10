@@ -8,8 +8,8 @@ use std::process::Output;
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::TempDir;
 
-/// The steps that answer "don't know" for all 10 categories.
-const ALL_DONT_KNOW: &str = "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n]\n";
+/// The steps that answer "don't know" for all 10 categories and save at the confirmation.
+const ALL_DONT_KNOW: &str = "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"\" },\n]\n";
 
 /// A molt directory with `config.toml` whose `[api]` body is `api`, and a ui script.
 struct Setup {
@@ -143,7 +143,7 @@ fn init_with_a_have_written_category_asks_and_judges_through_fake_and_saves_the_
     let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
     fs::write(
         setup.script(),
-        "steps = [\n{ select = 1 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"I clone strings.\" },\n]\n",
+        "steps = [\n{ select = 1 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"I clone strings.\" }, { input = \"\" },\n]\n",
     )
     .unwrap();
     let fake = setup.dir.path().join("fake.toml");
@@ -170,4 +170,35 @@ content = '{"elements": [{"element": "clone", "verdict": "known", "reason": "clo
     let saved = fs::read_to_string(setup.profile()).unwrap();
     assert!(saved.contains("provenance = \"qa\""), "{saved}");
     assert!(saved.contains("clones strings"), "{saved}");
+}
+
+#[test]
+fn init_shows_the_profile_and_saves_a_correction_typed_at_the_confirmation_by_manual() {
+    let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    fs::write(
+        setup.script(),
+        "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"clone known\" }, { input = \"\" },\n]\n",
+    )
+    .unwrap();
+    let output = molt_init(&setup, &setup.profile());
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert!(stdout.contains("The profile to save:"), "{stdout}");
+    assert!(stdout.contains("correct> clone known"), "{stdout}");
+    let saved = fs::read_to_string(setup.profile()).unwrap();
+    assert!(saved.contains("[items.clone]"), "{saved}");
+    assert!(saved.contains("provenance = \"manual\""), "{saved}");
+}
+
+#[test]
+fn init_interrupted_at_the_confirmation_exits_130_and_creates_no_profile() {
+    let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    fs::write(
+        setup.script(),
+        "steps = [\n{ select = 2 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n\"interrupt\",\n]\n",
+    )
+    .unwrap();
+    let output = molt_init(&setup, &setup.profile());
+    assert_eq!(output.status.code(), Some(130));
+    assert!(!setup.profile().exists());
 }
