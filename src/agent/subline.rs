@@ -331,6 +331,11 @@ impl<'a> SubLine<'a> {
 #[cfg(test)]
 mod resolve;
 
+/// Tests of what the side line gives the model to answer in the user's language. Named so that
+/// `cargo test subline::language` selects them.
+#[cfg(test)]
+mod language;
+
 /// Opening the side line at a boundary, its explanation and questions, and that none of it
 /// reaches the main line. Named so that `cargo test subline::open` selects them.
 #[cfg(test)]

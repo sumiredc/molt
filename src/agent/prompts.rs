@@ -1,7 +1,10 @@
 //! What molt says to the model: the system prompt, the tool descriptions and the tool results
 //! the loop makes up itself. They are in one place so that tuning them for a model means editing
 //! this file only. They are English; the model is told to answer in the user's language
-//! instead (PRD §3 Language, §8.6).
+//! instead (PRD §3 Language, §8.6): the system prompt says so, and a request that has no input of
+//! the user quotes the user's request as the clue. The user messages do not name the language
+//! (`in the language of …`): small models read that as a call to pick another language, and
+//! answered an English request in German or Chinese.
 
 use std::fmt::Display;
 
@@ -271,7 +274,8 @@ pub fn commit_result(outcome: &CommitOutcome) -> String {
 pub const COMMIT_MESSAGE_SYSTEM: &str = "\
 You write git commit messages.
 Write a subject line of at most 72 characters that says what the change does. Add a blank line and a short body only when the subject cannot say why.
-Answer with the message only: no quotes, no code fences, no explanation.";
+Answer with the message only: no quotes, no code fences, no explanation.
+Answer in the language of the user's latest request.";
 
 /// The lines of the diff the `generate` model gets to write a commit message from.
 pub const COMMIT_DIFF_LINES: usize = 200;
@@ -302,10 +306,6 @@ pub fn commit_message_request(
         let more = lines.len() - COMMIT_DIFF_LINES;
         text.push_str(&format!("... {more} more lines\n"));
     }
-    text.push_str(
-        "\nWrite it in the language of the user's request above, not in the language of this \
-         message.",
-    );
     text
 }
 
@@ -359,14 +359,10 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
             }
         }
     }
-    match request {
-        Some(request) => context.push_str(&format!(
-            "\n\nThe user's request was:\n{request}\n\nExplain the idea of these items in one \
-             paragraph, in the language of the user's request above, not in the language of this \
-             message."
-        )),
-        None => context.push_str("\n\nExplain the idea of these items in one paragraph."),
+    if let Some(request) = request {
+        context.push_str(&format!("\n\nThe user's request was:\n{request}"));
     }
+    context.push_str("\n\nExplain the idea of these items in one paragraph.");
     context
 }
 
@@ -477,10 +473,7 @@ pub fn review_request(items: &[ItemKey], request: Option<&str>, files: &[Change]
         }
         text.push_str("```\n");
     }
-    text.push_str(
-        "\nReview the lines the user wrote, in the language of the user's request above, not in \
-         the language of this message.",
-    );
+    text.push_str("\nReview the lines the user wrote.");
     text
 }
 
