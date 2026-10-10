@@ -13,6 +13,7 @@ use std::ffi::OsStr;
 use std::path::Path;
 
 use crate::profile::status::{ItemKey, Status};
+use crate::profile::store::Profile;
 
 pub use finding::{CheckContext, CheckReport, Finding, ParseError};
 
@@ -105,16 +106,22 @@ pub(crate) fn undeclared_known_crates(
 /// and none is anything else: a spelling the user made `seen` or `unknown`
 /// still stops it.
 fn is_allowed(finding: &Finding, ctx: &CheckContext) -> bool {
-    match &finding.key {
+    allows(ctx.profile, &finding.key)
+}
+
+/// Whether `profile` lets content use `item`, as [`check_file`] decides: a base element, or
+/// `known`. A crate is judged under its key (`crates::crate_key`), whatever spelling `item` has.
+pub(crate) fn allows(profile: &Profile, item: &ItemKey) -> bool {
+    match item {
         ItemKey::Element(element) => {
-            ctx.profile.is_base(*element) || ctx.profile.status(&finding.key) == Status::Known
+            profile.is_base(*element) || profile.status(item) == Status::Known
         }
-        ItemKey::Crate(_) => {
-            let mut statuses = ctx
-                .profile
+        ItemKey::Crate(name) => {
+            let item = crates::crate_key(name);
+            let mut statuses = profile
                 .entries()
                 .filter(|(key, _)| {
-                    matches!(key, ItemKey::Crate(name) if crates::crate_key(name) == finding.key)
+                    matches!(key, ItemKey::Crate(name) if crates::crate_key(name) == item)
                 })
                 .map(|(_, entry)| entry.status())
                 .peekable();

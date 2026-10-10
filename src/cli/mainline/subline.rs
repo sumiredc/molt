@@ -193,6 +193,9 @@ mod open {
     const HINT_SHOWN: &str = "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.";
     const STOPPED: &str = "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.";
     const SUB: &str = "molt [sub: dbg_macro]> ";
+    /// The explanation shown for the model's reply `explanation`, which has no code: the reply, then
+    /// the comparison of the code the main line tried with none within the profile.
+    const EXPLAINED: &str = "  explanation\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
 
     fn write_main(id: &str) -> ChatResponse {
         ChatResponse {
@@ -268,7 +271,9 @@ mod open {
 
     #[test]
     fn a_boundary_opens_the_side_line_with_a_banner_its_prompt_and_the_explanation_indented() {
-        let client = stops_at_a_boundary_then(&["dbg! prints a value.\n\nIt returns it, too."]);
+        let client = stops_at_a_boundary_then(&[
+            "dbg! prints a value.\n\nIt returns it, too.\n\n```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```",
+        ]);
         let (code, ui) = run(&client, [input("debug 1"), input("/abort"), input("/quit")]);
 
         assert_eq!(code, ExitCode::SUCCESS);
@@ -276,7 +281,7 @@ mod open {
             ui.shown()[2..6],
             [
                 ENTER,
-                "  dbg! prints a value.\n\n  It returns it, too.",
+                "  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]
@@ -325,7 +330,7 @@ mod open {
         assert_eq!(
             ui.shown()[3..8],
             [
-                "  explanation",
+                EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
                 "  answer 2",
@@ -415,7 +420,7 @@ mod open {
                 STOPPED,
                 "Tool calls in this turn: write_file (2)",
                 ENTER,
-                "  explanation",
+                EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
                 LEAVE,
@@ -537,7 +542,7 @@ mod open {
             .map(|(at, _)| at)
             .collect();
         assert_eq!(warnings.len(), 1, "{shown:?}");
-        assert_eq!(shown[warnings[0] - 1], "  explanation", "{shown:?}");
+        assert_eq!(shown[warnings[0] - 1], EXPLAINED, "{shown:?}");
     }
 
     #[test]
@@ -575,7 +580,7 @@ mod open {
                     LEAVE,
                     PAUSED,
                     ENTER,
-                    "  explanation",
+                    EXPLAINED,
                     HINT_SHOWN,
                     LEAVE,
                     "Request withdrawn."

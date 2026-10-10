@@ -5,6 +5,7 @@
 //! line's message list: the main line only hands it the boundary and the user's request.
 
 pub(crate) mod bundle;
+mod explain;
 mod user_wrote;
 
 use std::collections::BTreeMap;
@@ -16,6 +17,7 @@ use super::prompts;
 use super::tools::Tools;
 use crate::llm::{ChatClient, ChatError, Message, Role, Router};
 use crate::profile::status::ItemKey;
+use crate::profile::store::Profile;
 use crate::session::SessionLog;
 
 /// What the user chose on the side line (PRD UC3).
@@ -127,6 +129,9 @@ pub struct SubLine<'a> {
     lock: Option<String>,
     /// What the model is told about the boundary, sent as the first user message.
     context: String,
+    /// What the model is asked for the comparison with the explanation, when the main line tried
+    /// some code: written when the side line opened, from the profile then.
+    compare: Option<String>,
     /// The system prompt, then the context and the explanation once it came, then each question
     /// and its answer.
     messages: Vec<Message>,
@@ -136,8 +141,8 @@ pub struct SubLine<'a> {
 const LOCK: &str = "Cargo.lock";
 
 impl<'a> SubLine<'a> {
-    /// Opens the side line at `boundary`. `request` is the user's latest request on the main line.
-    /// The files the checker can check are read from the disk under the root of `tools` now, as
+    /// Opens the side line at `boundary`. `request` is the user's latest request on the main line,
+    /// and `profile` the user's profile, whose allowed items the comparison is to use. The files the checker can check are read from the disk under the root of `tools` now, as
     /// they were when the main line stopped, to tell later what the user changed (UC3 ③).
     pub fn open(
         client: &'a dyn ChatClient,
@@ -145,8 +150,12 @@ impl<'a> SubLine<'a> {
         tools: &Tools,
         boundary: Boundary,
         request: Option<&str>,
+        profile: &Profile,
     ) -> Self {
         let context = prompts::side_line_context(&boundary, request);
+        let compare = boundary
+            .attempted_code()
+            .map(|_| prompts::compare_request(&explain::allowed(profile)));
         Self {
             client,
             router,
@@ -157,6 +166,7 @@ impl<'a> SubLine<'a> {
             writing: false,
             recurred: false,
             context,
+            compare,
             messages: vec![Message::System {
                 content: prompts::SIDE_LINE_SYSTEM.to_owned(),
             }],
@@ -259,16 +269,21 @@ impl<'a> SubLine<'a> {
     /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]). The
     /// request body goes to `log` (PRD §8.8).
     pub fn explain(&mut self, log: &SessionLog) -> Result<String, ChatError> {
-        let user = Message::User {
-            content: self.context.clone(),
+        // Only the explanation asks for the comparison: a question or the policy of ② asked
+        // before it came goes with the context alone.
+        let content = match &self.compare {
+            Some(compare) => format!("{} {compare}", self.context),
+            None => self.context.clone(),
         };
+        let user = Message::User { content };
         let answer = self.send(user.clone(), log)?;
+        let explanation = explain::assemble(&self.boundary, &answer);
         self.messages.push(user);
         self.messages.push(Message::Assistant {
-            content: Some(answer.clone()),
+            content: Some(answer),
             tool_calls: Vec::new(),
         });
-        Ok(answer)
+        Ok(explanation)
     }
 
     /// Asks the `reason` model `question` and returns the answer. The question and the answer join
@@ -458,9 +473,11 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Ok(reply("dbg! prints a value.")));
 
-        assert_eq!(
-            side.explain(&SessionLog::disabled()).unwrap(),
-            "dbg! prints a value."
+        let explanation = side.explain(&SessionLog::disabled()).unwrap();
+
+        assert!(
+            explanation.starts_with("dbg! prints a value.\n\n"),
+            "{explanation}"
         );
 
         let request = client.requests().pop().unwrap();

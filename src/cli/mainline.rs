@@ -820,7 +820,7 @@ mod write {
                 "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.",
                 "Tool calls in this turn: write_file (2)",
                 "── side line: dbg_macro ────────────────────────────────────",
-                "  dbg! prints a value.",
+                "  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
                 "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
