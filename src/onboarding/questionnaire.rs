@@ -177,7 +177,7 @@ fn save(
         Ok(Stored::Nothing) => {}
         Err(error) => {
             return Err(format!(
-                "the profile was saved, but {} could not be updated: {error}",
+                "the profile was saved, but {} could not be updated: {error}; run `molt init` again",
                 scan_path.display()
             ));
         }

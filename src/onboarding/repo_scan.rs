@@ -256,8 +256,15 @@ pub fn store(path: &Path, scan: Option<&RepoScan>) -> io::Result<Stored> {
     match scan {
         Some(scan) => write_atomically(path, to_toml(scan).as_bytes())
             .map(|()| Stored::Written)
-            .inspect_err(|_| {
-                let _ = fs::remove_file(path);
+            .map_err(|error| {
+                let earlier = match fs::remove_file(path) {
+                    Ok(()) => "the earlier one was removed".to_owned(),
+                    Err(removing) if removing.kind() == io::ErrorKind::NotFound => {
+                        "there was no earlier one".to_owned()
+                    }
+                    Err(removing) => format!("the earlier one is left ({removing})"),
+                };
+                io::Error::new(error.kind(), format!("{error}; {earlier}"))
             }),
         None => match fs::remove_file(path) {
             Ok(()) => Ok(Stored::Removed),
