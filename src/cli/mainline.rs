@@ -132,8 +132,19 @@ fn open_ui(ui_script: Option<&Path>) -> Result<Box<dyn Ui>, String> {
 }
 
 /// Reads requests until `/quit` or Ctrl-D (exit 0) or Ctrl-C at the prompt (exit non-zero), and runs a turn
-/// of `agent` for each. A blank line is not sent to the model.
+/// of `agent` for each. A blank line is not sent to the model. After `/quit` and Ctrl-D, shows
+/// where the session log is.
 fn main_line(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
+    let code = requests(ui, agent);
+    // Only `/quit` and Ctrl-D, at the prompt, on the side line or while paused, end with success.
+    if code == ExitCode::SUCCESS {
+        show_where_logged(ui, agent.log());
+    }
+    code
+}
+
+/// The loop of [`main_line`], which returns as soon as the main line ends.
+fn requests(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
     loop {
         match ui.read_line(PROMPT) {
             Ok(Input::Line(line)) if line.trim() == "/quit" => return ExitCode::SUCCESS,
@@ -418,6 +429,17 @@ fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
     ui.show("Request withdrawn.");
     show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
     show_log_error(ui, agent);
+}
+
+/// Where `log` wrote this session, and the request bodies when `MOLT_LOG` enabled them, so that
+/// the user can trace it later (PRD §8.8). Nothing when the log is disabled.
+fn show_where_logged(ui: &mut dyn Ui, log: &SessionLog) {
+    if let Some(path) = log.path() {
+        ui.show(&format!("Session log: {}", path.display()));
+    }
+    if let Some(path) = log.requests_path() {
+        ui.show(&format!("Request bodies (MOLT_LOG): {}", path.display()));
+    }
 }
 
 /// That the session log could not be written, the first time it happens to a file. The main line
@@ -1337,10 +1359,171 @@ mod session_log {
 
         let warning = format!("Could not write the session log {}: ", path.display());
         let shown = ui.shown();
-        assert_eq!(shown.len(), 3, "{shown:?}");
+        assert_eq!(shown.len(), 4, "{shown:?}");
         assert_eq!(shown[0], "one");
         assert!(shown[1].starts_with(&warning), "{shown:?}");
         assert_eq!(shown[2], "two");
+        assert_eq!(shown[3], format!("Session log: {}", path.display()));
+    }
+}
+
+/// Where the session log is, shown when the main line ends with `/quit` or Ctrl-D (PRD §8.8).
+/// Named so that `cargo test session_path` selects them.
+#[cfg(test)]
+mod session_path {
+    use std::fs;
+    use std::path::PathBuf;
+
+    use serde_json::json;
+    use tempfile::TempDir;
+
+    use super::tests::{input, project};
+    use super::*;
+    use crate::cli::ui::Step;
+    use crate::llm::{ChatResponse, FakeChatClient, ToolCall};
+    use crate::workspace::cargo::FakeCargo;
+
+    /// What the main line showed on `steps` with a session log in a tempdir, and the paths of
+    /// the log's events and request bodies.
+    struct Ran {
+        code: ExitCode,
+        shown: Vec<String>,
+        events: PathBuf,
+        requests: Option<PathBuf>,
+        _dirs: (TempDir, TempDir),
+    }
+
+    fn run(
+        client: &FakeChatClient,
+        request_bodies: bool,
+        steps: impl IntoIterator<Item = Step>,
+    ) -> Ran {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let log = SessionLog::create(logs.path(), request_bodies).unwrap();
+        let events = log.path().unwrap().to_owned();
+        let requests = log.requests_path().map(Path::to_owned);
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(
+            client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_log(log);
+        let mut ui = ScriptedUi::new(steps);
+        let code = main_line(&mut ui, &mut agent);
+        Ran {
+            code,
+            shown: ui.shown().to_vec(),
+            events,
+            requests,
+            _dirs: (dir, logs),
+        }
+    }
+
+    fn session_line(ran: &Ran) -> String {
+        format!("Session log: {}", ran.events.display())
+    }
+
+    #[test]
+    fn quit_shows_the_path_of_the_session_log_last() {
+        let ran = run(&FakeChatClient::new(), false, [input("/quit")]);
+        assert_eq!(ran.code, ExitCode::SUCCESS);
+        assert_eq!(ran.shown, [session_line(&ran)]);
+        assert!(ran.events.is_file(), "the shown path is the log's file");
+    }
+
+    #[test]
+    fn ctrl_d_at_the_prompt_shows_the_path_of_the_session_log() {
+        let ran = run(&FakeChatClient::new(), false, [Step::Eof]);
+        assert_eq!(ran.code, ExitCode::SUCCESS);
+        assert_eq!(ran.shown, [session_line(&ran)]);
+    }
+
+    #[test]
+    fn ctrl_d_on_the_side_line_at_a_boundary_shows_the_path_of_the_session_log_last() {
+        let ran = run(&rejected_twice(), false, [input("debug 1"), Step::Eof]);
+        assert_eq!(ran.code, ExitCode::SUCCESS);
+        assert_eq!(
+            ran.shown.last(),
+            Some(&session_line(&ran)),
+            "{:?}",
+            ran.shown
+        );
+    }
+
+    #[test]
+    fn ctrl_d_while_paused_at_a_boundary_shows_the_path_of_the_session_log_last() {
+        let ran = run(
+            &rejected_twice(),
+            false,
+            [input("debug 1"), Step::Interrupt, Step::Eof],
+        );
+        assert_eq!(ran.code, ExitCode::SUCCESS);
+        assert!(ran.shown.contains(&PAUSED.to_owned()), "{:?}", ran.shown);
+        assert_eq!(
+            ran.shown.last(),
+            Some(&session_line(&ran)),
+            "{:?}",
+            ran.shown
+        );
+    }
+
+    /// A client whose model writes `dbg!` twice: the turn stops at a boundary.
+    fn rejected_twice() -> FakeChatClient {
+        let client = FakeChatClient::new();
+        let with_dbg = |id: &str| ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: id.to_owned(),
+                name: "write_file".to_owned(),
+                arguments:
+                    json!({ "path": "src/main.rs", "content": "fn main() {\n    dbg!(1);\n}\n" })
+                        .to_string(),
+            }],
+        };
+        client.push_chat(Ok(with_dbg("first")));
+        client.push_chat(Ok(with_dbg("second")));
+        client
+    }
+
+    #[test]
+    fn with_molt_log_the_path_of_the_request_bodies_follows_the_session_log() {
+        let ran = run(&FakeChatClient::new(), true, [input("/quit")]);
+        let requests = ran.requests.as_ref().unwrap();
+        assert_eq!(
+            ran.shown,
+            [
+                session_line(&ran),
+                format!("Request bodies (MOLT_LOG): {}", requests.display()),
+            ]
+        );
+    }
+
+    #[test]
+    fn ctrl_c_at_the_prompt_does_not_show_the_path() {
+        let ran = run(&FakeChatClient::new(), false, [Step::Interrupt]);
+        assert_eq!(ran.code, ExitCode::from(INTERRUPTED));
+        assert!(ran.shown.is_empty(), "{:?}", ran.shown);
+    }
+
+    #[test]
+    fn a_ui_error_does_not_show_the_path() {
+        let ran = run(&FakeChatClient::new(), false, []);
+        assert_eq!(ran.code, ExitCode::FAILURE);
+        assert!(ran.shown.is_empty(), "{:?}", ran.shown);
+    }
+
+    #[test]
+    fn a_disabled_log_shows_no_path() {
+        let client = FakeChatClient::new();
+        let (code, ui) = super::tests::run_script(&client, [input("/quit")]);
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(ui.shown().is_empty(), "{:?}", ui.shown());
     }
 }
 

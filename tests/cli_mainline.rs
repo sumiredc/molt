@@ -95,13 +95,28 @@ fn stderr(output: &Output) -> String {
     String::from_utf8(output.stderr.clone()).unwrap()
 }
 
+/// The stdout of `output` before its last line, which shows where the session log is, as after
+/// `/quit` or Ctrl-D.
+fn before_session_path(output: &Output) -> String {
+    let stdout = stdout(output);
+    let last = stdout
+        .trim_end_matches('\n')
+        .rfind('\n')
+        .map_or(0, |at| at + 1);
+    assert!(
+        stdout[last..].starts_with("Session log: "),
+        "no session log path last: {stdout}"
+    );
+    stdout[..last].to_owned()
+}
+
 #[test]
 fn quit_from_a_ui_script_ends_with_exit_code_0_without_a_terminal() {
     let setup = Setup::new();
     let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
     let output = molt(&setup, &setup.project(), &setup.profile(), &script);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    assert_eq!(stdout(&output), "molt> /quit\n");
+    assert_eq!(before_session_path(&output), "molt> /quit\n");
 }
 
 #[test]
@@ -112,7 +127,7 @@ fn an_unreachable_api_is_reported_the_files_stay_and_the_prompt_comes_back() {
         .script(r#"steps = [{ input = "add a function that sums a slice" }, { input = "/quit" }]"#);
     let output = molt(&setup, &setup.project(), &setup.profile(), &script);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
-    let stdout = stdout(&output);
+    let stdout = before_session_path(&output);
     assert!(
         stdout.starts_with(
             "molt> add a function that sums a slice\nStopped: request to the chat API failed: "
@@ -203,7 +218,7 @@ tool_calls = [{ name = "finish", arguments = { summary = "Added `add` to src/lib
         fs::read_to_string(setup.project().join("src/lib.rs")).unwrap(),
         "pub fn add(a: i32, b: i32) -> i32 {\n    a + b\n}\n"
     );
-    let stdout = stdout(&output);
+    let stdout = before_session_path(&output);
     assert!(
         stdout.starts_with("molt> add two numbers\nAdded `add` to src/lib.rs.\n"),
         "{stdout}"
@@ -225,7 +240,7 @@ fn a_fake_script_that_runs_out_stops_the_turn_and_the_prompt_comes_back() {
     let output = molt_with_fake(&setup, &script, &["--fake".as_ref(), fake.as_os_str()]);
     assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
     assert_eq!(
-        stdout(&output),
+        before_session_path(&output),
         "molt> hello\nStopped: the fake chat client has no more queued responses\nmolt> /quit\n"
     );
 }
@@ -390,6 +405,23 @@ fn the_session_log_is_one_jsonl_file_in_the_molt_directory_and_without_molt_log_
     assert!(files[0].0.ends_with(".jsonl"), "{files:?}");
     assert!(!files[0].0.ends_with(".requests.jsonl"), "{files:?}");
     assert_eq!(fs::read_dir(setup.project()).unwrap().count(), 1);
+}
+
+#[test]
+fn session_path_quit_prints_where_the_session_log_is_on_stdout() {
+    let setup = Setup::new();
+    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
+    let output = molt(&setup, &setup.project(), &setup.profile(), &script);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+
+    let files = session_files(&setup);
+    assert_eq!(files.len(), 1, "{files:?}");
+    let path = setup.home().join("sessions").join(&files[0].0);
+    assert!(
+        stdout(&output).ends_with(&format!("Session log: {}\n", path.display())),
+        "{}",
+        stdout(&output)
+    );
 }
 
 #[test]
