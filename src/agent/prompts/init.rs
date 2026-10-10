@@ -27,8 +27,8 @@ pub struct Exchange {
 
 /// What the `reason` model is asked for the question about `elements` of `category`: the first
 /// one when `exchanges` is empty, otherwise the follow-up after them. `scan` gives the places the
-/// reference repository uses each element, and `latest` is the user's latest input, whose
-/// language the question follows.
+/// reference repository uses each element, and `latest` is the user's latest input, quoted as
+/// the clue to the language the system prompt asks for.
 pub fn question_request(
     category: Category,
     elements: &[Element],
@@ -55,11 +55,10 @@ pub fn question_request(
             transcript(exchanges)
         ));
     }
+    // The language is left to the system prompt, with the input quoted as the clue: naming it
+    // here led small models to answer in another language (see the module doc of `prompts`).
     if let Some(latest) = latest {
-        text.push_str(&format!(
-            "\n\nThe user's latest input was:\n{latest}\n\nAsk in the language of that input, not \
-             in the language of this message."
-        ));
+        text.push_str(&format!("\n\nThe user's latest input was:\n{latest}"));
     }
     text
 }
@@ -73,8 +72,7 @@ pub fn judge_request(category: Category, elements: &[Element], exchanges: &[Exch
         .join("\n");
     format!(
         "The category is `{category}`. Judge these elements:\n{names}\n\n{}\nGive one judgement \
-         per element listed. Write the reasons in the language of the user's latest answer \
-         above, not in the language of this message.",
+         per element listed.",
         transcript(exchanges)
     )
 }

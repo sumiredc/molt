@@ -637,6 +637,8 @@ fn the_question_and_the_judgement_follow_the_language_of_the_user_s_latest_input
     let requests = client.requests();
     for request in &requests {
         assert!(system_text(request).contains(LANGUAGE), "{request:?}");
+        // Naming the language in the user message led small models to answer in another one.
+        assert!(!user_text(request).contains("language"), "{request:?}");
     }
     let second_question = user_text(&requests[2]);
     assert!(
