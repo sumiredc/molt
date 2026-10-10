@@ -1,13 +1,13 @@
-# molt の設定ファイルの例。置き場所は $MOLT_HOME/config.toml、
-# 無ければ $XDG_CONFIG_HOME/molt/config.toml、それも無ければ ~/.config/molt/config.toml。
-# ファイルが無いときや、書かれていないキーは既定値になる。下の値はすべて既定値。
+# An example of molt's configuration file. It goes in $MOLT_HOME/config.toml,
+# or else $XDG_CONFIG_HOME/molt/config.toml, or else ~/.config/molt/config.toml.
+# Without the file, or for a key it does not set, the default applies. Every value below is the default.
 
 [api]
-# OpenAI 互換の chat API の URL（/chat/completions の手前まで）
+# The URL of an OpenAI-compatible chat API, up to but not including /chat/completions
 base_url = "https://api.tokenfactory.nebius.com/v1"
-# API キーを読む環境変数の名前。キーそのものはここに書かない
+# The name of the environment variable to read the API key from. Do not write the key itself here
 api_key_env = "NEBIUS_API_KEY"
-# 1 リクエストのタイムアウト（秒）
+# The timeout of one request, in seconds
 timeout_secs = 300
 
 [models]
@@ -15,13 +15,13 @@ light = "nvidia/Nemotron-3_5-Lightning"
 generate = "nvidia/nemotron-3-super-120b-a12b"
 reason = "nvidia/Nemotron-3-Ultra-550b-a55b"
 
-# そのまま reasoning_effort として送る。[capabilities] でその役割の reasoning_effort が真のときだけ送る
+# Sent as reasoning_effort as is, only when reasoning_effort is true for the role in [capabilities]
 [reasoning_effort]
 light = "low"
 generate = "medium"
 reason = "high"
 
-# molt doctor が書き換える。確かめるまではすべて偽
+# molt doctor rewrites these. Until it has checked them, all are false
 [capabilities.light]
 tool_choice_required = false
 json_schema = false
@@ -37,14 +37,14 @@ tool_choice_required = false
 json_schema = false
 reasoning_effort = false
 
-# ローカルの OpenAI 互換エンドポイントを使うときは、上の [api] の base_url と api_key_env の 2 行を
-# 次のようにセットで書き換え、<local-endpoint> を実際のホストとポートにする。
-# [models] にはそのエンドポイントのモデル ID を書く。
+# To use a local OpenAI-compatible endpoint, replace both base_url and api_key_env in [api] above
+# as below, with <local-endpoint> as the actual host and port.
+# In [models], write the model IDs of that endpoint.
 #
 # base_url = "http://<local-endpoint>/v1"
 # api_key_env = ""
 #
-# - api_key_env を空にしないと、既定の NEBIUS_API_KEY のキーがそのエンドポイントに送られる
-# - キーがあるとき、loopback（localhost・127.0.0.0/8・::1）以外のホストへの http:// には
-#   キーを送らず、クライアントを作らずにエラーを返す。キーを送るなら https にする
-# - そのエンドポイントがキーを要求するなら、専用の環境変数の名前を書く（例: api_key_env = "LOCAL_API_KEY"）
+# - Unless api_key_env is empty, the key in the default NEBIUS_API_KEY is sent to that endpoint
+# - With a key, molt does not send it over http:// to a host other than loopback (localhost,
+#   127.0.0.0/8, ::1): it returns an error without making a client. To send a key, use https
+# - If the endpoint requires a key, name a variable of its own (e.g. api_key_env = "LOCAL_API_KEY")

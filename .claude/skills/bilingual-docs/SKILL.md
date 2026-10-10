@@ -1,6 +1,6 @@
 ---
 name: bilingual-docs
-description: このリポジトリの文書（README.md・PRD.md・docs/ 配下など、人が読む Markdown）を書く、直す、消すときの、日英のセットに関する決まり。英語版 X.md を正とし、日本語版 X.ja.md を必ず同じコミットで置く。対象と対象外、ファイル名、日本語版で揃えるものと訳さないもの、相互リンク、対のないファイルを列挙して確かめる手順を扱う。文書の書き方そのもの（読む層・図・コードブロック）は user 側の skill `documenting` が持ち、併用する。Use when writing, updating, renaming, or deleting any Markdown document in this repository, or when checking that every document has its English and Japanese counterpart.
+description: このリポジトリの文書（README.md・PRD.md・docs/ 配下など、人が読む Markdown）を書く、直す、消すときの、日英のセットに関する決まり。英語版 X.md を正とし、日本語版 X.ja.md を必ず同じコミットで置く。対象と対象外、ファイル名、日本語版で揃えるものと訳さないもの、相互リンク、対のないファイルを列挙して確かめる手順を扱う。README から案内する Markdown でない見本（`examples/`）のコメントの言語も決める。文書の書き方そのもの（読む層・図・コードブロック）は user 側の skill `documenting` が持ち、併用する。Use when writing, updating, renaming, or deleting any Markdown document in this repository, when editing comments in the `examples/` files that README points to, or when checking that every document has its English and Japanese counterpart.
 ---
 
 # bilingual-docs — 文書を英語版と日本語版のセットで置く決まり
@@ -25,7 +25,7 @@ flowchart LR
 
 ## 対象と対象外
 
-対象は、人が読む Markdown 文書すべて。エージェント向けの指示とその時点の記録は対象外にする。
+対象は、人が読む Markdown 文書すべて。エージェント向けの指示とその時点の記録は対象外にする。README から案内する Markdown でない見本は対にせず、英語だけで書く。
 
 | 区分 | ファイル | なぜ |
 |---|---|---|
@@ -33,6 +33,7 @@ flowchart LR
 | 対象外 | `.claude/` と `.github/` 配下（skill・エージェント向けの指示・テンプレート） | 読み手がエージェントで、既存の skill と同じく日本語だけで書く |
 | 対象外 | issue と PR の本文 | その時点の記録で、直され続ける文書ではない |
 | 対象外 | `LICENSE`、コードのコメント | 定型の条文と、コードと同じ言語で書くもの |
+| 対象外（英語だけで書く） | README から読み手を案内する Markdown でないファイル（`examples/` の見本とそのコメント） | コピーして使うファイルで `.ja` の対を作れず、併記すると 1 ファイルに同じ事実が 2 回になる。正の README と同じ英語で書く。コードのコメントの行より、この行を使う |
 
 ---
 

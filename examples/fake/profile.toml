@@ -1,5 +1,5 @@
-# one_pass.toml に合わせた理解度プロファイルの見本。項目が 1 つも無い、始めたばかりの状態。
-# dbg_macro が known でないので、one_pass.toml の書き込みは却下され、境界で止まる。
+# An example comprehension profile to go with one_pass.toml: no items yet, as when just starting.
+# dbg_macro is not known, so the write in one_pass.toml is rejected and the turn stops at a boundary.
 #
-# molt --profile に渡す前に、別の場所へコピーする。① で dbg_macro が known になると molt が
-# このファイルを書き換え（コメントも消える）、見本のまま渡すとチェックアウトが変わるため。
+# Copy it elsewhere before passing it to molt --profile. When ① makes dbg_macro known, molt
+# rewrites this file (dropping these comments), so passing the example itself changes the checkout.

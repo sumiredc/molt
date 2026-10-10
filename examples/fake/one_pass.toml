@@ -1,29 +1,32 @@
-# molt --fake の台本の見本。モデルの代わりに、molt が送るリクエストへ上から順に 1 つずつ答える。
-# 依頼 → 却下 → 境界 → 副線 → ① → 書き込み → cargo check → commit 承認、の 1 周を通す。
-# 依頼の文は読まないので、何を頼んでもこの台本どおりに src/main.rs が書き換わる。
+# An example script for molt --fake. In place of the model, it answers the requests molt sends,
+# one response each, from the top.
+# It takes one pass: request -> rejection -> boundary -> side line -> ① -> write -> cargo check
+# -> commit approval. It does not read the request, so whatever you ask, src/main.rs is rewritten
+# as scripted here.
 #
-# 合わせるプロファイルは同じディレクトリの profile.toml（dbg_macro が known でないもの）。
-# 1 周で入力するものは README.md の "Try it without a model" の節にある。
+# The profile to go with it is profile.toml in this directory (dbg_macro not known).
+# What to type during the pass is in README.md, section "Try it without a model".
 #
-# tests/fake_pass.rs がこの台本で、tests/fake_example.rs がこの台本と profile.toml のコピーで 1 周を通す。応答を変えたらテストも直す。
+# tests/fake_pass.rs takes one pass with this script, and tests/fake_example.rs with copies of
+# this script and profile.toml. If you change the responses, fix the tests too.
 
-# 本線: dbg_macro が known でないプロファイルでは dbg! を使えないので、molt はこの書き込みを却下する。
+# Main line: with a profile where dbg_macro is not known, dbg! is not allowed, so molt rejects this write.
 [[responses]]
 tool_calls = [
   { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
 ]
 
-# 書き直しも dbg! を使う。2 回目の却下でターンが境界で止まる。
+# The rewrite uses dbg! too. At the second rejection, the turn stops at a boundary.
 [[responses]]
 tool_calls = [
   { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    let _ = dbg!(1);\n}\n" } },
 ]
 
-# 副線での dbg_macro の説明。
+# The explanation of dbg_macro on the side line.
 [[responses]]
 content = "`dbg!` prints the value of an expression with its file and line to stderr, and returns the value."
 
-# ① の後、同じターンが続く。dbg! が known になったので、書き込みが通る。
+# After ①, the same turn goes on. dbg! is known now, so the write goes through.
 [[responses]]
 tool_calls = [
   { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
@@ -32,6 +35,6 @@ tool_calls = [
 [[responses]]
 tool_calls = [{ name = "finish", arguments = { summary = "Printed 1 with `dbg!`." } }]
 
-# cargo check が通った後に molt が提案する commit メッセージ。
+# The commit message molt proposes after cargo check passes.
 [[responses]]
 content = "Print 1 with dbg!"
