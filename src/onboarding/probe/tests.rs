@@ -167,6 +167,13 @@ fn questions_about(client: &FakeChatClient, category: Category) -> Vec<ChatReque
         .collect()
 }
 
+fn unix_seconds() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+}
+
 fn known(judged: &[Judgement]) -> Vec<Element> {
     judged
         .iter()
@@ -191,8 +198,11 @@ fn the_elements_of_a_have_written_category_are_known_by_qa_or_unknown_as_judged(
     let mut steps = reports(&[Category::Ownership]);
     steps.push(answer("I clone strings and call to_owned on &str."));
 
+    let before = unix_seconds();
     let (_, outcome) = run_init(steps, &client, &config(true), &path);
+    let after = unix_seconds();
     assert_eq!(outcome, Ok(Outcome::Saved));
+    let during: Vec<_> = (before..=after).map(Timestamp::from_unix_seconds).collect();
 
     let profile = Profile::load(&path).unwrap();
     assert_eq!(
@@ -203,6 +213,7 @@ fn the_elements_of_a_have_written_category_are_known_by_qa_or_unknown_as_judged(
         let entry = profile.entry(&ItemKey::Element(element)).unwrap();
         assert_eq!(entry.status(), Status::Known, "{}", element.name());
         assert_eq!(entry.provenance(), Provenance::Qa, "{}", element.name());
+        assert!(during.contains(&entry.at()), "{:?}", entry.at());
         assert_eq!(
             entry.evidence(),
             Some(format!("because {}", element.name()).as_str())
@@ -475,6 +486,19 @@ fn an_api_failure_while_judging_reports_its_cause_and_saves_nothing() {
     );
     assert!(!path.exists());
     assert_eq!(client.requests().len(), 2, "the Q&A stops at the failure");
+}
+
+#[test]
+fn the_end_of_the_input_at_the_answer_saves_nothing_as_an_interruption() {
+    let (_dir, path) = no_profile();
+    let client = FakeChatClient::new();
+    client.push_chat(reply("question"));
+    let mut steps = reports(&[Category::Ownership]);
+    steps.push(Step::Eof);
+
+    let (_, outcome) = run_init(steps, &client, &config(true), &path);
+    assert_eq!(outcome, Ok(Outcome::Interrupted));
+    assert!(!path.exists());
 }
 
 #[test]

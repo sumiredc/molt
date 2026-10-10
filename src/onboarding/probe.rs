@@ -21,7 +21,7 @@ use crate::llm::{ChatClient, ChatError, JsonError, Message, Role, Router};
 use crate::profile::element::{Category, Element};
 
 /// The questions asked per category at most: 1 question and 1 follow-up (PRD §8.4).
-pub const QUESTIONS_PER_CATEGORY: usize = 2;
+pub(crate) const QUESTIONS_PER_CATEGORY: usize = 2;
 
 /// The prompt the user answers a question at.
 const ANSWER_PROMPT: &str = "answer> ";
@@ -35,7 +35,7 @@ pub struct Model<'a> {
 
 /// The judgement of one element.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Judgement {
+pub(crate) struct Judgement {
     pub element: Element,
     /// Whether the answers show the element is known. Otherwise it stays `unknown`.
     pub known: bool,
@@ -45,7 +45,7 @@ pub struct Judgement {
 
 /// How the Q&A failed: the user interrupted, or the API failed (the cause, for the user).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Stopped {
+pub(crate) enum Stopped {
     Interrupted,
     Failed(String),
 }
