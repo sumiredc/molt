@@ -27,13 +27,7 @@ pub(super) fn run(
         .as_ref()
         .map(|(_, _, client)| client.as_ref())
         .map_err(Clone::clone);
-    if client.is_ok() && repo.is_some() {
-        // TODO(#66): take stock of the reference repository.
-        ui.show(
-            "Taking stock of a reference repository is not implemented yet; going on without it.",
-        );
-    }
-    match questionnaire::init(ui.as_mut(), &path, client) {
+    match questionnaire::init(ui.as_mut(), &path, client, repo) {
         Ok(Outcome::Saved | Outcome::Kept) => ExitCode::SUCCESS,
         Ok(Outcome::Interrupted) => ExitCode::from(INTERRUPTED),
         Err(message) => {

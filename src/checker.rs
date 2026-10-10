@@ -3,7 +3,7 @@
 //!
 //! A pure function over strings: no file, no environment variable, no network.
 
-mod crates;
+pub(crate) mod crates;
 pub(crate) mod diff;
 pub mod finding;
 mod macro_args;
