@@ -316,6 +316,7 @@ fn offered(recurred: bool) -> Vec<String> {
         &tools,
         boundary,
         None,
+        &crate::profile::store::Profile::new(),
     )
     .recurred(recurred);
     let mut ui = Recording::default();

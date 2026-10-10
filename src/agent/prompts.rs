@@ -318,8 +318,8 @@ pub fn fixed_commit_message(files: &[String]) -> String {
 /// none of it reaches the main line.
 pub const SIDE_LINE_SYSTEM: &str = "\
 You are molt's side line. A request of the user stopped at a boundary: the code for it needs Rust syntax elements or crates that the user's comprehension profile does not allow yet, because the user does not understand them yet.
-Your job is to help the user understand them. Do not write the code of the request, and do not decide how the request goes on: the user does.
-First explain the idea of the items: what problem they solve and how they work, in one paragraph of plain prose. Do not compare ways to write it, and do not list alternatives.
+Your job is to help the user understand them. Do not decide how the request goes on: the user does.
+First explain the idea of the items: what problem they solve and how they work, in one paragraph of plain prose. Then, when asked, write the one other way to write the code: without the items, with only what the user's profile allows, so that the user can compare it with the code that uses them. Do not write the rest of the request's code, and do not list other alternatives.
 Then answer the user's questions about them, briefly and concretely. Short code examples are fine when they help.
 Answer in the language of the user's latest input.";
 
@@ -368,6 +368,23 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
         None => context.push_str("\n\nExplain the idea of these items in one paragraph."),
     }
     context
+}
+
+/// What the `reason` model is asked for the comparison in the explanation (PRD UC3): the code the
+/// main line tried, rewritten without the items with only `allowed`, the items the user's profile
+/// allows, as one code block after the paragraph, or no code block when that cannot be done well.
+pub fn compare_request(allowed: &[ItemKey]) -> String {
+    let allowed = if allowed.is_empty() {
+        "none".to_owned()
+    } else {
+        item_names(allowed)
+    };
+    format!(
+        "After the paragraph, rewrite the code the main line tried without these items, using \
+         only the syntax elements and crates the user's profile allows: {allowed}. Write it as \
+         one ```rust code block, and write nothing after it. If it cannot be written well that \
+         way, write no code block."
+    )
 }
 
 /// The one message the side line hands to the main line (PRD §8.5): `BOUNDARY RESOLVED:` and the

@@ -223,6 +223,17 @@ pub struct Boundary {
     pub cause: BoundaryCause,
 }
 
+impl Boundary {
+    /// The code the main line tried with the items: what was rejected again, or what
+    /// `request_boundary` proposed, if it proposed any.
+    pub fn attempted_code(&self) -> Option<&str> {
+        match &self.cause {
+            BoundaryCause::RejectedTwice { content, .. } => Some(content),
+            BoundaryCause::Requested { proposed_code, .. } => proposed_code.as_deref(),
+        }
+    }
+}
+
 /// What made the boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BoundaryCause {
@@ -357,6 +368,7 @@ impl<'a> MainLine<'a> {
             &self.tools,
             boundary,
             request,
+            &self.profile,
         )
         .recurred(recurred)
     }
