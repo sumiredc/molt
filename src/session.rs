@@ -208,15 +208,12 @@ impl SessionLog {
         })
     }
 
-    /// The file the events are written to, unless the log is disabled. Only tests read it
-    /// until molt shows where the log is.
-    #[cfg(test)]
+    /// The file the events are written to, unless the log is disabled.
     pub(crate) fn path(&self) -> Option<&Path> {
         self.events.as_ref().map(|sink| sink.path.as_path())
     }
 
     /// The file the request bodies are written to, when `MOLT_LOG` enabled it.
-    #[cfg(test)]
     pub(crate) fn requests_path(&self) -> Option<&Path> {
         self.requests.as_ref().map(|sink| sink.path.as_path())
     }
