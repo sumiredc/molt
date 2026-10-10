@@ -63,7 +63,7 @@ fn judged_profile() -> Profile {
             Status::Known,
             Provenance::ReferenceRepo,
             at(1_791_590_400),
-            None,
+            Some("/src/app".to_owned()),
         )
         .unwrap();
     profile
@@ -172,7 +172,7 @@ fn the_profile_is_shown_per_category_with_status_provenance_and_the_reason_of_th
     let to_owned = position(&|line| line.split_whitespace().eq(["to_owned", "unknown", "-"]));
     assert!(ownership < clone && clone < borrowing, "{shown}");
     assert!(ownership < to_owned && to_owned < borrowing, "{shown}");
-    let crates = position(&|line| line == "crates");
+    let crates = position(&|line| line == "crates (reference_repo: /src/app)");
     let tokio = position(&|line| {
         line.split_whitespace()
             .eq(["crate:tokio", "known", "reference_repo"])

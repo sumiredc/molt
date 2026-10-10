@@ -65,8 +65,8 @@ pub(crate) fn confirm(ui: &mut dyn Ui, profile: &mut Profile) -> Result<Confirme
 }
 
 /// The profile per category: each element that is not a base element with its status, its
-/// provenance and the evidence (for the Q&A, the reason of the judgement); then the crates; then
-/// the base elements.
+/// provenance and, for the Q&A, the reason of the judgement; then the crates, under the reference
+/// repository they came from (the same for every crate, so shown once); then the base elements.
 fn table(profile: &Profile) -> String {
     let width = Element::ALL
         .iter()
@@ -77,7 +77,10 @@ fn table(profile: &Profile) -> String {
     let row = |text: &mut String, key: &ItemKey| {
         let entry = profile.entry(key);
         let provenance = entry.map_or("-", |entry| entry.provenance().name());
-        let evidence = entry.and_then(|entry| entry.evidence()).unwrap_or("");
+        let evidence = entry
+            .filter(|entry| entry.provenance() == Provenance::Qa)
+            .and_then(|entry| entry.evidence())
+            .unwrap_or("");
         let line = format!(
             "  {:width$}  {:7}  {provenance:14}  {evidence}",
             key.to_string(),
@@ -100,7 +103,14 @@ fn table(profile: &Profile) -> String {
             row(&mut text, &ItemKey::Element(element));
         }
     }
-    writeln!(text, "crates").unwrap();
+    let repo = profile
+        .entries()
+        .find(|(_, entry)| entry.provenance() == Provenance::ReferenceRepo)
+        .and_then(|(_, entry)| entry.evidence());
+    match repo {
+        Some(repo) => writeln!(text, "crates (reference_repo: {repo})").unwrap(),
+        None => writeln!(text, "crates").unwrap(),
+    }
     for (key, _) in profile
         .entries()
         .filter(|(key, _)| matches!(key, ItemKey::Crate(_)))
