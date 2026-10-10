@@ -4,22 +4,29 @@
 //! The side line has a message list of its own (PRD §8.1). Nothing said on it reaches the main
 //! line's message list: the main line only hands it the boundary and the user's request.
 
+mod user_wrote;
+
 use std::collections::BTreeMap;
 
-use super::mainline::Boundary;
+pub use user_wrote::{Done, Failure};
+
+use super::mainline::{Boundary, Change};
 use super::prompts;
 use super::tools::Tools;
 use crate::llm::{ChatClient, ChatError, Message, Role, Router};
 use crate::profile::status::ItemKey;
 use crate::session::SessionLog;
 
-/// What the user chose on the side line (PRD UC3). ③ is not here yet.
+/// What the user chose on the side line (PRD UC3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
     /// ① Understand, then delegate: the items become `known`, and the main line uses them.
     Unlock,
     /// ② Use a construct I know: the items become `seen`, and the main line rewrites without them.
     Rewrite,
+    /// ③ Write it myself: the items in the user's lines become `known`, and the main line re-reads
+    /// the files the user changed.
+    UserWrote,
 }
 
 impl Choice {
@@ -28,17 +35,19 @@ impl Choice {
         match self {
             Choice::Unlock => "unlock",
             Choice::Rewrite => "rewrite",
+            Choice::UserWrote => "user_wrote",
         }
     }
 }
 
 /// The outcome of the side line that goes back to the main line (PRD §8.5): the choice, the items,
-/// and for ② the one-line coding policy.
+/// for ② the one-line coding policy, and for ③ the files the user changed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     choice: Choice,
     items: Vec<ItemKey>,
     policy: Option<String>,
+    files: Vec<Change>,
 }
 
 impl Resolution {
@@ -55,16 +64,30 @@ impl Resolution {
         self.policy.as_deref()
     }
 
+    /// The files the user changed in ③, from the content when the side line opened to the content
+    /// at `/done`, by path relative to the root. Empty for ① and ②.
+    pub fn files(&self) -> &[Change] {
+        &self.files
+    }
+
     /// The one message that enters the main line (PRD §8.5).
     pub fn message(&self) -> String {
-        prompts::boundary_resolved(self.choice.name(), &self.items, self.policy.as_deref())
+        match self.choice {
+            Choice::UserWrote => {
+                let paths: Vec<&str> = self.files.iter().map(|file| file.path.as_str()).collect();
+                prompts::user_wrote_resolved(&self.items, &paths)
+            }
+            _ => {
+                prompts::boundary_resolved(self.choice.name(), &self.items, self.policy.as_deref())
+            }
+        }
     }
 }
 
 /// Why [`SubLine::resolve`] gave no [`Resolution`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Unresolved {
-    /// The choice is not one of [`SubLine::choices`].
+    /// The choice is not one of [`SubLine::choices`], or is ③, which only `/done` resolves.
     NotOffered,
     /// The user interrupted the wait for the policy of ② (Ctrl-C). Nothing changed.
     Interrupted,
@@ -75,6 +98,10 @@ pub struct SubLine<'a> {
     client: &'a dyn ChatClient,
     router: Router,
     boundary: Boundary,
+    /// The user's latest request on the main line, whose language the review of ③ follows.
+    request: Option<String>,
+    /// Whether the user chose ③ and has not yet sent a `/done` that found a change to check.
+    writing: bool,
     /// Whether the boundary recurred after ② in the same turn (PRD UC3), so ② is not offered.
     recurred: bool,
     baseline: BTreeMap<String, String>,
@@ -102,6 +129,8 @@ impl<'a> SubLine<'a> {
             router,
             baseline: tools.checkable_files(),
             boundary,
+            request: request.map(str::to_owned),
+            writing: false,
             recurred: false,
             context,
             messages: vec![Message::System {
@@ -131,16 +160,17 @@ impl<'a> SubLine<'a> {
     /// The choices the user has, in order.
     pub fn choices(&self) -> &'static [Choice] {
         if self.recurred {
-            &[Choice::Unlock]
+            &[Choice::Unlock, Choice::UserWrote]
         } else {
-            &[Choice::Unlock, Choice::Rewrite]
+            &[Choice::Unlock, Choice::Rewrite, Choice::UserWrote]
         }
     }
 
-    /// The outcome of `choice` to hand back to the main line (PRD §8.5). For ② the `light` model
-    /// makes the one-line policy from the side line's message list; when it cannot, a fixed policy
-    /// stands in, so ② fails only when the user interrupts the wait for the policy. That request
-    /// body goes to `log` (PRD §8.8).
+    /// The outcome of ① or ② to hand back to the main line (PRD §8.5). ③'s outcome only
+    /// [`SubLine::done`] makes, so ③ is not offered here. For ② the `light` model makes the
+    /// one-line policy from the side line's message list; when it cannot, a fixed policy stands
+    /// in, so ② fails only when the user interrupts the wait for the policy. That request body
+    /// goes to `log` (PRD §8.8).
     pub fn resolve(&self, choice: Choice, log: &SessionLog) -> Result<Resolution, Unresolved> {
         if !self.choices().contains(&choice) {
             return Err(Unresolved::NotOffered);
@@ -152,11 +182,13 @@ impl<'a> SubLine<'a> {
                 self.policy(log)?
                     .unwrap_or_else(|| prompts::fixed_policy(&items)),
             ),
+            Choice::UserWrote => return Err(Unresolved::NotOffered),
         };
         Ok(Resolution {
             choice,
             items,
             policy,
+            files: Vec::new(),
         })
     }
 
@@ -227,6 +259,12 @@ impl<'a> SubLine<'a> {
                 self.context
             )
         };
+        self.exchange(content, log)
+    }
+
+    /// Sends `content` as the user's next message to the `reason` model and returns the answer.
+    /// Both join the side line's message list only when the request succeeds.
+    fn exchange(&mut self, content: String, log: &SessionLog) -> Result<String, ChatError> {
         let user = Message::User { content };
         let answer = self.send(user.clone(), log)?;
         self.messages.push(user);

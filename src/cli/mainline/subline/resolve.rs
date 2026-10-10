@@ -25,6 +25,10 @@ fn label(choice: Choice, items: &[ItemKey]) -> String {
         Choice::Rewrite => {
             format!("Use a construct I know: molt rewrites without {names}")
         }
+        Choice::UserWrote => {
+            "Write it myself: molt shows where, and checks what I wrote when I type /done"
+                .to_owned()
+        }
     }
 }
 

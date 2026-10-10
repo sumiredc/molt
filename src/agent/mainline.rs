@@ -17,7 +17,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
-use super::subline::{Choice, Resolution, SubLine};
+use super::subline::{Choice, Done, Resolution, SubLine};
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
@@ -80,6 +80,7 @@ struct Held {
     written: Vec<String>,
     compile_fixes: usize,
     changes: Vec<Change>,
+    user_written: Vec<String>,
     progress: Progress,
     /// The items the user chose ② for in this turn (PRD UC3), as [`checked_key`] spells them.
     rewritten: BTreeSet<ItemKey>,
@@ -123,6 +124,10 @@ pub struct Turn {
     /// The files molt changed in this turn, in the order first changed: those written, and the
     /// `Cargo.toml` at the project root when `cargo add` changed it.
     pub changes: Vec<Change>,
+    /// The files the user changed in ③ on the side line in this turn (UC3), each once, in the
+    /// order first changed. They are among `changes` too, as part of the one change of the turn
+    /// (UC4).
+    pub user_written: Vec<String>,
     /// The crates molt asked the user to add in this turn, in order (PRD UC2).
     pub crate_adds: Vec<CrateAdd>,
     /// The last `cargo check` molt ran at the end of the turn, if it ran one: only when something
@@ -297,6 +302,13 @@ impl<'a> MainLine<'a> {
         .recurred(recurred)
     }
 
+    /// `/done` of ③ on `side`, opened where this main line stopped (UC3): the user's lines are
+    /// checked against this main line's profile, and `cargo check` runs on its project. The
+    /// request bodies go to this main line's log (PRD §8.8).
+    pub fn done(&self, side: &mut SubLine) -> Done {
+        side.done(&self.tools, &self.profile, &self.log)
+    }
+
     /// The profile the main line checks what the model writes against.
     #[cfg(test)]
     pub(crate) fn profile(&self) -> &Profile {
@@ -304,24 +316,26 @@ impl<'a> MainLine<'a> {
     }
 
     /// Goes on with the turn held at a boundary, as the user chose on the side line (PRD UC3,
-    /// §8.5): the profile changes (① `known`, ② `seen`, provenance `side_line`) and is saved,
-    /// `resolution`'s message goes into the message list as the only thing from the side line,
-    /// and the same turn goes on. `None` when no turn is held at a boundary.
+    /// §8.5): the profile changes (① `known` and ② `seen` with provenance `side_line`, ③ `known`
+    /// with `wrote_it`) and is saved, `resolution`'s message goes into the message list as the
+    /// only thing from the side line, and the same turn goes on. The files the user changed in ③
+    /// join the turn's changes. `None` when no turn is held at a boundary.
     pub fn resolve(
         &mut self,
         resolution: &Resolution,
         approver: &mut dyn Approver,
     ) -> Option<Resumed> {
         let held = self.held.take()?;
-        let to = match resolution.choice() {
-            Choice::Unlock => Status::Known,
-            Choice::Rewrite => Status::Seen,
+        let (to, provenance) = match resolution.choice() {
+            Choice::Unlock => (Status::Known, Provenance::SideLine),
+            Choice::Rewrite => (Status::Seen, Provenance::SideLine),
+            Choice::UserWrote => (Status::Known, Provenance::WroteIt),
         };
         let at = Timestamp::now();
         let mut items: Vec<ItemKey> = resolution.items().to_vec();
         if to == Status::Known {
             // The check allows a crate only when every spelling of it in the profile (`-` or `_`)
-            // is `known`, so ① unlocks each of them, or the same boundary would come again.
+            // is `known`, so ① and ③ unlock each of them, or the same boundary would come again.
             let checked: Vec<ItemKey> = items.iter().map(checked_key).collect();
             let spellings: Vec<ItemKey> = self
                 .profile
@@ -337,7 +351,8 @@ impl<'a> MainLine<'a> {
             items.extend(spellings);
         }
         for item in &items {
-            // Only these are changes, and PRD §7 allows each with `side_line`, so none is refused.
+            // Only these are changes, and PRD §7 allows each with `side_line` and `wrote_it`, so
+            // none is refused.
             // ② leaves a `seen` item as it is, and ① a `known` one.
             if matches!(
                 (self.profile.status(item), to),
@@ -345,7 +360,7 @@ impl<'a> MainLine<'a> {
             ) {
                 let _ = self
                     .profile
-                    .transition(item.clone(), to, Provenance::SideLine, at, None);
+                    .transition(item.clone(), to, provenance, at, None);
             }
         }
         let saved = match &self.profile_path {
@@ -356,6 +371,25 @@ impl<'a> MainLine<'a> {
         if resolution.choice() == Choice::Rewrite {
             rewritten.extend(resolution.items().iter().map(checked_key));
         }
+        let mut changes = held.changes;
+        let mut user_written = held.user_written;
+        for file in resolution.files() {
+            let tools = &self.tools;
+            if !user_written
+                .iter()
+                .any(|path| tools.same_file(path, &file.path))
+            {
+                user_written.push(file.path.clone());
+            }
+            // A file molt changed earlier in the turn keeps its content from before that.
+            match changes
+                .iter_mut()
+                .find(|c| tools.same_file(&c.path, &file.path))
+            {
+                Some(change) => change.after = file.after.clone(),
+                None => changes.push(file.clone()),
+            }
+        }
         self.messages.push(Message::User {
             content: resolution.message(),
         });
@@ -365,7 +399,8 @@ impl<'a> MainLine<'a> {
             reply: None,
             written: held.written,
             compile_fixes: held.compile_fixes,
-            changes: held.changes,
+            changes,
+            user_written,
             crate_adds: Vec::new(),
             check: None,
         };
@@ -401,6 +436,7 @@ impl<'a> MainLine<'a> {
             written: Vec::new(),
             compile_fixes: 0,
             changes: Vec::new(),
+            user_written: Vec::new(),
             crate_adds: Vec::new(),
             check: None,
         };
@@ -433,6 +469,7 @@ impl<'a> MainLine<'a> {
                         written: turn.written.clone(),
                         compile_fixes: turn.compile_fixes,
                         changes: turn.changes.clone(),
+                        user_written: turn.user_written.clone(),
                         progress,
                         rewritten,
                         recurred,

@@ -2,13 +2,14 @@
 //! prompt `molt [sub: arc, mutex]> `, and its output indented by 2 spaces.
 
 mod resolve;
+mod user_wrote;
 
 use super::show_error_of;
-use crate::agent::subline::{Choice, SubLine};
+use crate::agent::mainline::MainLine;
+use crate::agent::subline::{Choice, Resolution, SubLine};
 use crate::cli::ui::{Input, Ui};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
-use crate::session::SessionLog;
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
@@ -20,8 +21,10 @@ const HINT: &str = "Ask anything about it, as many times as you like. Type /choo
 /// How the user left the side line.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Left {
-    /// `/choose`, and the user chose one.
+    /// `/choose`, and the user chose ① or ②.
     Chose(Choice),
+    /// ③, and `/done` passed: the outcome to hand back to the main line.
+    Wrote(Resolution),
     /// `/abort`: the request is to be withdrawn.
     Aborted,
     /// Ctrl-C, at the prompt or while waiting for the model: the main line goes back to being
@@ -33,9 +36,11 @@ pub(super) enum Left {
     Failed,
 }
 
-/// Runs the side line until the user leaves it. The explanation is asked for the first time only;
-/// when the side line is opened again, the questions go on where they were.
-pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left {
+/// Runs the side line of `agent`, which stopped at its boundary, until the user leaves it. The
+/// explanation is asked for the first time only; when the side line is opened again, the
+/// questions go on where they were, and so does ③ when the user was writing.
+pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Left {
+    let log = agent.log();
     ui.show(&banner(&format!(
         "side line: {}",
         names(&side.boundary().items)
@@ -54,7 +59,7 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
     if side.is_recurrence() {
         ui.show(&indent(&resolve::recurred(&side.boundary().items)));
     }
-    ui.show(&indent(HINT));
+    ui.show(&indent(hint(side)));
     let prompt = prompt(&side.boundary().items);
     let left = loop {
         match ui.read_line(&prompt) {
@@ -64,16 +69,25 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
                     break Left::Aborted;
                 } else if line == "/choose" {
                     match resolve::choose(ui, side) {
+                        Ok(Some(Choice::UserWrote)) => {
+                            if let Some(left) = user_wrote::guide(ui, side, log) {
+                                break left;
+                            }
+                        }
                         Ok(Some(choice)) => break Left::Chose(choice),
-                        Ok(None) => ui.show(&indent(HINT)),
+                        Ok(None) => ui.show(&indent(hint(side))),
                         Err(error) => {
                             eprintln!("{error}");
                             return Left::Failed;
                         }
                     }
+                } else if line == "/done" {
+                    if let Some(left) = user_wrote::done(ui, side, agent) {
+                        break left;
+                    }
                 } else if line.is_empty() {
                 } else if line.starts_with('/') {
-                    ui.show(&indent(&format!("Unknown command {line}. {HINT}")));
+                    ui.show(&indent(&format!("Unknown command {line}. {}", hint(side))));
                 } else {
                     match side.ask(line, log) {
                         Ok(answer) => ui.show(&indent(&answer)),
@@ -103,6 +117,15 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Left
 fn leave(ui: &mut dyn Ui, left: Left) -> Left {
     ui.show(&banner("back to the main line"));
     left
+}
+
+/// What the user can do on `side` now: [`HINT`], or while they write in ③, what to send when done.
+fn hint(side: &SubLine) -> &'static str {
+    if side.is_writing() {
+        user_wrote::WRITING
+    } else {
+        HINT
+    }
 }
 
 /// The side-line prompt (PRD §8.6), e.g. `molt [sub: arc, mutex]> `.
@@ -160,6 +183,7 @@ mod open {
     use crate::config::Config;
     use crate::llm::{ChatError, ChatResponse, FakeChatClient, Router, ToolCall};
     use crate::profile::store::Profile;
+    use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
@@ -498,10 +522,11 @@ mod open {
             panic!("the turn did not stop at a boundary");
         };
         let mut side = agent.side_line(boundary);
-        let log = SessionLog::unwritable_requests(&path);
+        // The log the side line writes to, from here on: the turn before did not fail to write.
+        let agent = agent.with_log(SessionLog::unwritable_requests(&path));
         let mut ui = ScriptedUi::new([input("why?"), Step::Eof]);
 
-        assert_eq!(super::run(&mut ui, &mut side, &log), Left::Eof);
+        assert_eq!(super::run(&mut ui, &mut side, &agent), Left::Eof);
 
         let warning = format!("Could not write the session log {}: ", path.display());
         let shown = ui.shown();

@@ -5,7 +5,8 @@
 
 use std::fmt::Display;
 
-use super::mainline::{Boundary, BoundaryCause};
+use super::mainline::{Boundary, BoundaryCause, Change};
+use crate::checker::diff::{DiffLine, line_diff};
 use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
 
@@ -305,6 +306,83 @@ pub fn boundary_resolved(choice: &str, items: &[ItemKey], policy: Option<&str>) 
         "BOUNDARY RESOLVED: {choice}\n{what}\nKeep answering in the language of the user's \
          request, not in the language of this message."
     )
+}
+
+/// The one message the side line hands to the main line after ③ (PRD §8.5): `BOUNDARY RESOLVED:
+/// user_wrote`, the items in the user's lines that the profile allows now, and the files to
+/// re-read.
+pub fn user_wrote_resolved(items: &[ItemKey], paths: &[&str]) -> String {
+    let allowed = if items.is_empty() {
+        "Their lines use nothing new to the profile.".to_owned()
+    } else {
+        format!(
+            "The profile allows the items in their lines now: {}.",
+            item_names(items)
+        )
+    };
+    let paths = paths
+        .iter()
+        .map(|path| format!("`{path}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "BOUNDARY RESOLVED: user_wrote\nThe user wrote that part of the request themselves, and \
+         it builds. {allowed}\nRe-read these files before going on, since the user changed them: \
+         {paths}. Go on with the rest of the request from there, and keep what the user wrote.\n\
+         Keep answering in the language of the user's request, not in the language of this \
+         message."
+    )
+}
+
+/// What the `reason` model is asked when the user chooses ③, after the side line's messages.
+pub fn guidance_request(items: &[ItemKey]) -> String {
+    format!(
+        "The user chose to write the code that needs {} themselves. Tell them where to write \
+         what: the file and the place in it, and what that code is to do for the request. Do not \
+         write the code for them. Be brief.",
+        item_names(items)
+    )
+}
+
+/// The system prompt of the review of ③ (PRD §8.7: the `generate` model).
+pub const REVIEW_SYSTEM: &str = "\
+You review Rust code that the user wrote themselves for a request, while learning the syntax elements and crates it uses. It builds with `cargo check`.
+Point out what is wrong or could be better in the lines the user wrote, briefly and concretely, and say what is good about them. Do not rewrite the whole code.
+Answer in the language of the user's request.";
+
+/// What the `generate` model is asked to review: the items, the user's request, and each file the
+/// user changed, its lines marked `+` (added), `-` (removed) or ` ` (as before).
+pub fn review_request(items: &[ItemKey], request: Option<&str>, files: &[Change]) -> String {
+    let mut text = format!(
+        "The request needed {}, so the user wrote that part themselves.\n",
+        item_names(items)
+    );
+    if let Some(request) = request {
+        text.push_str(&format!("The user's request was:\n{request}\n"));
+    }
+    text.push_str("\nWhat the user changed:\n");
+    for file in files {
+        let new = if file.before.is_none() {
+            " (a new file)"
+        } else {
+            ""
+        };
+        text.push_str(&format!("\n`{}`{new}:\n```diff\n", file.path));
+        for line in line_diff(file.before.as_deref().unwrap_or(""), &file.after) {
+            let (mark, line) = match line {
+                DiffLine::Same(line) => (' ', line),
+                DiffLine::Added(line) => ('+', line),
+                DiffLine::Removed(line) => ('-', line),
+            };
+            text.push_str(&format!("{mark}{line}\n"));
+        }
+        text.push_str("```\n");
+    }
+    text.push_str(
+        "\nReview the lines the user wrote, in the language of the user's request above, not in \
+         the language of this message.",
+    );
+    text
 }
 
 /// What the `light` model is asked for the one-line policy of ②, after the side line's messages.

@@ -1,0 +1,156 @@
+//! ③ on the side line (PRD UC3): the user writes the code themselves. The side line tells them
+//! where to write what, and on `/done` takes the user's lines from what changed on the disk since
+//! the side line opened, detects the items in them, runs `cargo check`, and has the `generate`
+//! model review them.
+
+use super::{Choice, Resolution, SubLine};
+use crate::agent::mainline::Change;
+use crate::agent::prompts;
+use crate::agent::tools::Tools;
+use crate::checker::{CheckReport, ParseError};
+use crate::llm::{ChatError, Message, Role};
+use crate::profile::status::ItemKey;
+use crate::profile::store::Profile;
+use crate::session::SessionLog;
+use crate::workspace::cargo::{CargoError, CargoOutput};
+
+/// What `/done` found (UC3 ③).
+#[derive(Debug)]
+pub enum Done {
+    /// No file the checker can check was written since the side line opened. The user chooses
+    /// again.
+    NoChange,
+    /// The user's lines do not parse, or `cargo check` did not pass. The profile is not changed:
+    /// the user can fix it and send `/done` again, or choose another way.
+    Failed(Failure),
+    /// `cargo check` passed. `resolution` goes back to the main line; `review` is for the user.
+    Passed {
+        resolution: Resolution,
+        review: Result<String, ChatError>,
+    },
+    /// The user interrupted the wait for the review (Ctrl-C). The profile is not changed, and the
+    /// side line is still writing.
+    Interrupted,
+}
+
+/// Why `/done` did not pass.
+#[derive(Debug)]
+pub struct Failure {
+    /// Each file of the user's that does not parse, by path relative to the root, with where.
+    pub parse_errors: Vec<(String, ParseError)>,
+    /// The `cargo check` run on the project. It did not pass, or could not run, unless only
+    /// `parse_errors` failed.
+    pub check: Result<CargoOutput, CargoError>,
+}
+
+impl SubLine<'_> {
+    /// Whether the user chose ③ and is writing: `/done` is what they send next.
+    pub fn is_writing(&self) -> bool {
+        self.writing
+    }
+
+    /// Starts ③: asks the `reason` model where the user is to write what, and returns its
+    /// guidance. The side line is writing from now on, even when the request fails, unless the
+    /// user interrupted the wait for it (Ctrl-C). The request body goes to `log` (PRD §8.8).
+    pub fn guide(&mut self, log: &SessionLog) -> Result<String, ChatError> {
+        let instruction = prompts::guidance_request(&self.boundary.items);
+        let content = if self.explained() {
+            instruction
+        } else {
+            format!("{}\n\n{instruction}", self.context)
+        };
+        let guidance = self.exchange(content, log);
+        if !matches!(guidance, Err(ChatError::Interrupted)) {
+            self.writing = true;
+        }
+        guidance
+    }
+
+    /// `/done` of ③ on the project of `tools`. The user's lines are those of the `.rs` files and
+    /// `Cargo.toml`s that differ from when the side line opened (a file that is new counts as all
+    /// lines). Every item in them that `profile` does not allow is detected as a write would be,
+    /// then `cargo check` runs; only when the lines parse and the check passes is the outcome a
+    /// resolution, and the `generate` model reviews the lines. When nothing changed, the side
+    /// line is no longer writing, so the user chooses again. A review that fails otherwise than by
+    /// the user's interrupt does not stop the resolution. Request bodies go to `log` (PRD §8.8).
+    pub(crate) fn done(&mut self, tools: &Tools, profile: &Profile, log: &SessionLog) -> Done {
+        let files: Vec<Change> = tools
+            .checkable_files()
+            .into_iter()
+            .filter(|(path, now)| self.baseline.get(path) != Some(now))
+            .map(|(path, after)| Change {
+                before: self.baseline.get(&path).cloned(),
+                path,
+                after,
+            })
+            .collect();
+        if files.is_empty() {
+            self.writing = false;
+            return Done::NoChange;
+        }
+        let mut items: Vec<ItemKey> = Vec::new();
+        let mut parse_errors = Vec::new();
+        for file in &files {
+            let old = file.before.as_deref().unwrap_or("");
+            match tools.check(&file.path, old, &file.after, profile) {
+                Some(CheckReport::OutOfProfile(findings)) => {
+                    for finding in findings {
+                        if !items.contains(&finding.key) {
+                            items.push(finding.key);
+                        }
+                    }
+                }
+                Some(CheckReport::ParseError(error)) => {
+                    parse_errors.push((file.path.clone(), error));
+                }
+                Some(CheckReport::Clean) | None => {}
+            }
+        }
+        let check = tools.cargo_check();
+        let passed = matches!(&check, Ok(output) if output.success);
+        if !passed || !parse_errors.is_empty() {
+            return Done::Failed(Failure {
+                parse_errors,
+                check,
+            });
+        }
+        let review = match self.review(&files, log) {
+            Err(ChatError::Interrupted) => return Done::Interrupted,
+            review => review,
+        };
+        Done::Passed {
+            resolution: Resolution {
+                choice: Choice::UserWrote,
+                items,
+                policy: None,
+                files,
+            },
+            review,
+        }
+    }
+
+    /// Asks the `generate` model to review the user's lines in `files` (PRD §8.7). Nothing of the
+    /// side line's message list goes with it but the items and the user's request.
+    fn review(&self, files: &[Change], log: &SessionLog) -> Result<String, ChatError> {
+        let messages = vec![
+            Message::System {
+                content: prompts::REVIEW_SYSTEM.to_owned(),
+            },
+            Message::User {
+                content: prompts::review_request(
+                    &self.boundary.items,
+                    self.request.as_deref(),
+                    files,
+                ),
+            },
+        ];
+        let request = self.router.request(Role::Generate, messages);
+        log.record_request(&request);
+        Ok(self.client.chat(&request)?.content.unwrap_or_default())
+    }
+}
+
+/// Tests of ③ on the side line and what the main line does with it. Named so that
+/// `cargo test subline::user_wrote` selects them.
+#[cfg(test)]
+mod tests;
