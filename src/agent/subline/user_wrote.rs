@@ -136,6 +136,7 @@ impl SubLine<'_> {
         Done::Passed {
             resolution: Resolution {
                 choice: Choice::UserWrote,
+                answers: self.boundary.items.clone(),
                 items,
                 policy: None,
                 files,

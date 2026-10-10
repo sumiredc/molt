@@ -4,6 +4,7 @@
 //! The side line has a message list of its own (PRD §8.1). Nothing said on it reaches the main
 //! line's message list: the main line only hands it the boundary and the user's request.
 
+pub(crate) mod bundle;
 mod user_wrote;
 
 use std::collections::BTreeMap;
@@ -45,6 +46,8 @@ impl Choice {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     choice: Choice,
+    /// The items of the boundary the side line was opened at, which this is the choice for.
+    answers: Vec<ItemKey>,
     items: Vec<ItemKey>,
     policy: Option<String>,
     files: Vec<Change>,
@@ -55,8 +58,16 @@ impl Resolution {
         self.choice
     }
 
+    /// The items the profile changes for: those of the boundary for ① and ②, and those detected
+    /// in the user's lines for ③.
     pub fn items(&self) -> &[ItemKey] {
         &self.items
+    }
+
+    /// The items of the boundary the side line was opened at: what this is the choice for. For ③
+    /// they need not be among [`Resolution::items`], when the user wrote without them.
+    pub fn answers(&self) -> &[ItemKey] {
+        &self.answers
     }
 
     /// The one-line coding policy of ②.
@@ -199,6 +210,7 @@ impl<'a> SubLine<'a> {
         };
         Ok(Resolution {
             choice,
+            answers: items.clone(),
             items,
             policy,
             files: Vec::new(),
