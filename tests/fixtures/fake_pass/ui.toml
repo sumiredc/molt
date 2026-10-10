@@ -1,4 +1,5 @@
-# The user's side of one pass (`molt --ui-script`), for `tests/fake_pass.rs`.
+# The user's side of one pass (`molt --ui-script`) with `examples/fake/one_pass.toml`, for
+# `tests/fake_pass.rs` and `tests/fake_example.rs`.
 steps = [
   { input = "Print 1 to stderr with dbg! in src/main.rs." }, # the request, which stops at a boundary
   { input = "/choose" },                                     # on the side line
