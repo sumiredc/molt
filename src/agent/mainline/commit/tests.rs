@@ -11,7 +11,7 @@ use super::*;
 use crate::agent::subline::{Choice, Done};
 use crate::agent::tools::Tools;
 use crate::config::Config;
-use crate::llm::{ChatError, ChatResponse, FakeChatClient, Router, ToolCall};
+use crate::llm::{ChatError, ChatRequest, ChatResponse, FakeChatClient, Router, ToolCall};
 use crate::profile::store::Profile;
 use crate::session::SessionLog;
 use crate::workspace::Approval;
@@ -1183,4 +1183,70 @@ fn unfenced_takes_the_message_out_of_a_code_fence() {
     assert_eq!(unfenced("  Add one\n"), "Add one");
     assert_eq!(unfenced("```\nAdd one\n\nBody\n```"), "Add one\n\nBody");
     assert_eq!(unfenced("```text\nAdd one\n```\n"), "Add one");
+}
+
+// The clue to the user's language (PRD §3 Language, §8.6)
+
+/// The request for the message of the commit molt proposes after a turn that stopped at a
+/// boundary on "debug 1" and went on after ②, writing `src/main.rs`.
+fn commit_message_request_after_rewrite() -> ChatRequest {
+    let (dir, git) = repository();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("Print it instead.")));
+    let resolution = side
+        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write("write", "src/main.rs", PRINTS)));
+    client.push_chat(Ok(reply("done")));
+    let resumed = main_line
+        .resolve(&resolution, &mut Answer::no())
+        .unwrap()
+        .resumed();
+    client.push_chat(Ok(reply("Print 1")));
+
+    main_line.offer_commit(&resumed.turn, &mut Answer::no());
+
+    let request = client.requests().pop().unwrap();
+    assert!(
+        matches!(&request.messages[0], Message::System { content } if content == prompts::COMMIT_MESSAGE_SYSTEM),
+        "not the request for the commit message: {:?}",
+        request.messages
+    );
+    request
+}
+
+#[test]
+fn the_commit_message_request_after_a_side_line_quotes_the_request_the_user_typed() {
+    let request = commit_message_request_after_rewrite();
+
+    let Message::User { content } = &request.messages[1] else {
+        panic!("{:?}", request.messages);
+    };
+    assert!(
+        content.contains("The user's latest request was:\ndebug 1\n"),
+        "{content}"
+    );
+    assert!(!content.contains("BOUNDARY RESOLVED"), "{content}");
+}
+
+#[test]
+fn only_the_system_prompt_of_the_commit_message_request_speaks_of_the_language() {
+    let request = commit_message_request_after_rewrite();
+
+    let [
+        Message::System { content: system },
+        Message::User { content },
+    ] = &request.messages[..]
+    else {
+        panic!("{:?}", request.messages);
+    };
+    assert!(!content.contains("language"), "{content}");
+    assert!(
+        system.contains("Answer in the language of the user's"),
+        "{system}"
+    );
 }

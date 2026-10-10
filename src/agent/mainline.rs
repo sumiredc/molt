@@ -91,6 +91,10 @@ pub struct MainLine<'a> {
     /// Whether the last `cargo check` molt ran passed: at the end of a turn, on a withdrawal,
     /// before a commit, or on `/done` of ③. `None` before the first.
     last_check: Option<bool>,
+    /// What the user typed for the latest turn. Not the latest user message: molt puts the
+    /// outcome of the side line there too (PRD §8.5), and the user's request is what the side
+    /// line and the commit message quote as the clue to the user's language (PRD §3 Language).
+    request: Option<String>,
 }
 
 /// A turn held at a boundary: what it did so far, so that it can be withdrawn with `cargo check`
@@ -326,6 +330,7 @@ impl<'a> MainLine<'a> {
             profile_path: None,
             uncommitted: Vec::new(),
             last_check: None,
+            request: None,
         }
     }
 
@@ -373,15 +378,9 @@ impl<'a> MainLine<'a> {
         .recurred(recurred)
     }
 
-    /// The user's latest message in the message list.
+    /// What the user typed for the latest turn.
     fn latest_request(&self) -> Option<&str> {
-        self.messages
-            .iter()
-            .rev()
-            .find_map(|message| match message {
-                Message::User { content } => Some(content.as_str()),
-                _ => None,
-            })
+        self.request.as_deref()
     }
 
     /// `/done` of ③ on `side`, opened where this main line stopped (UC3): the user's lines are
@@ -594,6 +593,7 @@ impl<'a> MainLine<'a> {
         self.messages.push(Message::User {
             content: input.to_owned(),
         });
+        self.request = Some(input.to_owned());
         let turn = Turn {
             end: TurnEnd::Finished,
             tool_calls: Vec::new(),
