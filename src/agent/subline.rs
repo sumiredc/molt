@@ -136,6 +136,11 @@ pub struct SubLine<'a> {
     /// Where the reference repository uses the items, from the stock-taking beside the profile,
     /// shown after the comparison. `None` when there is no stock-taking.
     similar: Option<String>,
+    /// The items the user had seen before when the side line opened (PRD §7): their idea is not
+    /// asked for.
+    seen: Vec<ItemKey>,
+    /// Whether the explanation has been shown, also when nothing was asked for it.
+    explained: bool,
     /// The system prompt, then the context and the explanation once it came, then each question
     /// and its answer.
     messages: Vec<Message>,
@@ -156,10 +161,12 @@ impl<'a> SubLine<'a> {
         request: Option<&str>,
         profile: &Profile,
     ) -> Self {
-        let context = prompts::side_line_context(&boundary, request);
+        let seen = explain::seen(profile, &boundary.items);
+        let context = prompts::side_line_context(&boundary, request, &seen);
+        let idea = boundary.items.iter().any(|item| !seen.contains(item));
         let compare = boundary
             .attempted_code()
-            .map(|_| prompts::compare_request(&explain::allowed(profile)));
+            .map(|_| prompts::compare_request(&explain::allowed(profile), idea));
         Self {
             client,
             router,
@@ -172,6 +179,8 @@ impl<'a> SubLine<'a> {
             context,
             compare,
             similar: None,
+            seen,
+            explained: false,
             messages: vec![Message::System {
                 content: prompts::SIDE_LINE_SYSTEM.to_owned(),
             }],
@@ -246,7 +255,7 @@ impl<'a> SubLine<'a> {
     fn policy(&self, log: &SessionLog) -> Result<Option<String>, Unresolved> {
         let mut messages = self.messages.clone();
         let instruction = prompts::policy_request(&self.boundary.items);
-        let content = if self.explained() {
+        let content = if self.told() {
             instruction
         } else {
             format!("{}\n\n{instruction}", self.context)
@@ -274,15 +283,38 @@ impl<'a> SubLine<'a> {
         &self.baseline
     }
 
-    /// Whether the explanation has come.
+    /// Whether the explanation has come, or a question before it was answered: either way it is
+    /// not asked for again.
     pub fn explained(&self) -> bool {
+        self.explained || self.told()
+    }
+
+    /// Whether the model has been told about the boundary: the explanation, or a question before
+    /// it, went with the context and was answered.
+    fn told(&self) -> bool {
         self.messages.len() > 1
     }
 
     /// Asks the `reason` model to explain the idea of the items, and returns the explanation. When
     /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]). The
-    /// request body goes to `log` (PRD §8.8).
+    /// request body goes to `log` (PRD §8.8). When the user has seen every item before and the
+    /// main line tried no code, there is neither an idea nor a comparison to ask for, so nothing
+    /// is asked, and the model is told about the boundary with the first question instead.
     pub fn explain(&mut self, log: &SessionLog) -> Result<String, ChatError> {
+        let idea = self
+            .boundary
+            .items
+            .iter()
+            .any(|item| !self.seen.contains(item));
+        if !idea && self.compare.is_none() {
+            self.explained = true;
+            return Ok(explain::assemble(
+                &self.boundary,
+                &self.seen,
+                "",
+                self.similar.as_deref(),
+            ));
+        }
         // Only the explanation asks for the comparison: a question or the policy of ② asked
         // before it came goes with the context alone.
         let content = match &self.compare {
@@ -291,7 +323,9 @@ impl<'a> SubLine<'a> {
         };
         let user = Message::User { content };
         let answer = self.send(user.clone(), log)?;
-        let explanation = explain::assemble(&self.boundary, &answer, self.similar.as_deref());
+        let explanation =
+            explain::assemble(&self.boundary, &self.seen, &answer, self.similar.as_deref());
+        self.explained = true;
         self.messages.push(user);
         self.messages.push(Message::Assistant {
             content: Some(answer),
@@ -305,7 +339,7 @@ impl<'a> SubLine<'a> {
     /// come, the question goes with what the model is told about the boundary. The request body
     /// goes to `log` (PRD §8.8).
     pub fn ask(&mut self, question: &str, log: &SessionLog) -> Result<String, ChatError> {
-        let content = if self.explained() {
+        let content = if self.told() {
             question.to_owned()
         } else {
             format!(
@@ -495,7 +529,7 @@ mod open {
         let explanation = side.explain(&SessionLog::disabled()).unwrap();
 
         assert!(
-            explanation.starts_with("dbg! prints a value.\n\n"),
+            explanation.starts_with("`dbg_macro` (macros)\n\ndbg! prints a value.\n\n"),
             "{explanation}"
         );
 
@@ -573,6 +607,24 @@ mod open {
         };
         assert!(content.contains("dbg_macro"), "{content}");
         assert!(content.ends_with("what is it?"), "{content}");
+    }
+
+    #[test]
+    fn a_question_answered_after_a_failed_explanation_keeps_the_explanation_from_being_asked_again()
+    {
+        let dir = project();
+        let client = FakeChatClient::new();
+        let cargo = FakeCargo::new();
+        let mut main_line = main_line(&client, &cargo, &dir);
+        let boundary = stop_at_a_boundary(&client, &mut main_line);
+        let mut side = main_line.side_line(boundary);
+        client.push_chat(Err(ChatError::FakeExhausted));
+        client.push_chat(Ok(reply("answer")));
+        assert!(side.explain(&SessionLog::disabled()).is_err());
+
+        side.ask("what is it?", &SessionLog::disabled()).unwrap();
+
+        assert!(side.explained());
     }
 
     #[test]

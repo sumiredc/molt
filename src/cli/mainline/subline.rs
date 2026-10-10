@@ -195,7 +195,7 @@ mod open {
     const SUB: &str = "molt [sub: dbg_macro]> ";
     /// The explanation shown for the model's reply `explanation`, which has no code: the reply, then
     /// the comparison of the code the main line tried with none within the profile.
-    const EXPLAINED: &str = "  explanation\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
+    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
 
     fn write_main(id: &str) -> ChatResponse {
         ChatResponse {
@@ -281,7 +281,7 @@ mod open {
             ui.shown()[2..6],
             [
                 ENTER,
-                "  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]

@@ -321,20 +321,29 @@ pub fn fixed_commit_message(files: &[String]) -> String {
 pub const SIDE_LINE_SYSTEM: &str = "\
 You are molt's side line. A request of the user stopped at a boundary: the code for it needs Rust syntax elements or crates that the user's comprehension profile does not allow yet, because the user does not understand them yet.
 Your job is to help the user understand them. Do not decide how the request goes on: the user does.
-First explain the idea of the items: what problem they solve and how they work, in one paragraph of plain prose. Then, when asked, write the one other way to write the code: without the items, with only what the user's profile allows, so that the user can compare it with the code that uses them. Do not write the rest of the request's code, and do not list other alternatives.
+First explain the idea of the items you are asked to explain: what problem they solve and how they work, in one paragraph of plain prose. When you are told the user has seen an item before, do not explain its idea again. Then, when asked, write the one other way to write the code: without the items, with only what the user's profile allows, so that the user can compare it with the code that uses them. Do not write the rest of the request's code, and do not list other alternatives.
 Then answer the user's questions about them, briefly and concretely. Short code examples are fine when they help.
 Answer in the language of the user's latest input.";
 
 /// What the side line tells the model about `boundary` to get the explanation: the items, what the
 /// main line tried, and the user's request on the main line, whose language the explanation is
-/// to follow.
-pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
+/// to follow. The items of `seen` the user has seen before (PRD §7): their idea is not asked for,
+/// and when every item is one of them, no idea is (the explanation is shorter).
+pub fn side_line_context(boundary: &Boundary, request: Option<&str>, seen: &[ItemKey]) -> String {
     let items = boundary
         .items
         .iter()
-        .map(|item| match item {
-            ItemKey::Element(element) => format!("- `{item}` ({})", element.category().name()),
-            ItemKey::Crate(_) => format!("- `{item}` (a crate)"),
+        .map(|item| {
+            let what = match item {
+                ItemKey::Element(element) => element.category().name(),
+                ItemKey::Crate(_) => "a crate",
+            };
+            let before = if seen.contains(item) {
+                ", seen before"
+            } else {
+                ""
+            };
+            format!("- `{item}` ({what}{before})")
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -364,21 +373,49 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>) -> String {
     if let Some(request) = request {
         context.push_str(&format!("\n\nThe user's request was:\n{request}"));
     }
-    context.push_str("\n\nExplain the idea of these items in one paragraph.");
+    context.push_str("\n\n");
+    context.push_str(&idea_request(&boundary.items, seen));
     context
+}
+
+/// What the model is asked for the idea of `items`, of which the user has seen `seen` before.
+fn idea_request(items: &[ItemKey], seen: &[ItemKey]) -> String {
+    let unseen = items.iter().any(|item| !seen.contains(item));
+    let seen: Vec<ItemKey> = items
+        .iter()
+        .filter(|item| seen.contains(item))
+        .cloned()
+        .collect();
+    match (seen.is_empty(), unseen) {
+        (true, _) => "Explain the idea of these items in one paragraph.".to_owned(),
+        (false, true) => format!(
+            "The user has seen {} before: do not explain the idea of those items again. Explain \
+             the idea of the other items in one paragraph.",
+            item_names(&seen)
+        ),
+        (false, false) => "The user has seen all of these items before: do not explain their \
+             idea again."
+            .to_owned(),
+    }
 }
 
 /// What the `reason` model is asked for the comparison in the explanation (PRD UC3): the code the
 /// main line tried, rewritten without the items with only `allowed`, the items the user's profile
 /// allows, as one code block after the paragraph, or no code block when that cannot be done well.
-pub fn compare_request(allowed: &[ItemKey]) -> String {
+/// Without `paragraph`, when no idea is asked for, the code block is all that is asked for.
+pub fn compare_request(allowed: &[ItemKey], paragraph: bool) -> String {
     let allowed = if allowed.is_empty() {
         "none".to_owned()
     } else {
         item_names(allowed)
     };
+    let first = if paragraph {
+        "After the paragraph"
+    } else {
+        "Write no paragraph. Instead"
+    };
     format!(
-        "After the paragraph, rewrite the code the main line tried without these items, using \
+        "{first}, rewrite the code the main line tried without these items, using \
          only the syntax elements and crates the user's profile allows: {allowed}. Write it as \
          one ```rust code block, and write nothing after it. If it cannot be written well that \
          way, write no code block."

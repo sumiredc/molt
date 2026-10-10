@@ -54,7 +54,7 @@ impl SubLine<'_> {
     /// user interrupted the wait for it (Ctrl-C). The request body goes to `log` (PRD §8.8).
     pub fn guide(&mut self, log: &SessionLog) -> Result<String, ChatError> {
         let instruction = prompts::guidance_request(&self.boundary.items);
-        let content = if self.explained() {
+        let content = if self.told() {
             instruction
         } else {
             format!("{}\n\n{instruction}", self.context)
