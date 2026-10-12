@@ -2,9 +2,11 @@
 //! of several items and approving an operation.
 //!
 //! `TerminalUi` talks to a person through rustyline (lines with history and editing, and choices
-//! and approvals as lines) (PRD §8.1). [`ScriptedUi`] answers from a script instead, so
-//! tests and `--ui-script` (PRD §8.6) run without a terminal.
+//! and approvals as lines), and draws the [`Form`] of `molt init` with crossterm (PRD §8.1).
+//! [`ScriptedUi`] answers from a script instead, so tests and `--ui-script` (PRD §8.6) run without
+//! a terminal.
 
+pub mod form;
 mod scripted;
 mod terminal;
 
@@ -12,7 +14,8 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
-pub use scripted::{ScriptError, ScriptedUi, Step};
+pub use form::{Form, FormText, FormValues, Tab, TabValues};
+pub use scripted::{FormTabStep, RecordedForm, ScriptError, ScriptedUi, Step};
 pub(crate) use terminal::TerminalUi;
 
 /// What the user gave at a line prompt.
@@ -26,7 +29,8 @@ pub enum Input {
     Eof,
 }
 
-/// Talks to the user. Fixed strings passed in and shown are English (PRD §8.6).
+/// Talks to the user. Fixed strings passed in and shown are English (PRD §8.6), except those of a
+/// [`Form`], whose language the caller chooses (PRD §3).
 pub trait Ui {
     /// Shows `prompt` and reads one line.
     fn read_line(&mut self, prompt: &str) -> Result<Input, UiError>;
@@ -41,6 +45,14 @@ pub trait Ui {
     /// Asks a yes/no question. Returns the answer, or `None` when the user interrupted instead
     /// of answering.
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError>;
+
+    /// Lets the user fill in `form`, opened with `initial` (or empty), and submit it. Returns
+    /// everything entered, or `None` when the user interrupted instead of submitting.
+    fn form(
+        &mut self,
+        form: &Form,
+        initial: Option<&FormValues>,
+    ) -> Result<Option<FormValues>, UiError>;
 }
 
 /// Why the [`Ui`] could not get an answer.
@@ -54,6 +66,17 @@ pub enum UiError {
     ScriptMismatch { asked: &'static str, step: Step },
     /// The script chooses a number that is not one of the items (numbers start at 1).
     SelectOutOfRange { number: usize, items: usize },
+    /// The script fills in a form with a different number of tabs.
+    FormTabCount { tabs: usize, script: usize },
+    /// The script chooses or checks a number that is not one in tab `tab` (numbers start at 1).
+    FormOutOfRange {
+        tab: usize,
+        what: &'static str,
+        number: usize,
+        items: usize,
+    },
+    /// A form was asked for, but molt is not at a terminal.
+    NotATerminal,
 }
 
 impl fmt::Display for UiError {
@@ -72,6 +95,22 @@ impl fmt::Display for UiError {
                 f,
                 "the ui script selects {number}, but there are {items} items (numbered from 1)"
             ),
+            UiError::FormTabCount { tabs, script } => write!(
+                f,
+                "the ui script fills in {script} tabs, but the form has {tabs}"
+            ),
+            UiError::FormOutOfRange {
+                tab,
+                what,
+                number,
+                items,
+            } => write!(
+                f,
+                "the ui script gives {what} {number} in tab {tab}, but it has {items} (numbered from 1)"
+            ),
+            UiError::NotATerminal => {
+                f.write_str("the form needs a terminal; give the answers with --ui-script instead")
+            }
         }
     }
 }

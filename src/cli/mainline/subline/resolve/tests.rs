@@ -295,6 +295,13 @@ impl Ui for Recording {
     fn confirm(&mut self, _prompt: &str) -> Result<Option<bool>, UiError> {
         unreachable!("only selections are asked")
     }
+    fn form(
+        &mut self,
+        _form: &crate::ui::Form,
+        _initial: Option<&crate::ui::FormValues>,
+    ) -> Result<Option<crate::ui::FormValues>, UiError> {
+        unreachable!("only selections are asked")
+    }
 }
 
 /// The items `choose` offers on a side line at a `dbg_macro` boundary, recurred or not.

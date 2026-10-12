@@ -382,6 +382,14 @@ impl crate::ui::Ui for WritesOnDone {
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, crate::ui::UiError> {
         self.ui.confirm(prompt)
     }
+
+    fn form(
+        &mut self,
+        form: &crate::ui::Form,
+        initial: Option<&crate::ui::FormValues>,
+    ) -> Result<Option<crate::ui::FormValues>, crate::ui::UiError> {
+        self.ui.form(form, initial)
+    }
 }
 
 #[test]

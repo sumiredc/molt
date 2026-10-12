@@ -1,12 +1,16 @@
 //! The [`Ui`] for a person at a terminal, all through rustyline (PRD §8.1): lines with history and
 //! editing, and choices and approvals as lines too, so that Ctrl-C means the same at every
-//! question (`Input::Interrupted` or no answer) and never ends molt by itself.
+//! question (`Input::Interrupted` or no answer) and never ends molt by itself. The form alone is
+//! drawn with crossterm ([`form`]).
+
+mod form;
 
 use std::io;
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
+use super::form::{Form, FormValues};
 use super::{Input, Ui, UiError};
 
 pub(crate) struct TerminalUi {
@@ -87,6 +91,14 @@ impl Ui for TerminalUi {
             }
             println!("Type y or n.");
         }
+    }
+
+    fn form(
+        &mut self,
+        form: &Form,
+        initial: Option<&FormValues>,
+    ) -> Result<Option<FormValues>, UiError> {
+        form::fill_in(form, initial)
     }
 }
 
