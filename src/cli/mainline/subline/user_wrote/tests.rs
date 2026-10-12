@@ -74,6 +74,13 @@ impl Ui for Writing {
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
         self.ui.confirm(prompt)
     }
+    fn form(
+        &mut self,
+        form: &crate::ui::Form,
+        initial: Option<&crate::ui::FormValues>,
+    ) -> Result<Option<crate::ui::FormValues>, UiError> {
+        self.ui.form(form, initial)
+    }
 }
 
 /// A project with `src/main.rs` and an empty `profile.toml`.

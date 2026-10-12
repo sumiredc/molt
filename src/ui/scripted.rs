@@ -11,8 +11,16 @@
 //!   { select = 2 },                                  # the 2nd item of a choice (from 1)
 //!   "interrupt",                                     # Ctrl-C at any question
 //!   "eof",                                           # Ctrl-D at the prompt
+//!   { form = [                                       # a form submitted, tab by tab:
+//!     { choice = 1, checked = [1, 3], answer = "…" }, # the choice, the checked items and the
+//!     { choice = 3 },                                #   answer, numbered from 1
+//!   ] },
 //! ]
 //! ```
+//!
+//! A form step gives what the tabs hold when submitted, not the keys: moving between tabs is the
+//! form's own state (PRD §8.6). Checks and an answer under a choice that hides the checklist are
+//! allowed, as the form keeps them.
 
 use std::collections::VecDeque;
 use std::error::Error;
@@ -23,6 +31,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
+use super::form::{Form, FormValues, TabValues};
 use super::{Input, Ui, UiError};
 
 /// One answer in a script.
@@ -39,6 +48,26 @@ pub enum Step {
     Interrupt,
     /// Ctrl-D at the prompt.
     Eof,
+    /// A form submitted: what each tab holds.
+    Form(Vec<FormTabStep>),
+}
+
+/// What one tab of a form holds in a script, numbered from 1.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FormTabStep {
+    pub choice: usize,
+    #[serde(default)]
+    pub checked: Vec<usize>,
+    #[serde(default)]
+    pub answer: String,
+}
+
+/// A form molt asked to be filled in, as it was passed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordedForm {
+    pub form: Form,
+    pub initial: Option<FormValues>,
 }
 
 impl Step {
@@ -50,6 +79,7 @@ impl Step {
             Step::Confirm(_) => "a confirmation",
             Step::Interrupt => "an interrupt",
             Step::Eof => "an eof",
+            Step::Form(_) => "a form",
         }
     }
 }
@@ -102,6 +132,7 @@ pub struct ScriptedUi {
     steps: VecDeque<Step>,
     shown: Vec<String>,
     asked: Vec<String>,
+    forms: Vec<RecordedForm>,
     echo: bool,
 }
 
@@ -112,6 +143,7 @@ impl ScriptedUi {
             steps: steps.into_iter().collect(),
             shown: Vec::new(),
             asked: Vec::new(),
+            forms: Vec::new(),
             echo: false,
         }
     }
@@ -141,9 +173,15 @@ impl ScriptedUi {
         &self.shown
     }
 
-    /// The prompts of the questions answered or attempted, in order.
+    /// The prompts of the questions answered or attempted, in order. A form's is the name of its
+    /// submit tab; the form itself is in [`ScriptedUi::forms`].
     pub fn asked(&self) -> &[String] {
         &self.asked
+    }
+
+    /// The forms passed to [`Ui::form`], with their initial values, in order.
+    pub fn forms(&self) -> &[RecordedForm] {
+        &self.forms
     }
 
     fn print(&self, text: &str) {
@@ -227,11 +265,91 @@ impl Ui for ScriptedUi {
         self.print(&format!("{prompt} [y/n] {echoed}"));
         Ok(answer)
     }
+
+    fn form(
+        &mut self,
+        form: &Form,
+        initial: Option<&FormValues>,
+    ) -> Result<Option<FormValues>, UiError> {
+        self.forms.push(RecordedForm {
+            form: form.clone(),
+            initial: initial.cloned(),
+        });
+        let tabs = match self.next("a form", &form.text.submit_title)? {
+            Step::Form(tabs) => tabs,
+            Step::Interrupt => {
+                self.print("form: ^C");
+                return Ok(None);
+            }
+            step => {
+                return Err(UiError::ScriptMismatch {
+                    asked: "a form",
+                    step,
+                });
+            }
+        };
+        let values = form_values(form, &tabs)?;
+        for (tab, value) in form.tabs.iter().zip(&values.tabs) {
+            let choice = value
+                .choice
+                .map_or("", |choice| tab.choices[choice].as_str());
+            let checked: Vec<&str> = value
+                .checked
+                .iter()
+                .map(|&item| tab.items[item].as_str())
+                .collect();
+            self.print(&format!(
+                "{}: {choice}; checked: {}; answer: {}",
+                tab.title,
+                checked.join(", "),
+                value.answer
+            ));
+        }
+        Ok(Some(values))
+    }
+}
+
+/// The values the script's `tabs` give `form`.
+fn form_values(form: &Form, tabs: &[FormTabStep]) -> Result<FormValues, UiError> {
+    if tabs.len() != form.tabs.len() {
+        return Err(UiError::FormTabCount {
+            tabs: form.tabs.len(),
+            script: tabs.len(),
+        });
+    }
+    let index = |tab: usize, what: &'static str, number: usize, items: usize| {
+        if (1..=items).contains(&number) {
+            Ok(number - 1)
+        } else {
+            Err(UiError::FormOutOfRange {
+                tab: tab + 1,
+                what,
+                number,
+                items,
+            })
+        }
+    };
+    let mut values = Vec::with_capacity(tabs.len());
+    for (at, (tab, step)) in form.tabs.iter().zip(tabs).enumerate() {
+        let choice = index(at, "choice", step.choice, tab.choices.len())?;
+        let checked = step
+            .checked
+            .iter()
+            .map(|&number| index(at, "item", number, tab.items.len()))
+            .collect::<Result<_, _>>()?;
+        values.push(TabValues {
+            choice: Some(choice),
+            checked,
+            answer: step.answer.clone(),
+        });
+    }
+    Ok(FormValues { tabs: values })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::{FormText, Tab};
 
     fn parse(text: &str) -> Result<Vec<Step>, toml::de::Error> {
         toml::from_str::<ScriptFile>(text).map(|file| file.steps)
@@ -358,6 +476,170 @@ mod tests {
         assert!(matches!(
             ui.read_line("molt> "),
             Err(UiError::ScriptExhausted { asked: "an input" })
+        ));
+    }
+
+    /// A form of 2 tabs, each with choices `a`, `b` (`a` shows the checklist) and items `x`, `y`.
+    fn form() -> Form {
+        let tab = |title: &str| Tab {
+            title: title.to_owned(),
+            prompt: "?".to_owned(),
+            choices: vec!["a".to_owned(), "b".to_owned()],
+            checklist_on: 0,
+            checklist_prompt: "?".to_owned(),
+            items: vec!["x".to_owned(), "y".to_owned()],
+            question: "?".to_owned(),
+            material: Vec::new(),
+        };
+        Form {
+            tabs: vec![tab("one"), tab("two")],
+            text: FormText {
+                submit_title: "Submit".to_owned(),
+                guide: String::new(),
+                no_choice: String::new(),
+                blank_answer: String::new(),
+                ready: String::new(),
+                not_ready: String::new(),
+            },
+        }
+    }
+
+    #[test]
+    fn a_script_file_takes_a_form_tab_by_tab() {
+        let steps = parse(
+            r#"steps = [{ form = [{ choice = 1, checked = [2], answer = "hi" }, { choice = 2 }] }]"#,
+        )
+        .unwrap();
+        assert_eq!(
+            steps,
+            [Step::Form(vec![
+                FormTabStep {
+                    choice: 1,
+                    checked: vec![2],
+                    answer: "hi".to_owned(),
+                },
+                FormTabStep {
+                    choice: 2,
+                    checked: Vec::new(),
+                    answer: String::new(),
+                },
+            ])]
+        );
+    }
+
+    #[test]
+    fn a_form_tab_without_a_choice_is_rejected() {
+        assert!(parse(r#"steps = [{ form = [{ checked = [1] }] }]"#).is_err());
+    }
+
+    #[test]
+    fn a_form_step_returns_the_values_it_gives_numbered_from_0() {
+        let mut ui = ScriptedUi::new([Step::Form(vec![
+            FormTabStep {
+                choice: 1,
+                checked: vec![2, 1],
+                answer: "hi".to_owned(),
+            },
+            // Checks under a choice that hides the checklist are kept, as the form keeps them.
+            FormTabStep {
+                choice: 2,
+                checked: vec![1],
+                answer: "kept".to_owned(),
+            },
+        ])]);
+        let values = ui.form(&form(), None).unwrap().unwrap();
+        assert_eq!(
+            values.tabs,
+            [
+                TabValues {
+                    choice: Some(0),
+                    checked: [0, 1].into(),
+                    answer: "hi".to_owned(),
+                },
+                TabValues {
+                    choice: Some(1),
+                    checked: [0].into(),
+                    answer: "kept".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn an_interrupt_answers_a_form_with_none() {
+        let mut ui = ScriptedUi::new([Step::Interrupt]);
+        assert_eq!(ui.form(&form(), None).unwrap(), None);
+    }
+
+    #[test]
+    fn a_form_records_the_form_and_its_initial_values() {
+        let initial = FormValues {
+            tabs: vec![TabValues::default(), TabValues::default()],
+        };
+        let mut ui = ScriptedUi::new([Step::Interrupt]);
+        ui.form(&form(), Some(&initial)).unwrap();
+        assert_eq!(
+            ui.forms(),
+            [RecordedForm {
+                form: form(),
+                initial: Some(initial),
+            }]
+        );
+    }
+
+    #[test]
+    fn a_form_step_with_another_number_of_tabs_is_an_error() {
+        let mut ui = ScriptedUi::new([Step::Form(vec![FormTabStep {
+            choice: 1,
+            checked: Vec::new(),
+            answer: String::new(),
+        }])]);
+        assert!(matches!(
+            ui.form(&form(), None),
+            Err(UiError::FormTabCount { tabs: 2, script: 1 })
+        ));
+    }
+
+    #[test]
+    fn a_form_step_choosing_or_checking_outside_the_tab_is_an_error() {
+        let tab = |choice: usize, checked: Vec<usize>| FormTabStep {
+            choice,
+            checked,
+            answer: String::new(),
+        };
+        let mut ui = ScriptedUi::new([
+            Step::Form(vec![tab(1, Vec::new()), tab(3, Vec::new())]),
+            Step::Form(vec![tab(1, vec![0]), tab(1, Vec::new())]),
+        ]);
+        assert!(matches!(
+            ui.form(&form(), None),
+            Err(UiError::FormOutOfRange {
+                tab: 2,
+                what: "choice",
+                number: 3,
+                items: 2
+            })
+        ));
+        assert!(matches!(
+            ui.form(&form(), None),
+            Err(UiError::FormOutOfRange {
+                tab: 1,
+                what: "item",
+                number: 0,
+                items: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn a_step_of_another_kind_does_not_answer_a_form() {
+        let mut ui = ScriptedUi::new([Step::Select(1)]);
+        assert!(matches!(
+            ui.form(&form(), None),
+            Err(UiError::ScriptMismatch {
+                asked: "a form",
+                step: Step::Select(1)
+            })
         ));
     }
 
