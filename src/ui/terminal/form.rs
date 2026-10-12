@@ -1,8 +1,12 @@
 //! The [`Form`] at a terminal: keys read in crossterm's raw mode, on the alternate screen (PRD
 //! §8.1). There Ctrl-C comes as a key, not as SIGINT, and interrupts the form. The terminal is
-//! restored however the form ends, a panic included.
+//! restored however the form ends, a panic included, and before a panic's message is printed, so
+//! that the message stays on the screen. A form taller than the terminal shows the rows around
+//! the focus.
 
 use std::io::{self, IsTerminal, Write};
+use std::panic::{self, PanicHookInfo};
+use std::sync::Arc;
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -31,8 +35,12 @@ fn run(form: &Form, initial: Option<&FormValues>) -> io::Result<Option<FormValue
     let mut out = io::stdout();
     let mut state = FormState::new(form, initial);
     loop {
-        let (width, _) = terminal::size()?;
-        draw(&mut out, &render(&state, usize::from(width)))?;
+        let (width, height) = terminal::size()?;
+        draw(
+            &mut out,
+            &render(&state, usize::from(width)),
+            usize::from(height),
+        )?;
         let Event::Key(key) = event::read()? else {
             continue;
         };
@@ -47,14 +55,26 @@ fn run(form: &Form, initial: Option<&FormValues>) -> io::Result<Option<FormValue
     }
 }
 
-/// Raw mode on the alternate screen, left when dropped.
-struct RawScreen;
+type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
+
+/// Raw mode on the alternate screen, left when dropped. While it lasts, a panic first restores
+/// the terminal and then prints its message as before.
+struct RawScreen {
+    previous_hook: Arc<PanicHook>,
+}
 
 impl RawScreen {
     fn enter() -> io::Result<Self> {
+        let previous_hook: Arc<PanicHook> = Arc::new(panic::take_hook());
+        let hook = Arc::clone(&previous_hook);
+        panic::set_hook(Box::new(move |info| {
+            restore();
+            hook(info);
+        }));
+        // From here on, dropping restores the terminal and the hook, also when entering fails
+        // halfway.
+        let screen = Self { previous_hook };
         enable_raw_mode()?;
-        // From here on, dropping restores the terminal, also when entering fails halfway.
-        let screen = Self;
         execute!(io::stdout(), EnterAlternateScreen)?;
         Ok(screen)
     }
@@ -62,20 +82,43 @@ impl RawScreen {
 
 impl Drop for RawScreen {
     fn drop(&mut self) {
-        // Nothing more can be done if restoring fails.
-        let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
-        let _ = disable_raw_mode();
+        restore();
+        // The hook cannot be changed while panicking; the panic ends the process's use of it.
+        if !std::thread::panicking() {
+            let _ = panic::take_hook();
+            let previous = Arc::clone(&self.previous_hook);
+            panic::set_hook(Box::new(move |info| previous(info)));
+        }
     }
 }
 
-fn draw(out: &mut impl Write, screen: &Screen) -> io::Result<()> {
-    queue!(out, Hide, MoveTo(0, 0), Clear(ClearType::All))?;
-    for (row, line) in screen.lines.iter().enumerate() {
+/// Leaves the alternate screen and raw mode. Nothing more can be done if that fails.
+fn restore() {
+    let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
+    let _ = disable_raw_mode();
+}
+
+/// Draws the rows of `screen` that fit `height`, overwriting each row and clearing the rest.
+fn draw(out: &mut impl Write, screen: &Screen, height: usize) -> io::Result<()> {
+    let first = screen.first_row(height);
+    queue!(out, Hide)?;
+    for (row, line) in screen.lines.iter().skip(first).take(height).enumerate() {
         queue!(out, MoveTo(0, to_u16(row)))?;
         out.write_all(line.as_bytes())?;
+        queue!(out, Clear(ClearType::UntilNewLine))?;
     }
-    if let Some((row, column)) = screen.cursor {
-        queue!(out, MoveTo(to_u16(column), to_u16(row)), Show)?;
+    let drawn = screen.lines.len().saturating_sub(first).min(height);
+    if drawn < height {
+        queue!(
+            out,
+            MoveTo(0, to_u16(drawn)),
+            Clear(ClearType::FromCursorDown)
+        )?;
+    }
+    if let Some((row, column)) = screen.cursor
+        && (first..first + height).contains(&row)
+    {
+        queue!(out, MoveTo(to_u16(column), to_u16(row - first)), Show)?;
     }
     out.flush()
 }

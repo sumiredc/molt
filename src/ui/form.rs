@@ -35,9 +35,9 @@ pub struct Tab {
     pub title: String,
     /// What the choices answer.
     pub prompt: String,
-    /// The choices; at least one.
+    /// The choices; at least one, which the caller makes sure of.
     pub choices: Vec<String>,
-    /// The index of the choice that shows the checklist.
+    /// The index of the choice that shows the checklist; one of `choices`.
     pub checklist_on: usize,
     /// What the checklist asks.
     pub checklist_prompt: String,
@@ -180,12 +180,26 @@ pub(crate) struct FormState<'a> {
 
 impl<'a> FormState<'a> {
     /// The form opened on its first tab with `initial`, or with nothing entered. Initial values
-    /// for tabs the form does not have are ignored, and tabs without one start empty.
+    /// for tabs the form does not have are ignored, and tabs without one start empty; a choice or
+    /// a check the tab does not have is dropped.
     pub(crate) fn new(form: &'a Form, initial: Option<&FormValues>) -> Self {
+        for tab in &form.tabs {
+            debug_assert!(
+                tab.checklist_on < tab.choices.len(),
+                "a tab needs its choices, the one showing the checklist among them"
+            );
+        }
         let mut values = form.empty_values();
         if let Some(initial) = initial {
-            for (value, given) in values.tabs.iter_mut().zip(&initial.tabs) {
-                value.clone_from(given);
+            for ((value, given), tab) in values.tabs.iter_mut().zip(&initial.tabs).zip(&form.tabs) {
+                value.choice = given.choice.filter(|&choice| choice < tab.choices.len());
+                value.checked = given
+                    .checked
+                    .iter()
+                    .copied()
+                    .filter(|&item| item < tab.items.len())
+                    .collect();
+                value.answer.clone_from(&given.answer);
             }
         }
         let mut state = Self {
@@ -354,6 +368,16 @@ pub(crate) struct Screen {
     pub lines: Vec<String>,
     /// Where the cursor goes (row, column), when the answer has the focus.
     pub cursor: Option<(usize, usize)>,
+    /// The row that has to stay in view: the cursor's, or the focused choice's or item's.
+    pub focus: usize,
+}
+
+impl Screen {
+    /// The first row to show on a terminal `height` rows high, so that the focus is in view.
+    pub(crate) fn first_row(&self, height: usize) -> usize {
+        let height = height.max(1);
+        (self.focus + 1).saturating_sub(height)
+    }
 }
 
 /// Lays `state` out in lines of at most `width` columns.
@@ -363,6 +387,7 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
     let mut lines = tab_row(form, state.tab, width);
     lines.push(String::new());
     let mut cursor = None;
+    let mut focus = 0;
 
     match (form.tabs.get(state.tab), state.values.tabs.get(state.tab)) {
         (Some(tab), Some(values)) => {
@@ -373,10 +398,11 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
                 } else {
                     "( )"
                 };
-                let line = format!(
-                    "{} {mark} {choice}",
-                    pointer(state.focus == Focus::Choice(index))
-                );
+                let focused = state.focus == Focus::Choice(index);
+                if focused {
+                    focus = lines.len();
+                }
+                let line = format!("{} {mark} {choice}", pointer(focused));
                 lines.extend(wrap(&line, width));
             }
             if form.checklist_shown(state.tab, values) {
@@ -388,10 +414,11 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
                     } else {
                         "[ ]"
                     };
-                    let line = format!(
-                        "{} {mark} {item}",
-                        pointer(state.focus == Focus::Item(index))
-                    );
+                    let focused = state.focus == Focus::Item(index);
+                    if focused {
+                        focus = lines.len();
+                    }
+                    let line = format!("{} {mark} {item}", pointer(focused));
                     lines.extend(wrap(&line, width));
                 }
             }
@@ -409,6 +436,7 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
                     wrap_with_cursor(&values.answer, state.cursor, width - 2);
                 if focused {
                     cursor = Some((lines.len() + row, column + 2));
+                    focus = lines.len() + row;
                 }
                 for (index, line) in answer.into_iter().enumerate() {
                     let head = if index == 0 { pointer(focused) } else { " " };
@@ -442,7 +470,11 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
 
     lines.push(String::new());
     lines.extend(wrap(&form.text.guide, width));
-    Screen { lines, cursor }
+    Screen {
+        lines,
+        cursor,
+        focus,
+    }
 }
 
 fn pointer(focused: bool) -> &'static str {
@@ -463,15 +495,26 @@ fn tab_row(form: &Form, open: usize, width: usize) -> Vec<String> {
         } else {
             format!(" {title} ")
         };
-        let line = lines.last_mut().unwrap();
-        if !line.is_empty() && text_width(line) + 1 + text_width(&label) > width {
+        let used = text_width(lines.last().unwrap());
+        if text_width(&label) > width {
+            // Too wide for any row: on rows of its own.
+            if used == 0 {
+                lines.pop();
+            }
+            lines.extend(wrap(&label, width));
+            lines.push(String::new());
+        } else if used > 0 && used + 1 + text_width(&label) > width {
             lines.push(label);
         } else {
-            if !line.is_empty() {
+            let line = lines.last_mut().unwrap();
+            if used > 0 {
                 line.push(' ');
             }
             line.push_str(&label);
         }
+    }
+    if lines.len() > 1 && lines.last().is_some_and(String::is_empty) {
+        lines.pop();
     }
     lines
 }

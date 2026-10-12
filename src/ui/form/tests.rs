@@ -366,3 +366,59 @@ fn every_tab_ends_with_the_key_guide() {
     press(&mut state, &[Key::Tab, Key::Tab]);
     assert_eq!(render(&state, 80).lines.last().unwrap(), "keys");
 }
+
+#[test]
+fn a_form_taller_than_the_terminal_shows_the_rows_around_the_focus() {
+    let form = form();
+    let mut state = FormState::new(&form, None);
+    to_answer(&mut state);
+    let screen = render(&state, 80);
+    let (row, _) = screen.cursor.unwrap();
+    assert_eq!(screen.focus, row);
+    assert_eq!(screen.first_row(screen.lines.len()), 0, "all fits");
+    let first = screen.first_row(5);
+    assert!(
+        (first..first + 5).contains(&row),
+        "the cursor's row is in view"
+    );
+
+    press(&mut state, &[Key::Up, Key::Up, Key::Up]);
+    let screen = render(&state, 80);
+    assert_eq!(screen.lines[screen.focus], "> [x] x");
+    assert_eq!(screen.first_row(screen.focus + 1), 0);
+}
+
+#[test]
+fn initial_values_the_tab_does_not_have_are_dropped() {
+    let form = form();
+    let initial = FormValues {
+        tabs: vec![
+            TabValues {
+                choice: Some(3),
+                checked: BTreeSet::from([0, 3]),
+                answer: "kept".to_owned(),
+            },
+            TabValues::default(),
+        ],
+    };
+    let mut state = FormState::new(&form, Some(&initial));
+    let opened = &state.values().tabs[0];
+    assert_eq!(
+        (opened.choice, &opened.checked, opened.answer.as_str()),
+        (None, &BTreeSet::from([0]), "kept")
+    );
+    press(&mut state, &[Key::Down]);
+    assert_eq!(state.focus(), Focus::Choice(1), "the focus still moves");
+}
+
+#[test]
+fn a_tab_title_wider_than_the_terminal_wraps_on_rows_of_its_own() {
+    let mut form = form();
+    form.tabs[1].title = "abcdefghijkl".to_owned();
+    let state = FormState::new(&form, None);
+    let screen = render(&state, 8);
+    assert_eq!(
+        &screen.lines[..4],
+        ["[one]", " abcdefg", "hijkl ", " Submit "]
+    );
+}

@@ -173,7 +173,8 @@ impl ScriptedUi {
         &self.shown
     }
 
-    /// The prompts of the questions answered or attempted, in order.
+    /// The prompts of the questions answered or attempted, in order. A form's is the name of its
+    /// submit tab; the form itself is in [`ScriptedUi::forms`].
     pub fn asked(&self) -> &[String] {
         &self.asked
     }
@@ -348,6 +349,7 @@ fn form_values(form: &Form, tabs: &[FormTabStep]) -> Result<FormValues, UiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ui::{FormText, Tab};
 
     fn parse(text: &str) -> Result<Vec<Step>, toml::de::Error> {
         toml::from_str::<ScriptFile>(text).map(|file| file.steps)
@@ -479,7 +481,7 @@ mod tests {
 
     /// A form of 2 tabs, each with choices `a`, `b` (`a` shows the checklist) and items `x`, `y`.
     fn form() -> Form {
-        let tab = |title: &str| super::super::Tab {
+        let tab = |title: &str| Tab {
             title: title.to_owned(),
             prompt: "?".to_owned(),
             choices: vec!["a".to_owned(), "b".to_owned()],
@@ -491,7 +493,7 @@ mod tests {
         };
         Form {
             tabs: vec![tab("one"), tab("two")],
-            text: super::super::FormText {
+            text: FormText {
                 submit_title: "Submit".to_owned(),
                 guide: String::new(),
                 no_choice: String::new(),

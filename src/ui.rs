@@ -6,7 +6,7 @@
 //! [`ScriptedUi`] answers from a script instead, so tests and `--ui-script` (PRD §8.6) run without
 //! a terminal.
 
-pub mod form;
+mod form;
 mod scripted;
 mod terminal;
 
@@ -14,7 +14,7 @@ use std::error::Error;
 use std::fmt;
 use std::io;
 
-pub use form::{Form, FormText, FormValues, Tab, TabValues};
+pub use form::{Form, FormText, FormValues, ITEMS, Tab, TabValues};
 pub use scripted::{FormTabStep, RecordedForm, ScriptError, ScriptedUi, Step};
 pub(crate) use terminal::TerminalUi;
 
