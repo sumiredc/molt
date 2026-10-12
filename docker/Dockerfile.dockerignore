@@ -1,0 +1,7 @@
+# Only what building molt and the image needs, so that target/ and .claude/ stay out of the context
+*
+!Cargo.toml
+!Cargo.lock
+!rust-toolchain.toml
+!src
+!examples/fake

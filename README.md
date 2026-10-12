@@ -83,6 +83,48 @@ Pass a copy of the profile, because choosing ① rewrites it. Then type:
 
 molt stops at the boundary for `dbg_macro`, writes `dbg!(1);` into `src/main.rs` after ①, and commits it as `Print 1 with dbg!`.
 
+## Try it in a container
+
+`docker/sandbox.sh` builds molt inside a Docker image and runs it in a container that is removed on exit, so trying molt changes nothing on the host: not this repository, not `~/.cargo/bin`, not `~/.config/molt`. Each run starts in a fresh sample project made with `cargo init`; what molt writes and commits there is gone when the container exits. The profile and `config.toml` stay on a named volume (`MOLT_HOME`) until `reset`. It needs only Docker; the CI does not build the image.
+
+```mermaid
+flowchart LR
+  B[build] --> C[config PATH]
+  C --> D[molt doctor]
+  D --> I[molt init]
+  I --> M[molt]
+  V[(volume: profile.toml, config.toml)] -.- I
+  V -.- M
+```
+
+From the root of this repository:
+
+```sh
+docker/sandbox.sh build
+docker/sandbox.sh config path/to/config.toml
+docker/sandbox.sh molt doctor
+docker/sandbox.sh molt init
+docker/sandbox.sh molt
+```
+
+| Command | What it does |
+|---|---|
+| `build` | Builds the image, with molt built inside it. Run it again after changing molt |
+| `config PATH` | Copies a `config.toml` into the volume. Without one, the defaults of [Configuration](#configuration) apply |
+| `molt [ARGS…]` | Runs `molt` with `ARGS` in the sample project |
+| `shell` | Opens a shell in the sample project, to run `molt` several times in one container |
+| `reset` | Removes the volume: the profile, `config.toml`, and the session logs |
+
+- `base_url` is seen from inside the container: `localhost` there is the container, not the host. With a local endpoint, write its address on your network (`http://<local-endpoint>/v1`). An `http://` endpoint that needs a key does not work, because molt sends a key over `http://` only to loopback
+- The API key is passed by name, never written to the image or the volume: `NEBIUS_API_KEY`, and the names in `MOLT_SANDBOX_ENV` (space-separated) for another `api_key_env`. `LC_ALL`, `LC_MESSAGES` and `LANG` are passed too, so the form of `molt init` is in the host's language
+- The one pass of [Try it without a model](#try-it-without-a-model) works in `shell`, with the examples at `/opt/molt/examples/fake`:
+
+```sh
+docker/sandbox.sh shell
+cp /opt/molt/examples/fake/profile.toml ./profile.toml
+molt --fake /opt/molt/examples/fake/one_pass.toml --profile ./profile.toml
+```
+
 ## Next reading
 
 - Requirements and design: [PRD.md](PRD.md)

@@ -83,6 +83,48 @@ molt --fake "$MOLT_SRC/examples/fake/one_pass.toml" --profile ./profile.toml
 
 molt は `dbg_macro` の境界で止まり、① のあと `src/main.rs` に `dbg!(1);` を書き、`Print 1 with dbg!` として commit する。
 
+## コンテナで試す
+
+`docker/sandbox.sh` は、Docker のイメージの中で molt をビルドし、終了すると消えるコンテナで実行する。試してもホストのこのリポジトリ・`~/.cargo/bin`・`~/.config/molt` は何も変わらない。毎回 `cargo init` したまっさらなサンプルから始まり、molt がそこで書いたものと commit はコンテナを抜けると消える。プロファイルと `config.toml` は、`reset` するまで名前付きボリューム（`MOLT_HOME`）に残る。要るのは Docker だけで、CI はイメージをビルドしない。
+
+```mermaid
+flowchart LR
+  B[build] --> C[config PATH]
+  C --> D[molt doctor]
+  D --> I[molt init]
+  I --> M[molt]
+  V[(ボリューム: profile.toml, config.toml)] -.- I
+  V -.- M
+```
+
+このリポジトリの直下で:
+
+```sh
+docker/sandbox.sh build
+docker/sandbox.sh config path/to/config.toml
+docker/sandbox.sh molt doctor
+docker/sandbox.sh molt init
+docker/sandbox.sh molt
+```
+
+| コマンド | 何をするか |
+|---|---|
+| `build` | イメージを作り、その中で molt をビルドする。molt を変えたら、もう一度実行する |
+| `config PATH` | `config.toml` をボリュームに写す。写さなければ [設定](#設定) の既定値になる |
+| `molt [ARGS…]` | サンプルの直下で `molt` を `ARGS` 付きで実行する |
+| `shell` | サンプルの直下でシェルを開く。1 つのコンテナで何度も `molt` を実行するため |
+| `reset` | ボリュームを消す。プロファイル・`config.toml`・session log が消える |
+
+- `base_url` はコンテナの中から見たものになる。そこでの `localhost` はホストではなくコンテナを指す。ローカルの接続先は、ネットワーク上のアドレスで書く（`http://<local-endpoint>/v1`）。キーを要する `http://` の接続先は使えない。molt は `http://` ではループバックにしかキーを送らないため
+- API キーは名前で渡し、イメージにもボリュームにも書かない。渡すのは `NEBIUS_API_KEY` と、別の `api_key_env` のために `MOLT_SANDBOX_ENV` に書いた名前（空白区切り）。`LC_ALL`・`LC_MESSAGES`・`LANG` も渡すので、`molt init` のフォームはホストと同じ言語になる
+- [モデル無しで試す](#モデル無しで試す) の 1 周は、`shell` の中で `/opt/molt/examples/fake` の見本を使って試せる:
+
+```sh
+docker/sandbox.sh shell
+cp /opt/molt/examples/fake/profile.toml ./profile.toml
+molt --fake /opt/molt/examples/fake/one_pass.toml --profile ./profile.toml
+```
+
 ## 次に読むもの
 
 - 要件と設計：[PRD.ja.md](PRD.ja.md)
