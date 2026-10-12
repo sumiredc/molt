@@ -1,7 +1,9 @@
+# check=skip=InvalidDefaultArgInFrom
 # A throwaway environment to try molt in, apart from the host: see "Try it in a container" in the README.
 # Build and run it with docker/sandbox.sh.
 
-# The channel of rust-toolchain.toml, which docker/sandbox.sh passes
+# The channel of rust-toolchain.toml, which docker/sandbox.sh passes. It has no default, to keep
+# one place for the version (hence the skipped check above)
 ARG RUST_VERSION
 
 FROM rust:${RUST_VERSION}-slim AS build
