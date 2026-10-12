@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use serde_json::json;
 use tempfile::TempDir;
@@ -279,18 +279,29 @@ fn one_request_per_category_sent_each_answered_by_its_category() {
     assert!(ownership < borrowing, "{shown}");
 }
 
-/// A [`ChatClient`] that holds each request a while and counts how many it holds at once.
+/// A [`ChatClient`] that counts how many requests it holds at once. The first [`PARALLEL`] are
+/// held until that many are in at once (or 5 seconds pass), so that the count does not depend on
+/// how fast the threads start; one more than that would be counted too.
 struct Holding {
     inner: FakeChatClient,
+    started: AtomicUsize,
     now: AtomicUsize,
     most: AtomicUsize,
 }
 
 impl ChatClient for Holding {
     fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
+        let started = self.started.fetch_add(1, Ordering::SeqCst) + 1;
         let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
         self.most.fetch_max(now, Ordering::SeqCst);
-        thread::sleep(Duration::from_millis(50));
+        if started <= PARALLEL {
+            let until = Instant::now() + Duration::from_secs(5);
+            while self.now.load(Ordering::SeqCst) < PARALLEL && Instant::now() < until {
+                thread::sleep(Duration::from_millis(1));
+            }
+            // Room for a fourth request to come in, were there no limit.
+            thread::sleep(Duration::from_millis(20));
+        }
         self.now.fetch_sub(1, Ordering::SeqCst);
         self.inner.chat(request)
     }
@@ -312,6 +323,7 @@ fn at_most_three_requests_are_sent_at_a_time() {
     ];
     let client = Holding {
         inner: FakeChatClient::new(),
+        started: AtomicUsize::new(0),
         now: AtomicUsize::new(0),
         most: AtomicUsize::new(0),
     };
@@ -346,15 +358,18 @@ fn at_most_three_requests_are_sent_at_a_time() {
 fn an_api_failure_opens_the_form_again_as_submitted_and_a_resubmission_judges_all_again() {
     let (_dir, path) = no_profile();
     let client = FakeChatClient::new();
+    // Borrowing may be judged on the first submission or not (it is not started once ownership
+    // failed), so both of its replies are the same.
     client.push_chat_when(about(Category::Ownership), Err(ChatError::FakeExhausted));
-    client.push_chat_when(about(Category::Borrowing), judgement(&[]));
+    for _ in 0..2 {
+        client.push_chat_when(
+            about(Category::Borrowing),
+            judgement(&[(Element::MutRef, "known")]),
+        );
+    }
     client.push_chat_when(
         about(Category::Ownership),
         judgement(&[(Element::Clone, "known")]),
-    );
-    client.push_chat_when(
-        about(Category::Borrowing),
-        judgement(&[(Element::MutRef, "known")]),
     );
     let submitted = form(&[
         (
@@ -546,6 +561,73 @@ fn an_interruption_while_judging_saves_nothing() {
         &path,
         Language::English,
     );
+    assert_eq!(outcome, Ok(Outcome::Interrupted));
+    assert_eq!(ui.forms().len(), 1, "the form does not open again");
+    assert!(!path.exists());
+}
+
+/// A [`ChatClient`] that holds each request until `count` requests are in (or 5 seconds pass),
+/// so that they all come back.
+struct Gate {
+    inner: FakeChatClient,
+    count: usize,
+    arrived: AtomicUsize,
+}
+
+impl ChatClient for Gate {
+    fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
+        self.arrived.fetch_add(1, Ordering::SeqCst);
+        let until = Instant::now() + Duration::from_secs(5);
+        while self.arrived.load(Ordering::SeqCst) < self.count && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        self.inner.chat(request)
+    }
+
+    fn models(&self) -> Result<Vec<String>, ChatError> {
+        self.inner.models()
+    }
+}
+
+#[test]
+fn an_interruption_wins_over_an_api_failure_that_comes_with_it() {
+    let (_dir, path) = no_profile();
+    let client = Gate {
+        inner: FakeChatClient::new(),
+        count: 2,
+        arrived: AtomicUsize::new(0),
+    };
+    client.inner.push_chat_when(
+        about(Category::Ownership),
+        Err(ChatError::Status {
+            status: 429,
+            body: "rate limited".to_owned(),
+        }),
+    );
+    client
+        .inner
+        .push_chat_when(about(Category::Borrowing), Err(ChatError::Interrupted));
+    let (ui, outcome) = run_init(
+        vec![form(&[
+            (
+                Category::Ownership,
+                Report::HaveWritten,
+                &[Element::Clone],
+                "ownership answer",
+            ),
+            (
+                Category::Borrowing,
+                Report::HaveWritten,
+                &[Element::MutRef],
+                "borrowing answer",
+            ),
+        ])],
+        &client,
+        &config(true),
+        &path,
+        Language::English,
+    );
+    assert_eq!(client.inner.requests().len(), 2);
     assert_eq!(outcome, Ok(Outcome::Interrupted));
     assert_eq!(ui.forms().len(), 1, "the form does not open again");
     assert!(!path.exists());

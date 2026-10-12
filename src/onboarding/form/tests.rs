@@ -43,17 +43,23 @@ fn japanese_only_when_the_first_non_empty_locale_starts_with_ja() {
 
 #[test]
 fn every_category_has_a_title_and_a_question_with_the_checked_names_in_both_languages() {
-    let mut seen = BTreeSet::new();
-    for (category, language, title, question) in templates() {
-        assert!(!title.is_empty(), "{category} {language:?}");
+    for language in [Language::English, Language::Japanese] {
+        let form = build(language, None);
+        let titles: BTreeSet<&str> = form.tabs.iter().map(|tab| tab.title.as_str()).collect();
         assert_eq!(
-            question.matches(ITEMS).count(),
-            1,
-            "{category} {language:?}"
+            titles.len(),
+            Category::ALL.len(),
+            "{language:?}: {titles:?}"
         );
-        seen.insert((category.name(), language == Language::Japanese));
+        for (tab, category) in form.tabs.iter().zip(Category::ALL) {
+            assert!(!tab.title.is_empty(), "{category} {language:?}");
+            assert_eq!(
+                tab.question.matches(ITEMS).count(),
+                1,
+                "{category} {language:?}"
+            );
+        }
     }
-    assert_eq!(seen.len(), Category::ALL.len() * 2);
 }
 
 #[test]

@@ -50,6 +50,11 @@ struct Strings {
     /// How well the user knows the category; `{category}` and `{elements}` are put in.
     prompt: &'static str,
     checklist_prompt: &'static str,
+    /// The question of every category, with [`ITEMS`](crate::ui::ITEMS) where the checked
+    /// elements' names go. It asks for what the user wrote and what they would have written
+    /// without it, and names no idea of the category, so that the answer is not given away and
+    /// it fits every element (a `for` loop as much as `Arc`).
+    question: &'static str,
     /// Introduces the places a reference repository uses an element; `{element}` and `{places}`
     /// are put in.
     material: &'static str,
@@ -60,6 +65,7 @@ const ENGLISH: Strings = Strings {
     reports: ["have written", "can read", "don't know"],
     prompt: "How well do you know {category}? ({elements})",
     checklist_prompt: "Check the ones you have written.",
+    question: "Where have you used {items}? For each, show what you wrote, and what you would have written instead without it.",
     material: "`{element}` in your repository: {places}",
     text: [
         "Submit",
@@ -75,6 +81,7 @@ const JAPANESE: Strings = Strings {
     reports: ["書いたことがある", "読める", "知らない"],
     prompt: "{category} をどのくらい知っていますか？（{elements}）",
     checklist_prompt: "書いたことがあるものにチェックしてください。",
+    question: "{items} をどこで使いましたか？それぞれについて、書いたコードと、それを使わなかったら代わりにどう書いたかを書いてください。",
     material: "あなたのリポジトリの `{element}`: {places}",
     text: [
         "送信",
@@ -86,86 +93,22 @@ const JAPANESE: Strings = Strings {
     ],
 };
 
-/// The tab title and the question template of `category` in `language`.
-fn category_strings(category: Category, language: Language) -> (&'static str, &'static str) {
+/// The tab title of `category` in `language`.
+fn title(category: Category, language: Language) -> &'static str {
     use Category::*;
     match language {
-        Language::English => (
-            category.name(),
-            match category {
-                Ownership => {
-                    "Where have you used {items}? For each, say what it did with the value's ownership and why you chose it over the others."
-                }
-                Borrowing => {
-                    "Where have you used {items}? For each, describe the code and what the borrow checker would have rejected had you written it differently."
-                }
-                Lifetimes => {
-                    "Where have you used {items}? For each, show the signature or type and say what the lifetime ties together."
-                }
-                TraitsGenerics => {
-                    "Where have you used {items}? For each, describe what you wrote and why it needed that construct."
-                }
-                SmartPointers => {
-                    "Where have you used {items}? For each, say what it owned or shared and why a plain value or reference was not enough."
-                }
-                ErrorHandling => {
-                    "Where have you used {items}? For each, describe how errors went through that code and why you handled them that way."
-                }
-                IteratorsClosures => {
-                    "Where have you used {items}? For each, describe the data it processed and what it saved you compared with a plain loop."
-                }
-                Async => {
-                    "Where have you used {items}? For each, describe what ran concurrently and what the code waited for."
-                }
-                Macros => {
-                    "Where have you used {items}? For each, describe what it does at the call and why a function would not do."
-                }
-                Unsafe => {
-                    "Where have you used {items}? For each, describe the invariant you had to keep yourself and how you made sure of it."
-                }
-            },
-        ),
+        Language::English => category.name(),
         Language::Japanese => match category {
-            Ownership => (
-                "所有権",
-                "{items} をどこで使いましたか？それぞれについて、値の所有権をどう扱ったかと、ほかではなくそれを選んだ理由を書いてください。",
-            ),
-            Borrowing => (
-                "借用",
-                "{items} をどこで使いましたか？それぞれについて、そのコードと、別の書き方なら借用チェッカーに何を拒まれたかを書いてください。",
-            ),
-            Lifetimes => (
-                "ライフタイム",
-                "{items} をどこで使いましたか？それぞれについて、シグネチャか型を示し、そのライフタイムが何と何を結び付けているかを書いてください。",
-            ),
-            TraitsGenerics => (
-                "トレイトとジェネリクス",
-                "{items} をどこで使いましたか？それぞれについて、何を書いたかと、なぜその構文が必要だったかを書いてください。",
-            ),
-            SmartPointers => (
-                "スマートポインタ",
-                "{items} をどこで使いましたか？それぞれについて、何を所有または共有したかと、ふつうの値や参照では足りなかった理由を書いてください。",
-            ),
-            ErrorHandling => (
-                "エラー処理",
-                "{items} をどこで使いましたか？それぞれについて、そのコードでエラーがどう伝わったかと、そう扱った理由を書いてください。",
-            ),
-            IteratorsClosures => (
-                "イテレータとクロージャ",
-                "{items} をどこで使いましたか？それぞれについて、何のデータを処理したかと、ふつうのループと比べて何が楽になったかを書いてください。",
-            ),
-            Async => (
-                "非同期",
-                "{items} をどこで使いましたか？それぞれについて、何を並行に動かしたかと、コードが何を待ったかを書いてください。",
-            ),
-            Macros => (
-                "マクロ",
-                "{items} をどこで使いましたか？それぞれについて、呼んだところで何をするかと、関数では足りなかった理由を書いてください。",
-            ),
-            Unsafe => (
-                "unsafe",
-                "{items} をどこで使いましたか？それぞれについて、自分で守る必要があった不変条件と、それをどう確かめたかを書いてください。",
-            ),
+            Ownership => "所有権",
+            Borrowing => "借用",
+            Lifetimes => "ライフタイム",
+            TraitsGenerics => "トレイトとジェネリクス",
+            SmartPointers => "スマートポインタ",
+            ErrorHandling => "エラー処理",
+            IteratorsClosures => "イテレータとクロージャ",
+            Async => "非同期",
+            Macros => "マクロ",
+            Unsafe => "unsafe",
         },
     }
 }
@@ -179,7 +122,7 @@ pub(crate) fn build(language: Language, scan: Option<&RepoScan>) -> Form {
     let tabs = Category::ALL
         .iter()
         .map(|&category| {
-            let (title, question) = category_strings(category, language);
+            let title = title(category, language);
             let elements: Vec<Element> = category.elements().collect();
             let names: Vec<&str> = elements.iter().map(|element| element.name()).collect();
             Tab {
@@ -196,7 +139,7 @@ pub(crate) fn build(language: Language, scan: Option<&RepoScan>) -> Form {
                 checklist_on: 0,
                 checklist_prompt: strings.checklist_prompt.to_owned(),
                 items: names.iter().map(|&name| name.to_owned()).collect(),
-                question: question.to_owned(),
+                question: strings.question.to_owned(),
                 material: names
                     .iter()
                     .map(|name| material(strings, name, scan))
@@ -303,15 +246,4 @@ pub(crate) fn read(form: &Form, values: &FormValues) -> Vec<CategoryAnswer> {
             }
         })
         .collect()
-}
-
-/// Every category's tab title and question template in each language.
-#[cfg(test)]
-fn templates() -> impl Iterator<Item = (Category, Language, &'static str, &'static str)> {
-    Category::ALL.into_iter().flat_map(|category| {
-        [Language::English, Language::Japanese].map(move |language| {
-            let (title, question) = category_strings(category, language);
-            (category, language, title, question)
-        })
-    })
 }

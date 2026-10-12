@@ -103,7 +103,7 @@ pub(crate) fn judge(
 type Verdicts = BTreeMap<Element, (Verdict, String)>;
 
 /// The result of judging each of `answers`, in their order: at most [`PARALLEL`] requests at a
-/// time, and none started after one failed with the API (`None` for those).
+/// time, and once a failure with the API is seen no further one is started (`None` for those).
 fn judge_all(
     model: Model<'_>,
     answers: &[&CategoryAnswer],
