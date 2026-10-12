@@ -19,6 +19,12 @@
 //! arguments that are not valid JSON). Without it the arguments are `{}`. A tool call's `id` is
 //! `call_1`, `call_2`, … in the order of the file, unless it is given. When the responses run
 //! out, the next request fails as an API error would.
+//!
+//! A response with `when` answers, once, the first request with a message containing that text,
+//! before the responses in order. The judgements of `molt init` are sent in parallel and arrive in
+//! no fixed order, so their responses name their category, e.g. ``when = "The category is
+//! `ownership`"``: the category alone could also be in the user's answer quoted in another
+//! request.
 
 use std::error::Error;
 use std::fmt;
@@ -41,6 +47,7 @@ struct ScriptFile {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ScriptResponse {
+    when: Option<String>,
     content: Option<String>,
     #[serde(default)]
     tool_calls: Vec<ScriptToolCall>,
@@ -126,35 +133,42 @@ pub(crate) fn load(path: &Path) -> Result<FakeChatClient, FakeScriptError> {
         source,
     })?;
     let client = FakeChatClient::new();
-    for response in responses {
-        client.push_chat(Ok(response));
+    for (when, response) in responses {
+        match when {
+            Some(key) => client.push_chat_when(key, Ok(response)),
+            None => client.push_chat(Ok(response)),
+        }
     }
     Ok(client)
 }
 
-/// The responses of a script, in order.
-fn parse(text: &str) -> Result<Vec<ChatResponse>, toml::de::Error> {
+/// The responses of a script, in order, with their `when`.
+fn parse(text: &str) -> Result<Vec<(Option<String>, ChatResponse)>, toml::de::Error> {
     let file: ScriptFile = toml::from_str(text)?;
     let mut numbered = 0;
     Ok(file
         .responses
         .into_iter()
-        .map(|response| ChatResponse {
-            content: response.content,
-            tool_calls: response
-                .tool_calls
-                .into_iter()
-                .map(|call| {
-                    numbered += 1;
-                    ToolCall {
-                        id: call.id.unwrap_or_else(|| format!("call_{numbered}")),
-                        name: call.name,
-                        arguments: call
-                            .arguments
-                            .map_or_else(|| "{}".to_owned(), Arguments::into_json),
-                    }
-                })
-                .collect(),
+        .map(|response| {
+            let when = response.when;
+            let response = ChatResponse {
+                content: response.content,
+                tool_calls: response
+                    .tool_calls
+                    .into_iter()
+                    .map(|call| {
+                        numbered += 1;
+                        ToolCall {
+                            id: call.id.unwrap_or_else(|| format!("call_{numbered}")),
+                            name: call.name,
+                            arguments: call
+                                .arguments
+                                .map_or_else(|| "{}".to_owned(), Arguments::into_json),
+                        }
+                    })
+                    .collect(),
+            };
+            (when, response)
         })
         .collect())
 }
@@ -178,6 +192,16 @@ mod tests {
         }
     }
 
+    /// The responses of a script, without their `when`.
+    fn responses_of(text: &str) -> Result<Vec<ChatResponse>, toml::de::Error> {
+        parse(text).map(|responses| {
+            responses
+                .into_iter()
+                .map(|(_, response)| response)
+                .collect()
+        })
+    }
+
     fn call(id: &str, name: &str, arguments: &str) -> ToolCall {
         ToolCall {
             id: id.to_owned(),
@@ -188,7 +212,7 @@ mod tests {
 
     #[test]
     fn a_text_response_is_returned_as_its_content() {
-        let responses = parse("[[responses]]\ncontent = \"hello\"\n").unwrap();
+        let responses = responses_of("[[responses]]\ncontent = \"hello\"\n").unwrap();
         assert_eq!(
             responses,
             [ChatResponse {
@@ -200,7 +224,7 @@ mod tests {
 
     #[test]
     fn tool_calls_take_a_table_of_arguments_as_its_json() {
-        let responses = parse(
+        let responses = responses_of(
             r#"
             [[responses]]
             tool_calls = [{ name = "write_file", arguments = { path = "src/lib.rs", content = "x" } }]
@@ -219,7 +243,7 @@ mod tests {
 
     #[test]
     fn a_string_of_arguments_is_sent_unchanged_even_when_it_is_not_json() {
-        let responses = parse(
+        let responses = responses_of(
             "[[responses]]\ntool_calls = [{ name = \"read_file\", arguments = '{\"path\": ' }]\n",
         )
         .unwrap();
@@ -228,13 +252,14 @@ mod tests {
 
     #[test]
     fn a_tool_call_without_arguments_has_an_empty_object() {
-        let responses = parse("[[responses]]\ntool_calls = [{ name = \"list_files\" }]\n").unwrap();
+        let responses =
+            responses_of("[[responses]]\ntool_calls = [{ name = \"list_files\" }]\n").unwrap();
         assert_eq!(responses[0].tool_calls[0].arguments, "{}");
     }
 
     #[test]
     fn tool_calls_without_an_id_are_numbered_across_the_file_and_a_given_id_is_kept() {
-        let responses = parse(
+        let responses = responses_of(
             r#"
             [[responses]]
             content = "both"
@@ -254,8 +279,8 @@ mod tests {
 
     #[test]
     fn unknown_keys_are_rejected() {
-        assert!(parse("[[responses]]\ntext = \"hello\"\n").is_err());
-        assert!(parse("steps = []\n").is_err());
+        assert!(responses_of("[[responses]]\ntext = \"hello\"\n").is_err());
+        assert!(responses_of("steps = []\n").is_err());
     }
 
     #[test]
@@ -280,6 +305,28 @@ mod tests {
             client.chat(&request()),
             Err(ChatError::FakeExhausted)
         ));
+    }
+
+    #[test]
+    fn load_answers_a_request_containing_a_when_with_its_response_before_the_others() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("fake.toml");
+        fs::write(
+            &path,
+            "[[responses]]\ncontent = \"in order\"\n\n\
+             [[responses]]\nwhen = \"hi\"\ncontent = \"keyed\"\n",
+        )
+        .unwrap();
+        let client = load(&path).unwrap();
+        assert_eq!(
+            client.chat(&request()).unwrap().content.as_deref(),
+            Some("keyed"),
+            "the request says `hi`"
+        );
+        assert_eq!(
+            client.chat(&request()).unwrap().content.as_deref(),
+            Some("in order")
+        );
     }
 
     #[test]

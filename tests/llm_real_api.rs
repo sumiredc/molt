@@ -7,7 +7,6 @@
 //! MOLT_TEST_CONFIG=~/.config/molt/config.toml cargo test --locked llm -- --ignored --nocapture
 //! ```
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::sync::{Mutex, MutexGuard};
 
@@ -97,12 +96,12 @@ struct Answer {
 /// 送ったリクエストを記録しながら、実クライアントにそのまま渡す。
 struct Recording<'a> {
     inner: &'a dyn ChatClient,
-    requests: RefCell<Vec<ChatRequest>>,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl ChatClient for Recording<'_> {
     fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
-        self.requests.borrow_mut().push(request.clone());
+        self.requests.lock().unwrap().push(request.clone());
         self.inner.chat(request)
     }
 
@@ -217,7 +216,7 @@ mod llm {
         let router = Router::new(&config);
         let client = Recording {
             inner: &api.client,
-            requests: RefCell::new(Vec::new()),
+            requests: Mutex::new(Vec::new()),
         };
 
         let answer: Answer = router
@@ -232,7 +231,7 @@ mod llm {
             )
             .unwrap();
 
-        let requests = client.requests.into_inner();
+        let requests = client.requests.into_inner().unwrap();
         eprintln!(
             "chat_json (json_object): {answer:?} after {} request(s)",
             requests.len()
