@@ -6,7 +6,7 @@ set -eu
 
 IMAGE=molt-sandbox
 VOLUME=molt-sandbox-home
-ROOT=$(cd "$(dirname "$0")/.." && pwd)
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 
 usage() {
     cat >&2 <<'USAGE'
@@ -29,10 +29,23 @@ USAGE
 run() {
     # `-e NAME` passes NAME's value only when it is set, and keeps the value out of the arguments
     set -- -e NEBIUS_API_KEY -e LC_ALL -e LC_MESSAGES -e LANG "$@"
+    set -f
     for name in ${MOLT_SANDBOX_ENV:-}; do
+        # Only a name: `NAME=value` would put the value in the arguments
+        case $name in
+        '' | [0-9]* | *[!A-Za-z0-9_]*)
+            echo "not a variable name in MOLT_SANDBOX_ENV: $name" >&2
+            exit 2
+            ;;
+        esac
         set -- -e "$name" "$@"
     done
-    exec docker run --rm -it -v "$VOLUME:/molt" "$@"
+    set +f
+    # A terminal only when there is one, so that `molt profile show` also works from a pipe
+    if [ -t 0 ] && [ -t 1 ]; then
+        set -- -t "$@"
+    fi
+    exec docker run --rm -i -v "$VOLUME:/molt" "$@"
 }
 
 [ $# -ge 1 ] || usage
@@ -41,13 +54,23 @@ shift
 case $command in
 build)
     [ $# -eq 0 ] || usage
-    exec docker build -f "$ROOT/docker/Dockerfile" -t "$IMAGE" "$ROOT"
+    # The toolchain of rust-toolchain.toml, so that the image runs the version molt is built with
+    version=$(sed -n 's/^channel = "\(.*\)"$/\1/p' "$ROOT/rust-toolchain.toml")
+    [ -n "$version" ] || {
+        echo "no channel in $ROOT/rust-toolchain.toml" >&2
+        exit 1
+    }
+    exec docker build -f "$ROOT/docker/Dockerfile" --build-arg RUST_VERSION="$version" \
+        -t "$IMAGE" "$ROOT"
     ;;
 config)
     [ $# -eq 1 ] || usage
-    config=$(cd "$(dirname "$1")" && pwd)/$(basename "$1")
-    exec docker run --rm -v "$VOLUME:/molt" -v "$config:/tmp/config.toml:ro" "$IMAGE" \
-        cp /tmp/config.toml /molt/config.toml
+    [ -f "$1" ] || {
+        echo "no file at $1" >&2
+        exit 1
+    }
+    # Through stdin, not a bind mount, which would make a missing path a directory on the host
+    exec docker run --rm -i -v "$VOLUME:/molt" "$IMAGE" sh -c 'cat > /molt/config.toml' <"$1"
     ;;
 molt)
     run "$IMAGE" molt "$@"

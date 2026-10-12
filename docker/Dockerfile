@@ -1,13 +1,16 @@
 # A throwaway environment to try molt in, apart from the host: see "Try it in a container" in the README.
 # Build and run it with docker/sandbox.sh.
 
-# The version of rust-toolchain.toml, so that building molt does not fetch another toolchain
-ARG RUST_VERSION=1.99.0
+# The channel of rust-toolchain.toml, which docker/sandbox.sh passes
+ARG RUST_VERSION
 
 FROM rust:${RUST_VERSION}-slim AS build
 WORKDIR /src
 COPY . .
-RUN cargo install --locked --path . --root /out
+# The caches keep the crates and their builds across builds, so a change to molt rebuilds only molt
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    CARGO_TARGET_DIR=/src/target cargo install --locked --path . --root /out
 
 FROM rust:${RUST_VERSION}-slim
 # molt runs cargo check, test, clippy and fmt, and git, in the project it works on
@@ -19,9 +22,7 @@ RUN rustup component add clippy rustfmt \
 COPY --from=build /out/bin/molt /usr/local/bin/molt
 COPY examples/fake /opt/molt/examples/fake
 
-# cargo writes its registry under CARGO_HOME when molt adds a dependency
 RUN useradd --create-home molt \
-    && chown -R molt /usr/local/cargo \
     && mkdir /molt \
     && chown molt /molt
 USER molt
