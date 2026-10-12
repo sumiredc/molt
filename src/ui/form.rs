@@ -368,15 +368,37 @@ pub(crate) struct Screen {
     pub lines: Vec<String>,
     /// Where the cursor goes (row, column), when the answer has the focus.
     pub cursor: Option<(usize, usize)>,
-    /// The row that has to stay in view: the cursor's, or the focused choice's or item's.
+    /// The row that has to stay in view: the cursor's, the focused choice's or item's, or on the
+    /// submit tab its last line.
     pub focus: usize,
+    /// The rows at the top (the row of tabs) and at the bottom (the key guide) that stay in view
+    /// while the rows between them scroll.
+    pub head: usize,
+    pub foot: usize,
 }
 
 impl Screen {
-    /// The first row to show on a terminal `height` rows high, so that the focus is in view.
-    pub(crate) fn first_row(&self, height: usize) -> usize {
-        let height = height.max(1);
-        (self.focus + 1).saturating_sub(height)
+    /// The rows to show on a terminal `height` rows high, top to bottom: the head and the foot,
+    /// and between them as many rows as fit, scrolled so that the focus is in view. When even the
+    /// head and the foot do not fit, the rows from the head down.
+    pub(crate) fn visible(&self, height: usize) -> Vec<usize> {
+        let total = self.lines.len();
+        if total <= height {
+            return (0..total).collect();
+        }
+        let body_end = total - self.foot;
+        let Some(room) = height
+            .checked_sub(self.head + self.foot)
+            .filter(|&room| room > 0)
+        else {
+            return (0..height).collect();
+        };
+        let first = (self.focus + 1).saturating_sub(room).max(self.head);
+        let first = first.min(body_end.saturating_sub(room).max(self.head));
+        (0..self.head)
+            .chain(first..(first + room).min(body_end))
+            .chain(body_end..total)
+            .collect()
     }
 }
 
@@ -386,6 +408,7 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
     let form = state.form;
     let mut lines = tab_row(form, state.tab, width);
     lines.push(String::new());
+    let head = lines.len();
     let mut cursor = None;
     let mut focus = 0;
 
@@ -465,15 +488,19 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
                 &form.text.not_ready
             };
             lines.extend(wrap(next, width));
+            focus = lines.len() - 1;
         }
     }
 
+    let body_end = lines.len();
     lines.push(String::new());
     lines.extend(wrap(&form.text.guide, width));
     Screen {
+        foot: lines.len() - body_end,
         lines,
         cursor,
         focus,
+        head,
     }
 }
 

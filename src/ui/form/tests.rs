@@ -368,24 +368,49 @@ fn every_tab_ends_with_the_key_guide() {
 }
 
 #[test]
-fn a_form_taller_than_the_terminal_shows_the_rows_around_the_focus() {
+fn a_form_taller_than_the_terminal_keeps_the_tabs_and_the_guide_and_scrolls_to_the_focus() {
     let form = form();
     let mut state = FormState::new(&form, None);
     to_answer(&mut state);
     let screen = render(&state, 80);
-    let (row, _) = screen.cursor.unwrap();
-    assert_eq!(screen.focus, row);
-    assert_eq!(screen.first_row(screen.lines.len()), 0, "all fits");
-    let first = screen.first_row(5);
-    assert!(
-        (first..first + 5).contains(&row),
-        "the cursor's row is in view"
+    assert_eq!(
+        screen.visible(screen.lines.len()),
+        (0..screen.lines.len()).collect::<Vec<_>>()
     );
 
-    press(&mut state, &[Key::Up, Key::Up, Key::Up]);
+    let visible = screen.visible(6);
+    assert_eq!(visible.len(), 6);
+    assert_eq!(visible[0], 0, "the row of tabs stays");
+    assert_eq!(
+        screen.lines[*visible.last().unwrap()],
+        "keys",
+        "the guide stays"
+    );
+    let (row, _) = screen.cursor.unwrap();
+    assert_eq!(screen.focus, row);
+    assert!(visible.contains(&row), "the cursor's row is in view");
+
+    press(&mut state, &[Key::Up; 6]);
     let screen = render(&state, 80);
-    assert_eq!(screen.lines[screen.focus], "> [x] x");
-    assert_eq!(screen.first_row(screen.focus + 1), 0);
+    assert_eq!(screen.lines[screen.focus], "> (*) a");
+    assert!(screen.visible(6).contains(&screen.focus));
+}
+
+#[test]
+fn the_submit_tab_keeps_its_last_line_in_view() {
+    let form = form();
+    let mut state = FormState::new(&form, None);
+    press(&mut state, &[Key::Tab, Key::Tab]);
+    let screen = render(&state, 80);
+    assert_eq!(screen.lines[screen.focus], "Choose on every tab.");
+    assert!(screen.visible(5).contains(&screen.focus));
+}
+
+#[test]
+fn a_terminal_lower_than_the_tabs_and_the_guide_shows_the_rows_from_the_top() {
+    let form = form();
+    let state = FormState::new(&form, None);
+    assert_eq!(render(&state, 80).visible(2), [0, 1]);
 }
 
 #[test]

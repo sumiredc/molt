@@ -7,6 +7,7 @@
 use std::io::{self, IsTerminal, Write};
 use std::panic::{self, PanicHookInfo};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crossterm::cursor::{Hide, MoveTo, Show};
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
@@ -55,6 +56,10 @@ fn run(form: &Form, initial: Option<&FormValues>) -> io::Result<Option<FormValue
     }
 }
 
+/// Whether the terminal is in raw mode for a form and not restored yet, so that it is restored
+/// once: by the panic hook or on drop, whichever comes first.
+static ENTERED: AtomicBool = AtomicBool::new(false);
+
 type PanicHook = Box<dyn Fn(&PanicHookInfo<'_>) + Send + Sync + 'static>;
 
 /// Raw mode on the alternate screen, left when dropped. While it lasts, a panic first restores
@@ -75,6 +80,7 @@ impl RawScreen {
         // halfway.
         let screen = Self { previous_hook };
         enable_raw_mode()?;
+        ENTERED.store(true, Ordering::SeqCst);
         execute!(io::stdout(), EnterAlternateScreen)?;
         Ok(screen)
     }
@@ -92,33 +98,36 @@ impl Drop for RawScreen {
     }
 }
 
-/// Leaves the alternate screen and raw mode. Nothing more can be done if that fails.
+/// Leaves the alternate screen and raw mode, once after entering them. Nothing more can be done
+/// if that fails.
 fn restore() {
+    if !ENTERED.swap(false, Ordering::SeqCst) {
+        return;
+    }
     let _ = execute!(io::stdout(), Show, LeaveAlternateScreen);
     let _ = disable_raw_mode();
 }
 
-/// Draws the rows of `screen` that fit `height`, overwriting each row and clearing the rest.
+/// Draws the rows of `screen` that fit `height`, clearing each row before writing it (clearing
+/// after a row as wide as the terminal would also clear its last column) and clearing the rest.
 fn draw(out: &mut impl Write, screen: &Screen, height: usize) -> io::Result<()> {
-    let first = screen.first_row(height);
+    let visible = screen.visible(height);
     queue!(out, Hide)?;
-    for (row, line) in screen.lines.iter().skip(first).take(height).enumerate() {
-        queue!(out, MoveTo(0, to_u16(row)))?;
-        out.write_all(line.as_bytes())?;
-        queue!(out, Clear(ClearType::UntilNewLine))?;
+    for (at, &row) in visible.iter().enumerate() {
+        queue!(out, MoveTo(0, to_u16(at)), Clear(ClearType::UntilNewLine))?;
+        out.write_all(screen.lines[row].as_bytes())?;
     }
-    let drawn = screen.lines.len().saturating_sub(first).min(height);
-    if drawn < height {
+    if visible.len() < height {
         queue!(
             out,
-            MoveTo(0, to_u16(drawn)),
+            MoveTo(0, to_u16(visible.len())),
             Clear(ClearType::FromCursorDown)
         )?;
     }
     if let Some((row, column)) = screen.cursor
-        && (first..first + height).contains(&row)
+        && let Some(at) = visible.iter().position(|&shown| shown == row)
     {
-        queue!(out, MoveTo(to_u16(column), to_u16(row - first)), Show)?;
+        queue!(out, MoveTo(to_u16(column), to_u16(at)), Show)?;
     }
     out.flush()
 }
