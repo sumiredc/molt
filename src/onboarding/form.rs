@@ -81,7 +81,7 @@ const JAPANESE: Strings = Strings {
     reports: ["書いたことがある", "読める", "知らない"],
     prompt: "{category} をどのくらい知っていますか？（{elements}）",
     checklist_prompt: "書いたことがあるものにチェックしてください。",
-    question: "{items} をどこで使いましたか？それぞれについて、書いたコードと、それを使わなかったら代わりにどう書いたかを書いてください。",
+    question: "{items} をどこで使いましたか？それぞれについて、書いたコードと、それを使わない場合の書き方を示してください。",
     material: "あなたのリポジトリの `{element}`: {places}",
     text: [
         "送信",
