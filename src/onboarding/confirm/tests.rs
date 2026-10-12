@@ -8,16 +8,14 @@ use super::*;
 use crate::config::Config;
 use crate::llm::types::ChatResponse;
 use crate::llm::{ChatError, FakeChatClient, Router};
-use crate::onboarding::probe::Model;
+use crate::onboarding::form::Language;
+use crate::onboarding::judge::Model;
+use crate::onboarding::questionnaire::test_support::form;
 use crate::onboarding::questionnaire::{Outcome, init};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Report, Timestamp};
 use crate::ui::{ScriptedUi, Step};
-
-const HAVE_WRITTEN: Step = Step::Select(1);
-const CAN_READ: Step = Step::Select(2);
-const DONT_KNOW: Step = Step::Select(3);
 
 /// The empty line that ends the confirmation and saves.
 fn save() -> Step {
@@ -75,16 +73,15 @@ fn run_confirm(profile: &mut Profile, steps: Vec<Step>) -> (ScriptedUi, Result<C
     (ui, confirmed)
 }
 
-/// The steps that report `category` with `step` and every other category "don't know".
-fn reports(of: &[(Category, Step)]) -> Vec<Step> {
-    Category::ALL
-        .iter()
-        .map(|category| {
-            of.iter()
-                .find(|(c, _)| c == category)
-                .map_or(DONT_KNOW, |(_, step)| step.clone())
-        })
-        .collect()
+/// The form with ownership "have written", `clone` checked and answered, and every other
+/// category "don't know".
+fn ownership_written() -> Step {
+    form(&[(
+        Category::Ownership,
+        Report::HaveWritten,
+        &[Element::Clone],
+        "I clone strings.",
+    )])
 }
 
 fn reply(text: &str) -> Result<ChatResponse, ChatError> {
@@ -94,11 +91,9 @@ fn reply(text: &str) -> Result<ChatResponse, ChatError> {
     })
 }
 
-/// A client that asks one question about ownership and judges `clone` known and the rest of
-/// ownership unknown.
+/// A client that judges `clone` known and the rest of ownership unknown.
 fn ownership_client() -> FakeChatClient {
     let client = FakeChatClient::new();
-    client.push_chat(reply("How have you used clone and the mem functions?"));
     let elements: Vec<_> = Element::ALL
         .iter()
         .filter(|element| element.category() == Category::Ownership)
@@ -140,6 +135,7 @@ fn run_init(
             router: &router,
         }),
         repo,
+        Language::English,
     );
     (ui, outcome)
 }
@@ -325,13 +321,12 @@ fn a_line_that_is_not_one_key_and_one_status_is_asked_again() {
 #[test]
 fn a_correction_at_the_confirmation_is_saved_with_provenance_manual() {
     let (_dir, path) = no_profile();
-    let mut steps = reports(&[(Category::Ownership, HAVE_WRITTEN)]);
-    steps.extend([
-        input("I clone strings."),
+    let steps = vec![
+        ownership_written(),
         input("clone unknown"),
         input("mem_take known"),
         save(),
-    ]);
+    ];
     let (_, outcome) = run_init(steps, &ownership_client(), &path, None);
     assert_eq!(outcome, Ok(Outcome::Saved));
 
@@ -369,11 +364,19 @@ fn every_known_item_saved_is_by_the_q_and_a_the_reference_repository_or_manual_w
     fs::create_dir_all(repo.join("src")).unwrap();
     fs::write(repo.join("Cargo.toml"), "[dependencies]\ntokio = \"1\"\n").unwrap();
     fs::write(repo.join("src/main.rs"), "fn main() {}\n").unwrap();
-    let mut steps = reports(&[
-        (Category::Ownership, HAVE_WRITTEN),
-        (Category::SmartPointers, CAN_READ),
-    ]);
-    steps.extend([input("I clone strings."), input("arc known"), save()]);
+    let steps = vec![
+        form(&[
+            (
+                Category::Ownership,
+                Report::HaveWritten,
+                &[Element::Clone],
+                "I clone strings.",
+            ),
+            (Category::SmartPointers, Report::CanRead, &[], ""),
+        ]),
+        input("arc known"),
+        save(),
+    ];
 
     let before = unix_seconds();
     let (_, outcome) = run_init(steps, &ownership_client(), &path, Some(&repo));
@@ -412,12 +415,7 @@ fn every_known_item_saved_is_by_the_q_and_a_the_reference_repository_or_manual_w
 #[test]
 fn interrupting_the_confirmation_saves_nothing() {
     let (_dir, path) = no_profile();
-    let mut steps = reports(&[(Category::Ownership, HAVE_WRITTEN)]);
-    steps.extend([
-        input("I clone strings."),
-        input("clone unknown"),
-        Step::Interrupt,
-    ]);
+    let steps = vec![ownership_written(), input("clone unknown"), Step::Interrupt];
     let (ui, outcome) = run_init(steps, &ownership_client(), &path, None);
     assert_eq!(outcome, Ok(Outcome::Interrupted));
     assert!(!path.exists());
@@ -427,8 +425,7 @@ fn interrupting_the_confirmation_saves_nothing() {
 #[test]
 fn the_end_of_the_input_at_the_confirmation_saves_nothing_as_an_interruption() {
     let (_dir, path) = no_profile();
-    let mut steps = reports(&[]);
-    steps.push(Step::Eof);
+    let steps = vec![form(&[]), Step::Eof];
     let (_, outcome) = run_init(steps, &FakeChatClient::new(), &path, None);
     assert_eq!(outcome, Ok(Outcome::Interrupted));
     assert!(!path.exists());
@@ -439,9 +436,7 @@ fn interrupting_the_confirmation_leaves_an_existing_profile_as_it_was() {
     let (_dir, path) = no_profile();
     let existing = "# written by hand\ndeny = [\"option\"]\n";
     fs::write(&path, existing).unwrap();
-    let mut steps = vec![Step::Confirm(true)];
-    steps.extend(reports(&[]));
-    steps.push(Step::Interrupt);
+    let steps = vec![Step::Confirm(true), form(&[]), Step::Interrupt];
     let (_, outcome) = run_init(steps, &FakeChatClient::new(), &path, None);
     assert_eq!(outcome, Ok(Outcome::Interrupted));
     assert_eq!(fs::read_to_string(&path).unwrap(), existing);
@@ -450,27 +445,33 @@ fn interrupting_the_confirmation_leaves_an_existing_profile_as_it_was() {
 #[test]
 fn a_failure_to_read_at_the_confirmation_reports_it_and_saves_nothing() {
     let (_dir, path) = no_profile();
-    let (_, outcome) = run_init(reports(&[]), &FakeChatClient::new(), &path, None);
+    let (_, outcome) = run_init(vec![form(&[])], &FakeChatClient::new(), &path, None);
     let error = outcome.unwrap_err();
     assert!(error.contains("no step left"), "{error}");
     assert!(!path.exists());
 }
 
 #[test]
-fn an_api_failure_during_the_q_and_a_saves_nothing_and_asks_no_confirmation() {
+fn an_api_failure_during_the_judgement_asks_no_confirmation_and_tells_the_cause() {
     let (_dir, path) = no_profile();
     let client = FakeChatClient::new();
-    client.push_chat(reply("How have you used clone?"));
     client.push_chat(Err(ChatError::Status {
         status: 429,
         body: "rate limited".to_owned(),
     }));
-    let mut steps = reports(&[(Category::Ownership, HAVE_WRITTEN)]);
-    steps.extend([input("I clone strings."), save()]);
-    let (ui, outcome) = run_init(steps, &client, &path, None);
-    let error = outcome.unwrap_err();
-    assert!(error.contains("429"), "{error}");
-    assert!(error.contains("no profile was saved"), "{error}");
+    // The form opens again; the user quits there.
+    let (ui, outcome) = run_init(
+        vec![ownership_written(), Step::Interrupt],
+        &client,
+        &path,
+        None,
+    );
+    assert_eq!(outcome, Ok(Outcome::Interrupted));
+    assert!(
+        ui.shown().iter().any(|shown| shown.contains("429")),
+        "{:?}",
+        ui.shown()
+    );
     assert_eq!(asked_to_confirm(&ui), 0);
     assert!(!path.exists());
 }

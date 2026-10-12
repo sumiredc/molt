@@ -8,8 +8,16 @@ use std::process::Output;
 use assert_cmd::cargo::cargo_bin_cmd;
 use tempfile::TempDir;
 
-/// The steps that answer "don't know" for all 10 categories and save at the confirmation.
-const ALL_DONT_KNOW: &str = "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"\" },\n]\n";
+/// The steps that submit the form with "don't know" for all 10 categories and save at the
+/// confirmation.
+const ALL_DONT_KNOW: &str = "steps = [\n{ form = [\n{ choice = 3 }, { choice = 3 }, { choice = 3 }, { choice = 3 }, { choice = 3 },\n{ choice = 3 }, { choice = 3 }, { choice = 3 }, { choice = 3 }, { choice = 3 },\n] },\n{ input = \"\" },\n]\n";
+
+/// The form step with `ownership` (the first tab) as given and "don't know" for the 9 others.
+fn form_with_ownership(ownership: &str) -> String {
+    format!(
+        "{{ form = [\n{ownership},\n{{ choice = 3 }}, {{ choice = 3 }}, {{ choice = 3 }}, {{ choice = 3 }}, {{ choice = 3 }},\n{{ choice = 3 }}, {{ choice = 3 }}, {{ choice = 3 }}, {{ choice = 3 }},\n] }}"
+    )
+}
 
 /// A molt directory with `config.toml` whose `[api]` body is `api`, and a ui script.
 struct Setup {
@@ -51,6 +59,10 @@ fn molt_init_with(setup: &Setup, profile: &Path, args: &[&OsStr]) -> Output {
         .env_remove("XDG_CONFIG_HOME")
         .env_remove("HOME")
         .env_remove("MOLT_TEST_MISSING_API_KEY")
+        // The form in English, whatever the locale of the machine running the tests.
+        .env_remove("LC_ALL")
+        .env_remove("LC_MESSAGES")
+        .env("LANG", "C")
         .arg("init")
         .arg("--profile")
         .arg(profile)
@@ -86,9 +98,9 @@ fn init_without_the_api_key_reports_its_variable_and_creates_no_profile() {
 }
 
 #[test]
-fn init_interrupted_during_the_report_exits_130_and_creates_no_profile() {
+fn init_interrupted_at_the_form_exits_130_and_creates_no_profile() {
     let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
-    fs::write(setup.script(), "steps = [{ select = 2 }, \"interrupt\"]\n").unwrap();
+    fs::write(setup.script(), "steps = [\"interrupt\"]\n").unwrap();
     let output = molt_init(&setup, &setup.profile());
     assert_eq!(output.status.code(), Some(130));
     assert!(!setup.profile().exists());
@@ -139,21 +151,22 @@ fn init_with_a_missing_repo_reports_it_and_saves_the_profile_without_a_reference
 }
 
 #[test]
-fn init_with_a_have_written_category_asks_and_judges_through_fake_and_saves_the_known_by_qa() {
+fn init_with_a_have_written_category_judges_its_answer_through_fake_and_saves_the_known_by_qa() {
     let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
+    let form = form_with_ownership(
+        "{ choice = 1, checked = [1, 4], answer = \"I clone strings, and mem::take a Vec.\" }",
+    );
     fs::write(
         setup.script(),
-        "steps = [\n{ select = 1 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"I clone strings.\" }, { input = \"\" },\n]\n",
+        format!("steps = [\n{form},\n{{ input = \"\" }},\n]\n"),
     )
     .unwrap();
     let fake = setup.dir.path().join("fake.toml");
     fs::write(
         &fake,
         r#"[[responses]]
-content = "How have you used clone and the other ownership tools?"
-
-[[responses]]
-content = '{"elements": [{"element": "clone", "verdict": "known", "reason": "clones strings"}, {"element": "to_owned", "verdict": "unknown", "reason": "-"}, {"element": "drop", "verdict": "unknown", "reason": "-"}, {"element": "mem_take", "verdict": "unknown", "reason": "-"}, {"element": "mem_replace", "verdict": "unknown", "reason": "-"}, {"element": "mem_swap", "verdict": "unknown", "reason": "-"}]}'
+when = "The category is `ownership`"
+content = '{"elements": [{"element": "clone", "verdict": "known", "reason": "clones strings"}, {"element": "mem_take", "verdict": "unknown", "reason": "-"}]}'
 "#,
     )
     .unwrap();
@@ -165,7 +178,10 @@ content = '{"elements": [{"element": "clone", "verdict": "known", "reason": "clo
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(stdout.contains("How have you used clone"), "{stdout}");
+    assert!(
+        stdout.contains("ownership: have written; checked: clone, mem_take;"),
+        "{stdout}"
+    );
     assert!(stdout.contains("ownership: known: clone;"), "{stdout}");
     let saved = fs::read_to_string(setup.profile()).unwrap();
     assert!(saved.contains("provenance = \"qa\""), "{saved}");
@@ -177,7 +193,10 @@ fn init_shows_the_profile_and_saves_a_correction_typed_at_the_confirmation_by_ma
     let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
     fs::write(
         setup.script(),
-        "steps = [\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ input = \"clone known\" }, { input = \"\" },\n]\n",
+        ALL_DONT_KNOW.replace(
+            "{ input = \"\" }",
+            "{ input = \"clone known\" }, { input = \"\" }",
+        ),
     )
     .unwrap();
     let output = molt_init(&setup, &setup.profile());
@@ -195,7 +214,10 @@ fn init_interrupted_at_the_confirmation_exits_130_and_creates_no_profile() {
     let setup = Setup::with_api("base_url = \"http://127.0.0.1:9/v1\"\napi_key_env = \"\"\n");
     fs::write(
         setup.script(),
-        "steps = [\n{ select = 2 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n{ select = 3 }, { select = 3 }, { select = 3 }, { select = 3 }, { select = 3 },\n\"interrupt\",\n]\n",
+        format!(
+            "steps = [\n{},\n\"interrupt\",\n]\n",
+            form_with_ownership("{ choice = 2 }")
+        ),
     )
     .unwrap();
     let output = molt_init(&setup, &setup.profile());

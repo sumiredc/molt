@@ -6,7 +6,8 @@ use std::process::ExitCode;
 use super::mainline::{INTERRUPTED, connect, open_ui};
 use super::profile;
 use crate::llm::Router;
-use crate::onboarding::probe::Model;
+use crate::onboarding::form::Language;
+use crate::onboarding::judge::Model;
 use crate::onboarding::questionnaire::{self, Outcome};
 
 pub(super) fn run(
@@ -32,7 +33,7 @@ pub(super) fn run(
             router,
         })
         .map_err(Clone::clone);
-    match questionnaire::init(ui.as_mut(), &path, model, repo) {
+    match questionnaire::init(ui.as_mut(), &path, model, repo, Language::from_env()) {
         Ok(Outcome::Saved | Outcome::Kept) => ExitCode::SUCCESS,
         Ok(Outcome::Interrupted) => ExitCode::from(INTERRUPTED),
         Err(message) => {
