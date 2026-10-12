@@ -160,6 +160,7 @@ fn is_configuration_error(error: &ChatError) -> bool {
 fn is_connection_failure(error: &ChatError) -> bool {
     match error {
         ChatError::Request(_)
+        | ChatError::TimedOut { .. }
         | ChatError::MissingApiKey { .. }
         | ChatError::ApiKeyOverPlainHttp { .. }
         | ChatError::Interrupted => true,
@@ -788,6 +789,33 @@ reasoning_effort = false
             );
             assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG, "{code}");
         }
+    }
+
+    #[test]
+    fn doctor_reports_a_timeout_during_a_chat_as_a_connection_failure_and_leaves_config_untouched()
+    {
+        let env = env_with(Some(CONFIG));
+        let fake = fake_with([
+            passing(),
+            Replies {
+                chat: Err(ChatError::TimedOut { secs: 300 }),
+                ..passing()
+            },
+            passing(),
+        ]);
+
+        let (ok, output) = run_doctor(&env, &fake);
+
+        assert!(!ok, "{output}");
+        assert!(
+            output.contains("connection failed while checking generate"),
+            "{output}"
+        );
+        assert!(
+            output.contains("did not respond within 300 seconds"),
+            "{output}"
+        );
+        assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
     }
 
     // --- 5 項目の判定 ---

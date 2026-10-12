@@ -60,6 +60,8 @@ What molt does not guarantee is listed in [PRD §4](PRD.md#4-non-guarantees); fo
 
 Settings live in `config.toml` in molt's directory; [`examples/config.toml`](examples/config.toml) shows where that directory is (`MOLT_HOME`, `XDG_CONFIG_HOME`), every key with its default, and how to point at a local endpoint. The API key is read from the environment variable named by `api_key_env`.
 
+molt waits `timeout_secs` (300 by default) for each response. A slow model, such as a local one, can take longer than that to write one file: when molt stops with `the chat API did not respond within 300 seconds`, raise `timeout_secs` under `[api]`.
+
 Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and `molt` prints both paths when it ends with `/quit` or Ctrl-D ([PRD §8.8](PRD.md#88-persistence)).
 
 ## Try it without a model

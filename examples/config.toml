@@ -48,3 +48,5 @@ reasoning_effort = false
 # - With a key, molt does not send it over http:// to a host other than loopback (localhost,
 #   127.0.0.0/8, ::1): it returns an error without making a client. To send a key, use https
 # - If the endpoint requires a key, name a variable of its own (e.g. api_key_env = "LOCAL_API_KEY")
+# - A local model can take longer than timeout_secs to write one file. If molt stops with
+#   "the chat API did not respond within 300 seconds", raise timeout_secs in [api] (e.g. 1200)
