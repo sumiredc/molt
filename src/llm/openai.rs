@@ -25,7 +25,7 @@ pub struct OpenAiClient {
     base_url: String,
     /// `None` なら Authorization ヘッダを送らない。
     api_key: Option<ApiKey>,
-    /// `[api]` の `timeout_secs`。時間切れのエラーに載せる。
+    /// `[api]` の `timeout_secs`。タイムアウトのエラーに載せる。
     timeout_secs: u64,
     /// `Some` なら、chat の応答を待つ間の中断を受ける。
     interrupt: Option<Interrupt>,
@@ -159,7 +159,7 @@ fn plain_http_host_off_this_machine(base_url: &str) -> Option<String> {
     })
 }
 
-/// 要求を送り、応答の状態と本文を受け取る。`timeout_secs` は、時間切れのエラーに載せる
+/// 要求を送り、応答の状態と本文を受け取る。`timeout_secs` は、タイムアウトのエラーに載せる
 /// `[api]` の値。
 fn exchange(
     builder: reqwest::blocking::RequestBuilder,
@@ -823,6 +823,51 @@ mod tests {
         for part in ["did not respond within", "1 seconds", "timeout_secs"] {
             assert!(shown.contains(part), "{shown}");
         }
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_body_that_stops_midway_past_timeout_secs_is_timed_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        // ヘッダと本文の頭だけ返し、残りを送らない
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+                .unwrap();
+            thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let client = OpenAiClient::new(&api(&base_url, "", 1), no_env).unwrap();
+
+        let error = client.chat(&request("m", vec![user("hi")])).unwrap_err();
+
+        assert!(
+            matches!(error, ChatError::TimedOut { secs: 1 }),
+            "{error:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn models_slower_than_timeout_secs_is_timed_out() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        // 接続は受けるが応答しない
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            thread::sleep(Duration::from_secs(3));
+            drop(stream);
+        });
+        let client = OpenAiClient::new(&api(&base_url, "", 1), no_env).unwrap();
+
+        let error = client.models().unwrap_err();
+
+        assert!(
+            matches!(error, ChatError::TimedOut { secs: 1 }),
+            "{error:?}"
+        );
         server.join().unwrap();
     }
 
