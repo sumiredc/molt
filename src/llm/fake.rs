@@ -1,10 +1,11 @@
 //! テストと `--fake` で使う [`ChatClient`]。積んだ応答を順に返し、送られたリクエストを記録する。
+//! 並列に送られる依頼（`molt init` の判定）には、依頼の文字列で選ぶ応答を積む。
 
-use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use super::ChatClient;
-use super::types::{ChatError, ChatRequest, ChatResponse};
+use super::types::{ChatError, ChatRequest, ChatResponse, Message};
 
 /// 積んだ応答を順に返す [`ChatClient`]。ネットワークに出ない。
 ///
@@ -12,9 +13,11 @@ use super::types::{ChatError, ChatRequest, ChatResponse};
 /// [`check_tool_name`](super::types::check_tool_name) で行う。
 #[derive(Debug, Default)]
 pub struct FakeChatClient {
-    chat_responses: RefCell<VecDeque<Result<ChatResponse, ChatError>>>,
-    models_responses: RefCell<VecDeque<Result<Vec<String>, ChatError>>>,
-    requests: RefCell<Vec<ChatRequest>>,
+    chat_responses: Mutex<VecDeque<Result<ChatResponse, ChatError>>>,
+    /// 依頼の文字列で選ぶ応答。鍵の文字列を含む依頼に、積んだ順で最初のものを 1 回だけ返す。
+    keyed_responses: Mutex<Vec<(String, Result<ChatResponse, ChatError>)>>,
+    models_responses: Mutex<VecDeque<Result<Vec<String>, ChatError>>>,
+    requests: Mutex<Vec<ChatRequest>>,
 }
 
 impl FakeChatClient {
@@ -24,34 +27,75 @@ impl FakeChatClient {
 
     /// 次の `chat` の呼び出しで返すものを、キューの末尾に積む。
     pub fn push_chat(&self, response: Result<ChatResponse, ChatError>) {
-        self.chat_responses.borrow_mut().push_back(response);
+        lock(&self.chat_responses).push_back(response);
+    }
+
+    /// メッセージのどれかが `key` を含む `chat` の依頼に返すものを積む。順に返す応答より先に選ぶ。
+    /// 並列に送られて届く順が決まらない依頼を、中身で答え分けるため。
+    pub fn push_chat_when(
+        &self,
+        key: impl Into<String>,
+        response: Result<ChatResponse, ChatError>,
+    ) {
+        lock(&self.keyed_responses).push((key.into(), response));
     }
 
     /// 次の `models` の呼び出しで返すものを、キューの末尾に積む。
     pub fn push_models(&self, response: Result<Vec<String>, ChatError>) {
-        self.models_responses.borrow_mut().push_back(response);
+        lock(&self.models_responses).push_back(response);
     }
 
-    /// これまでに `chat` に渡されたリクエスト。送られた順。
+    /// これまでに `chat` に渡されたリクエスト。届いた順。
     pub fn requests(&self) -> Vec<ChatRequest> {
-        self.requests.borrow().clone()
+        lock(&self.requests).clone()
+    }
+
+    /// `request` のメッセージのどれかが含む鍵の応答のうち、積んだ順で最初のものを取り出す。
+    fn take_keyed(&self, request: &ChatRequest) -> Option<Result<ChatResponse, ChatError>> {
+        let mut keyed = lock(&self.keyed_responses);
+        let at = keyed.iter().position(|(key, _)| {
+            request
+                .messages
+                .iter()
+                .any(|message| text_of(message).contains(key.as_str()))
+        })?;
+        Some(keyed.remove(at).1)
     }
 }
 
+/// メッセージの本文。ツール呼び出しだけの assistant のメッセージは空。
+fn text_of(message: &Message) -> &str {
+    match message {
+        Message::System { content } | Message::User { content } | Message::Tool { content, .. } => {
+            content
+        }
+        Message::Assistant { content, .. } => content.as_deref().unwrap_or(""),
+    }
+}
+
+/// テストの別のスレッドが panic しても、積んだものはそのまま使う。
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 impl ChatClient for FakeChatClient {
-    /// 積んだ応答を先頭から 1 つ返す。積んだものが無ければ [`ChatError::FakeExhausted`]。
+    /// 依頼に合う鍵の応答があればそれを、無ければ順に積んだ応答を先頭から 1 つ返す。どちらも
+    /// 無ければ [`ChatError::FakeExhausted`]。
     fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
-        self.requests.borrow_mut().push(request.clone());
-        self.chat_responses
-            .borrow_mut()
+        lock(&self.requests).push(request.clone());
+        if let Some(response) = self.take_keyed(request) {
+            return response;
+        }
+        lock(&self.chat_responses)
             .pop_front()
             .unwrap_or(Err(ChatError::FakeExhausted))
     }
 
     /// 積んだモデル ID の一覧を先頭から 1 つ返す。積んだものが無ければ [`ChatError::FakeExhausted`]。
     fn models(&self) -> Result<Vec<String>, ChatError> {
-        self.models_responses
-            .borrow_mut()
+        lock(&self.models_responses)
             .pop_front()
             .unwrap_or(Err(ChatError::FakeExhausted))
     }
@@ -60,7 +104,7 @@ impl ChatClient for FakeChatClient {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::llm::types::{Message, ToolCall};
+    use crate::llm::types::ToolCall;
 
     fn request(text: &str) -> ChatRequest {
         ChatRequest {
@@ -144,6 +188,31 @@ mod tests {
         fake.push_chat(Ok(queued.clone()));
 
         assert_eq!(fake.chat(&request("a")).unwrap(), queued);
+    }
+
+    #[test]
+    fn a_keyed_response_answers_the_first_request_containing_its_key_before_the_queue() {
+        let fake = FakeChatClient::new();
+        fake.push_chat(Ok(reply("in order")));
+        fake.push_chat_when("beta", Ok(reply("for beta")));
+        fake.push_chat_when("alpha", Ok(reply("for alpha")));
+
+        assert_eq!(
+            fake.chat(&request("about alpha")).unwrap(),
+            reply("for alpha")
+        );
+        assert_eq!(
+            fake.chat(&request("about alpha")).unwrap(),
+            reply("in order")
+        );
+        assert_eq!(
+            fake.chat(&request("about beta")).unwrap(),
+            reply("for beta")
+        );
+        assert!(matches!(
+            fake.chat(&request("about beta")),
+            Err(ChatError::FakeExhausted)
+        ));
     }
 
     #[test]

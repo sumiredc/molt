@@ -6,15 +6,12 @@ use tempfile::TempDir;
 use super::*;
 use crate::config::{Api, Config};
 use crate::llm::{ChatClient, FakeChatClient, OpenAiClient, Router};
+use crate::onboarding::form::Language;
+use crate::onboarding::questionnaire::test_support::{every, form};
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report};
 use crate::ui::{ScriptedUi, Step};
-
-/// The numbers of the choices, as the user selects them (from 1). "have written" is 1; its
-/// Q&A is tested in `onboarding::probe`.
-const CAN_READ: Step = Step::Select(2);
-const DONT_KNOW: Step = Step::Select(3);
 
 /// A temporary directory, and the path of a profile in it that does not exist yet.
 fn no_profile() -> (TempDir, PathBuf) {
@@ -38,28 +35,15 @@ fn save() -> Step {
     Step::Input(String::new())
 }
 
-/// The steps that answer every category with `step`, in the order they are asked, and then save
-/// at the confirmation.
-fn every_category(step: Step) -> Vec<Step> {
-    let mut steps = vec![step; Category::ALL.len()];
-    steps.push(save());
-    steps
+/// The steps that submit `report` for every category, and then save at the confirmation.
+fn every_category(report: Report) -> Vec<Step> {
+    vec![every(report), save()]
 }
 
-/// The steps that answer `category` with `step` and every other category "don't know", and then
-/// save at the confirmation.
-fn only(category: Category, step: Step) -> Vec<Step> {
-    Category::ALL
-        .iter()
-        .map(|&c| {
-            if c == category {
-                step.clone()
-            } else {
-                DONT_KNOW
-            }
-        })
-        .chain([save()])
-        .collect()
+/// The steps that submit `report` for `category` and "don't know" for every other category, and
+/// then save at the confirmation. "have written" is tested in `onboarding::judge`.
+fn only(category: Category, report: Report) -> Vec<Step> {
+    vec![form(&[(category, report, &[], "")]), save()]
 }
 
 fn elements_of(category: Category) -> impl Iterator<Item = Element> {
@@ -79,30 +63,38 @@ fn run(ui: &mut ScriptedUi, path: &Path, client: &FakeChatClient) -> Result<Outc
             router: &router,
         }),
         None,
+        Language::English,
     )
 }
 
 #[test]
-fn asks_the_ten_categories_in_order() {
+fn the_form_has_the_ten_categories_in_order_and_is_followed_by_the_confirmation() {
     let (_dir, path) = no_profile();
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(every_category(Report::DontKnow));
     run(&mut ui, &path, &FakeChatClient::new()).unwrap();
-    // Then the confirmation.
+    let titles: Vec<&str> = ui.forms()[0]
+        .form
+        .tabs
+        .iter()
+        .map(|tab| tab.title.as_str())
+        .collect();
+    let names: Vec<&str> = Category::ALL
+        .iter()
+        .map(|category| category.name())
+        .collect();
+    assert_eq!(titles, names);
     assert_eq!(
         ui.asked().len(),
-        Category::ALL.len() + 1,
-        "{:?}",
+        2,
+        "the form and the confirmation: {:?}",
         ui.asked()
     );
-    for (asked, category) in ui.asked().iter().zip(Category::ALL) {
-        assert!(asked.contains(category.name()), "{asked}");
-    }
 }
 
 #[test]
 fn can_read_makes_the_elements_of_the_category_seen_by_self_report() {
     let (_dir, path) = no_profile();
-    let mut ui = ScriptedUi::new(only(Category::SmartPointers, CAN_READ));
+    let mut ui = ScriptedUi::new(only(Category::SmartPointers, Report::CanRead));
     assert_eq!(
         run(&mut ui, &path, &FakeChatClient::new()),
         Ok(Outcome::Saved)
@@ -128,7 +120,7 @@ fn can_read_makes_the_elements_of_the_category_seen_by_self_report() {
 #[test]
 fn dont_know_leaves_the_elements_of_the_category_unknown() {
     let (_dir, path) = no_profile();
-    let mut ui = ScriptedUi::new(only(Category::SmartPointers, CAN_READ));
+    let mut ui = ScriptedUi::new(only(Category::SmartPointers, Report::CanRead));
     run(&mut ui, &path, &FakeChatClient::new()).unwrap();
     let profile = Profile::load(&path).unwrap();
     for category in Category::ALL
@@ -151,7 +143,7 @@ fn dont_know_leaves_the_elements_of_the_category_unknown() {
 fn all_dont_know_saves_a_profile_of_base_elements_only_without_calling_the_model() {
     let (_dir, path) = no_profile();
     let client = FakeChatClient::new();
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(every_category(Report::DontKnow));
     assert_eq!(run(&mut ui, &path, &client), Ok(Outcome::Saved));
     assert!(client.requests().is_empty(), "{:?}", client.requests());
     let profile = Profile::load(&path).unwrap();
@@ -164,7 +156,7 @@ fn all_dont_know_saves_a_profile_of_base_elements_only_without_calling_the_model
 fn the_profile_directory_is_created_when_it_does_not_exist() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("molt").join("profile.toml");
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(every_category(Report::DontKnow));
     assert_eq!(
         run(&mut ui, &path, &FakeChatClient::new()),
         Ok(Outcome::Saved)
@@ -182,7 +174,7 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
     let client = OpenAiClient::new(&api, |_| None).map_err(|error| error.to_string());
     let router = Router::new(&Config::default());
     let (_dir, path) = no_profile();
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(every_category(Report::DontKnow));
     let result = init(
         &mut ui,
         &path,
@@ -194,6 +186,7 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
             })
             .map_err(Clone::clone),
         None,
+        Language::English,
     );
     let error = result.unwrap_err();
     assert!(error.contains("MOLT_TEST_MISSING_API_KEY"), "{error}");
@@ -205,7 +198,7 @@ fn without_the_api_key_nothing_is_asked_and_no_profile_is_created() {
 fn declining_to_overwrite_an_existing_profile_changes_nothing() {
     let (_dir, path) = existing_profile();
     let mut steps = vec![Step::Confirm(false)];
-    steps.extend(every_category(DONT_KNOW));
+    steps.extend(every_category(Report::DontKnow));
     let mut ui = ScriptedUi::new(steps);
     assert_eq!(
         run(&mut ui, &path, &FakeChatClient::new()),
@@ -230,7 +223,7 @@ fn interrupting_the_overwrite_question_changes_nothing() {
 fn accepting_to_overwrite_replaces_the_existing_profile() {
     let (_dir, path) = existing_profile();
     let mut steps = vec![Step::Confirm(true)];
-    steps.extend(every_category(DONT_KNOW));
+    steps.extend(every_category(Report::DontKnow));
     let mut ui = ScriptedUi::new(steps);
     assert_eq!(
         run(&mut ui, &path, &FakeChatClient::new()),
@@ -241,9 +234,9 @@ fn accepting_to_overwrite_replaces_the_existing_profile() {
 }
 
 #[test]
-fn interrupting_the_report_saves_nothing() {
+fn interrupting_the_form_saves_nothing() {
     let (_dir, path) = no_profile();
-    let mut ui = ScriptedUi::new([CAN_READ, CAN_READ, Step::Interrupt]);
+    let mut ui = ScriptedUi::new([Step::Interrupt]);
     assert_eq!(
         run(&mut ui, &path, &FakeChatClient::new()),
         Ok(Outcome::Interrupted)

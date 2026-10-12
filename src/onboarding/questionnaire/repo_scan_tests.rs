@@ -5,15 +5,15 @@ use tempfile::TempDir;
 
 use crate::config::Config;
 use crate::llm::{ChatError, FakeChatClient, Router};
-use crate::onboarding::probe::Model;
+use crate::onboarding::form::Language;
+use crate::onboarding::judge::Model;
+use crate::onboarding::questionnaire::test_support::{every, form};
 use crate::onboarding::questionnaire::{Outcome, init};
-use crate::profile::element::Category;
+use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, Status};
-use crate::profile::store::{Profile, Timestamp};
+use crate::profile::store::{Profile, Report, Timestamp};
 use crate::repo_scan::*;
 use crate::ui::{ScriptedUi, Step};
-
-const DONT_KNOW: Step = Step::Select(3);
 
 /// A temporary directory holding a reference repository (`repo/`) and molt's place (`home/`).
 struct Setup {
@@ -47,12 +47,10 @@ impl Setup {
     }
 }
 
-/// The steps that answer every category with `step`, and then save at the confirmation (an
-/// empty line).
-fn every_category(step: Step) -> Vec<Step> {
-    let mut steps = vec![step; Category::ALL.len()];
-    steps.push(Step::Input(String::new()));
-    steps
+/// The steps that submit the form with "don't know" everywhere, and then save at the
+/// confirmation (an empty line).
+fn dont_know_everywhere() -> Vec<Step> {
+    vec![every(Report::DontKnow), Step::Input(String::new())]
 }
 
 /// Runs `molt init` answering "don't know" everywhere, with `repo` as the reference repository.
@@ -63,6 +61,7 @@ fn init_with(setup: &Setup, repo: Option<&Path>, steps: Vec<Step>) -> (ScriptedU
         &setup.profile(),
         model(&FakeChatClient::new()),
         repo,
+        Language::English,
     )
     .unwrap();
     (ui, outcome)
@@ -116,7 +115,7 @@ fn the_dependencies_of_cargo_toml_become_known_by_the_reference_repository() {
     let setup = Setup::new();
     setup.write("Cargo.toml", MANIFEST);
     setup.write("src/main.rs", "fn main() {}\n");
-    init_with(&setup, Some(&setup.repo()), every_category(DONT_KNOW));
+    init_with(&setup, Some(&setup.repo()), dont_know_everywhere());
 
     let profile = Profile::load(&setup.profile()).unwrap();
     let known = (Status::Known, Provenance::ReferenceRepo);
@@ -150,7 +149,7 @@ fn the_dependencies_of_workspace_members_become_known_too() {
 fn a_missing_path_is_reported_and_init_goes_on_without_a_reference() {
     let setup = Setup::new();
     let missing = setup.dir.path().join("no-such-repo");
-    let (ui, outcome) = init_with(&setup, Some(&missing), every_category(DONT_KNOW));
+    let (ui, outcome) = init_with(&setup, Some(&missing), dont_know_everywhere());
 
     assert_eq!(outcome, Outcome::Saved);
     assert!(
@@ -168,7 +167,7 @@ fn a_missing_path_is_reported_and_init_goes_on_without_a_reference() {
 fn a_path_that_is_not_a_cargo_project_is_reported_and_init_goes_on_without_a_reference() {
     let setup = Setup::new();
     setup.write("src/main.rs", "fn main() {}\n");
-    let (ui, outcome) = init_with(&setup, Some(&setup.repo()), every_category(DONT_KNOW));
+    let (ui, outcome) = init_with(&setup, Some(&setup.repo()), dont_know_everywhere());
 
     assert_eq!(outcome, Outcome::Saved);
     assert!(
@@ -188,7 +187,7 @@ fn a_path_that_is_not_a_cargo_project_is_reported_and_init_goes_on_without_a_ref
 fn a_cargo_toml_that_is_not_toml_is_reported_and_init_goes_on_without_a_reference() {
     let setup = Setup::new();
     setup.write("Cargo.toml", "[dependencies\ntokio = \"1\"\n");
-    let (ui, outcome) = init_with(&setup, Some(&setup.repo()), every_category(DONT_KNOW));
+    let (ui, outcome) = init_with(&setup, Some(&setup.repo()), dont_know_everywhere());
 
     assert_eq!(outcome, Outcome::Saved);
     assert!(
@@ -214,7 +213,7 @@ fn repo_scan_toml_keeps_the_path_and_line_of_up_to_three_places_per_element() {
         "src/b.rs",
         "use std::sync::Arc;\nfn two() -> Arc<u8> {\n    Arc::new(2)\n}\n",
     );
-    init_with(&setup, Some(&setup.repo()), every_category(DONT_KNOW));
+    init_with(&setup, Some(&setup.repo()), dont_know_everywhere());
 
     let scan = saved_scan(&setup);
     assert_eq!(
@@ -237,6 +236,28 @@ fn repo_scan_toml_keeps_the_path_and_line_of_up_to_three_places_per_element() {
     assert_eq!(
         scan.crates,
         ["json_five", "serde_json", "tempfile", "tokio"]
+    );
+}
+
+#[test]
+fn the_form_lists_the_places_the_reference_repository_uses_each_element() {
+    let setup = Setup::new();
+    setup.write("Cargo.toml", MANIFEST);
+    setup.write(
+        "src/lib.rs",
+        "pub fn f(s: &String) -> String {\n    s.clone()\n}\n",
+    );
+    let (ui, _) = init_with(&setup, Some(&setup.repo()), dont_know_everywhere());
+
+    let ownership = &ui.forms()[0].form.tabs[0];
+    let clone = ownership
+        .items
+        .iter()
+        .position(|item| item == "clone")
+        .unwrap();
+    assert_eq!(
+        ownership.material[clone],
+        ["`clone` in your repository: src/lib.rs:2"]
     );
 }
 
@@ -298,7 +319,7 @@ fn a_saved_repo_scan_toml_reads_back_the_same() {
 fn earlier_init(setup: &Setup) -> String {
     setup.write("Cargo.toml", MANIFEST);
     setup.write("src/lib.rs", "pub fn f() -> Option<u8> { None }\n");
-    init_with(setup, Some(&setup.repo()), every_category(DONT_KNOW));
+    init_with(setup, Some(&setup.repo()), dont_know_everywhere());
     fs::read_to_string(setup.scan_file()).unwrap()
 }
 
@@ -319,24 +340,30 @@ fn interrupting_init_leaves_repo_scan_toml_as_it_was() {
     let earlier = earlier_init(&setup);
     setup.write("Cargo.toml", "[dependencies]\nrand = \"0.9\"\n");
 
-    let mut steps = vec![Step::Confirm(true)];
-    steps.extend(every_category(DONT_KNOW).into_iter().take(3));
-    steps.push(Step::Interrupt);
+    let steps = vec![Step::Confirm(true), Step::Interrupt];
     let (_, outcome) = init_with(&setup, Some(&setup.repo()), steps);
     assert_eq!(outcome, Outcome::Interrupted);
     assert_eq!(fs::read_to_string(setup.scan_file()).unwrap(), earlier);
 }
 
 #[test]
-fn a_failure_before_the_save_leaves_repo_scan_toml_as_it_was() {
+fn a_failed_judgement_and_then_quitting_leaves_repo_scan_toml_as_it_was() {
     let setup = Setup::new();
     let earlier = earlier_init(&setup);
     let earlier_profile = fs::read_to_string(setup.profile()).unwrap();
     setup.write("Cargo.toml", "[dependencies]\nrand = \"0.9\"\n");
 
-    // "have written" for the first category, whose question fails at the API.
-    let mut steps = vec![Step::Confirm(true), Step::Select(1)];
-    steps.extend(every_category(DONT_KNOW).into_iter().skip(1));
+    // The judgement of ownership fails at the API; the user quits at the form opened again.
+    let steps = vec![
+        Step::Confirm(true),
+        form(&[(
+            Category::Ownership,
+            Report::HaveWritten,
+            &[Element::Clone],
+            "I clone.",
+        )]),
+        Step::Interrupt,
+    ];
     let client = FakeChatClient::new();
     client.push_chat(Err(ChatError::Status {
         status: 429,
@@ -348,9 +375,14 @@ fn a_failure_before_the_save_leaves_repo_scan_toml_as_it_was() {
         &setup.profile(),
         model(&client),
         Some(&setup.repo()),
+        Language::English,
     );
-    let error = result.unwrap_err();
-    assert!(error.contains("429"), "{error}");
+    assert_eq!(result, Ok(Outcome::Interrupted));
+    assert!(
+        ui.shown().iter().any(|shown| shown.contains("429")),
+        "{:?}",
+        ui.shown()
+    );
     assert_eq!(fs::read_to_string(setup.scan_file()).unwrap(), earlier);
     assert_eq!(
         fs::read_to_string(setup.profile()).unwrap(),
@@ -364,7 +396,7 @@ fn init_again_without_a_reference_removes_the_earlier_repo_scan_toml() {
     earlier_init(&setup);
 
     let mut steps = vec![Step::Confirm(true)];
-    steps.extend(every_category(DONT_KNOW));
+    steps.extend(dont_know_everywhere());
     let (ui, outcome) = init_with(&setup, None, steps);
     assert_eq!(outcome, Outcome::Saved);
     assert!(!setup.scan_file().exists());
@@ -384,7 +416,7 @@ fn init_again_with_a_repo_that_cannot_be_used_removes_the_earlier_repo_scan_toml
     let missing = setup.dir.path().join("no-such-repo");
 
     let mut steps = vec![Step::Confirm(true)];
-    steps.extend(every_category(DONT_KNOW));
+    steps.extend(dont_know_everywhere());
     let (_, outcome) = init_with(&setup, Some(&missing), steps);
     assert_eq!(outcome, Outcome::Saved);
     assert!(!setup.scan_file().exists());
@@ -397,7 +429,7 @@ fn init_again_with_a_reference_replaces_the_earlier_repo_scan_toml() {
     setup.write("Cargo.toml", "[dependencies]\nrand = \"0.9\"\n");
 
     let mut steps = vec![Step::Confirm(true)];
-    steps.extend(every_category(DONT_KNOW));
+    steps.extend(dont_know_everywhere());
     init_with(&setup, Some(&setup.repo()), steps);
     assert_eq!(saved_scan(&setup).crates, ["rand"]);
 }
@@ -410,12 +442,13 @@ fn a_repo_scan_toml_molt_did_not_write_stops_init_before_anything_is_saved() {
     let theirs = "# my own notes\nfoo = 1\n";
     fs::write(setup.scan_file(), theirs).unwrap();
 
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(dont_know_everywhere());
     let result = init(
         &mut ui,
         &setup.profile(),
         model(&FakeChatClient::new()),
         Some(&setup.repo()),
+        Language::English,
     );
     let error = result.unwrap_err();
     assert!(error.contains("not a stock-taking molt wrote"), "{error}");
@@ -434,12 +467,13 @@ fn a_repo_scan_toml_that_is_a_symbolic_link_stops_init_before_anything_is_saved(
     fs::create_dir_all(setup.scan_file().parent().unwrap()).unwrap();
     std::os::unix::fs::symlink(&target, setup.scan_file()).unwrap();
 
-    let mut ui = ScriptedUi::new(every_category(DONT_KNOW));
+    let mut ui = ScriptedUi::new(dont_know_everywhere());
     let result = init(
         &mut ui,
         &setup.profile(),
         model(&FakeChatClient::new()),
         Some(&setup.repo()),
+        Language::English,
     );
     let error = result.unwrap_err();
     assert!(error.contains("symbolic link"), "{error}");

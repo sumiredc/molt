@@ -1,9 +1,11 @@
-//! The start of `molt init` (PRD UC1): the checks before anything is asked, the user's report
-//! per category, and saving the profile, once confirmed, with the stock-taking of the reference
-//! repository.
+//! `molt init` (PRD UC1): the checks before anything is asked, the stock-taking of the reference
+//! repository, the form, the judgement, and saving the profile, once confirmed, with the
+//! stock-taking.
 
 #[cfg(test)]
 mod repo_scan_tests;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(test)]
 mod tests;
 
@@ -11,18 +13,13 @@ use std::fs;
 use std::path::Path;
 
 use super::confirm::{self, Confirmed};
-use super::probe::{self, Judgement, Model, Stopped};
-use crate::profile::element::{Category, Element};
+use super::form::{self, CategoryAnswer, Language};
+use super::judge::{self, Judgement, Model, Stopped};
+use crate::profile::element::Category;
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, Report, Timestamp};
 use crate::repo_scan::{self, RepoScan, Stored};
 use crate::ui::Ui;
-
-/// The answers offered for each category, in the order of [`REPORTS`].
-const ANSWERS: [&str; 3] = ["have written", "can read", "don't know"];
-
-/// The report each of [`ANSWERS`] stands for.
-const REPORTS: [Report; 3] = [Report::HaveWritten, Report::CanRead, Report::DontKnow];
 
 /// How `molt init` ended without an error.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,20 +37,20 @@ pub enum Outcome {
 /// `model` is the result of creating the client for the configured endpoint. When it could not
 /// be created (e.g. the endpoint needs an API key and its environment variable is unset), nothing
 /// is asked and no profile is created. Otherwise an existing profile is overwritten only when the
-/// user says yes, and the user reports on each category. After the report, the reference
-/// repository `repo` (`--repo`) is taken stock of; when it cannot be used, that is said and init
-/// goes on without it. The model is called only for the categories reported "have written", in
-/// the Q&A ([`probe`]). Before saving, the user confirms the profile and may correct it
-/// ([`confirm`]).
+/// user says yes, and the reference repository `repo` (`--repo`) is taken stock of; when it cannot
+/// be used, that is said and init goes on without it. Then the user fills in the form in
+/// `language`, and the categories sent are judged ([`judge`]); when the judgement fails with the
+/// API, the cause is shown and the form opens again with everything as submitted. Before saving,
+/// the user confirms the profile and may correct it ([`confirm`]).
 ///
-/// The profile and `repo-scan.toml` beside it are written only at the end, together: an error
-/// (including an API failure during the Q&A), declining to overwrite or interrupting (also at the
-/// confirmation) leaves both as they were.
+/// The profile and `repo-scan.toml` beside it are written only at the end, together: an error,
+/// declining to overwrite or interrupting (also at the confirmation) leaves both as they were.
 pub fn init(
     ui: &mut dyn Ui,
     profile_path: &Path,
     model: Result<Model<'_>, String>,
     repo: Option<&Path>,
+    language: Language,
 ) -> Result<Outcome, String> {
     let model = model?;
     // Checked again just before saving; here so that the user is not asked anything in vain.
@@ -75,28 +72,43 @@ pub fn init(
         }
     }
 
-    let Some(reports) = ask(ui)? else {
-        return Ok(interrupted(ui));
-    };
-
     let at = Timestamp::now();
     let scan = repo.and_then(|repo| take_stock(ui, repo, at));
+    let form = form::build(language, scan.as_ref());
 
-    let have_written: Vec<_> = reports
-        .iter()
-        .filter(|(_, report)| *report == Report::HaveWritten)
-        .map(|&(category, _)| category)
-        .collect();
-    let judgements = if have_written.is_empty() {
-        Vec::new()
-    } else {
-        match probe::probe(ui, model, &have_written, scan.as_ref()) {
-            Ok(judgements) => judgements,
+    let mut submitted = None;
+    let (answers, judgements) = loop {
+        let Some(values) = ui
+            .form(&form, submitted.as_ref())
+            .map_err(|error| error.to_string())?
+        else {
+            return Ok(interrupted(ui));
+        };
+        let answers = form::read(&form, &values);
+        let sent: Vec<&CategoryAnswer> = answers.iter().filter(|answer| answer.sent()).collect();
+        if sent.is_empty() {
+            break (answers, Vec::new());
+        }
+        ui.show(&format!(
+            "Judging the answers about {} categories…",
+            sent.len()
+        ));
+        match judge::judge(ui, model, &sent) {
+            Ok(judgements) => break (answers, judgements),
             Err(Stopped::Interrupted) => return Ok(interrupted(ui)),
-            Err(Stopped::Failed(cause)) => return Err(format!("{cause}; no profile was saved")),
+            Err(Stopped::Failed(cause)) => {
+                ui.show(&format!(
+                    "{cause}. The form opens again with your answers; submit again, or press Ctrl-C to quit."
+                ));
+                submitted = Some(values);
+            }
         }
     };
 
+    let reports: Vec<(Category, Report)> = answers
+        .iter()
+        .map(|answer| (answer.category, answer.report))
+        .collect();
     let mut profile = from_reports(&reports, at)?;
     mark_judged_known(&mut profile, &judgements, at)?;
     if let Some(scan) = &scan {
@@ -112,26 +124,6 @@ pub fn init(
 fn interrupted(ui: &mut dyn Ui) -> Outcome {
     ui.show("Interrupted. The profile was not changed.");
     Outcome::Interrupted
-}
-
-/// Asks the user, category by category, to report how well they know it. Returns `None` when the
-/// user interrupted.
-fn ask(ui: &mut dyn Ui) -> Result<Option<Vec<(Category, Report)>>, String> {
-    ui.show("For each category, choose how well you know it.");
-    let mut reports = Vec::with_capacity(Category::ALL.len());
-    for category in Category::ALL {
-        let names: Vec<_> = category.elements().map(Element::name).collect();
-        ui.show(&format!("{category}: {}", names.join(", ")));
-        let prompt = format!("How well do you know {category}?");
-        match ui
-            .select(&prompt, &ANSWERS)
-            .map_err(|error| error.to_string())?
-        {
-            Some(index) => reports.push((category, REPORTS[index])),
-            None => return Ok(None),
-        }
-    }
-    Ok(Some(reports))
 }
 
 /// A new profile with `reports`: the elements of a category reported "can read" are `seen`, and
