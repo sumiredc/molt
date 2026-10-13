@@ -154,12 +154,13 @@ fn is_configuration_error(error: &ChatError) -> bool {
 
 /// 機能の欠落ではなく、確かめを止めるエラー（接続の失敗か設定の誤り）か。
 ///
-/// 届かない・タイムアウト（`Request`）、認証の拒否（401・403）、混雑（408・429）、
+/// 届かない（`Request`）、タイムアウト（`TimedOut`）、認証の拒否（401・403）、混雑（408・429）、
 /// エンドポイント側の障害（5xx）は、モデルが機能を持つかと関係なく起きるので、機能の判定に使わない。
 /// 中断（`Interrupted`）は、doctor が Ctrl-C を受けるハンドラを入れないので起きない。来たら同じく止める。
 fn is_connection_failure(error: &ChatError) -> bool {
     match error {
         ChatError::Request(_)
+        | ChatError::TimedOut { .. }
         | ChatError::MissingApiKey { .. }
         | ChatError::ApiKeyOverPlainHttp { .. }
         | ChatError::Interrupted => true,
@@ -788,6 +789,33 @@ reasoning_effort = false
             );
             assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG, "{code}");
         }
+    }
+
+    #[test]
+    fn doctor_reports_a_timeout_during_a_chat_as_a_connection_failure_and_leaves_config_untouched()
+    {
+        let env = env_with(Some(CONFIG));
+        let fake = fake_with([
+            passing(),
+            Replies {
+                chat: Err(ChatError::TimedOut { secs: 300 }),
+                ..passing()
+            },
+            passing(),
+        ]);
+
+        let (ok, output) = run_doctor(&env, &fake);
+
+        assert!(!ok, "{output}");
+        assert!(
+            output.contains("connection failed while checking generate"),
+            "{output}"
+        );
+        assert!(
+            output.contains("did not respond within 300 seconds"),
+            "{output}"
+        );
+        assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
     }
 
     // --- 5 項目の判定 ---

@@ -91,10 +91,13 @@ pub enum ChatError {
     /// API キーを TLS 無しの `http://` で loopback 以外のホストへ送ろうとした（PRD §3）。
     /// `env` は `api_key_env` の名前、`host` は `base_url` の `host:port`。キーの値は持たない。
     ApiKeyOverPlainHttp { env: String, host: String },
-    /// エンドポイントに届かない、タイムアウトした、応答を受け取り切れなかった。
+    /// エンドポイントに届かない、応答を受け取り切れなかった。
     /// クライアントを作れなかった（TLS の初期化など）ときも、まれにこれになる。
     /// `molt doctor` が機能の欠落と分けて「接続の失敗」として報告するのに使う。
     Request(reqwest::Error),
+    /// `[api]` の `timeout_secs`（`secs`）のうちに応答が返らなかった。遅い接続先でも、届かない
+    /// 接続先でもこれになる。`molt doctor` は [`ChatError::Request`] と同じく「接続の失敗」にする。
+    TimedOut { secs: u64 },
     /// エンドポイントが 2xx 以外を返した。`body` は応答の本文で、API キーは伏せてある。
     Status { status: u16, body: String },
     /// 応答の本文が chat API の形として読めない。
@@ -116,6 +119,11 @@ impl fmt::Display for ChatError {
                  use https, or set `api_key_env = \"\"` if the endpoint needs no API key"
             ),
             Self::Request(source) => write!(f, "request to the chat API failed: {source}"),
+            Self::TimedOut { secs } => write!(
+                f,
+                "the chat API did not respond within {secs} seconds; \
+                 if the endpoint is slow, raise timeout_secs under [api] in config.toml"
+            ),
             Self::Status { status, body } => {
                 write!(f, "the chat API returned HTTP {status}: {body}")
             }

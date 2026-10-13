@@ -60,6 +60,8 @@ molt が保証しないことは [PRD §4](PRD.ja.md#4-保証しないこと) �
 
 設定は molt のディレクトリの `config.toml` に置く。[`examples/config.toml`](examples/config.toml) に、そのディレクトリの場所（`MOLT_HOME`、`XDG_CONFIG_HOME`）、全キーと既定値、ローカルの接続先に向ける方法がある。API キーは `api_key_env` に書いた名前の環境変数から読む。
 
+molt は応答を 1 回につき `timeout_secs`（既定は 300）秒まで待つ。ローカルのモデルのように遅いモデルは、1 ファイルを書くのにそれより長くかかることがある。molt が `the chat API did not respond within 300 seconds` で止まったら、`[api]` の `timeout_secs` を延ばす。
+
 `MOLT_LOG` を空でも `0` でもない値にすると、LLM へのリクエスト本文も書き出す。書き出し先は molt のディレクトリの `sessions/<time>-<pid>.requests.jsonl` で、session log の `sessions/<time>-<pid>.jsonl` の隣に置かれ、`molt` を `/quit` か Ctrl-D で終えると両方のパスを表示する（[PRD §8.8](PRD.ja.md#88-永続化)）。
 
 ## モデル無しで試す
