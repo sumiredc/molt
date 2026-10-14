@@ -1,8 +1,9 @@
-//! The [`Ui`] for a person at a terminal (PRD §8.1). Questions go through rustyline: lines with
-//! history and editing, and choices and approvals as lines too, so that Ctrl-C means the same at
-//! every question (`Input::Interrupted` or no answer) and never ends molt by itself. What is shown
-//! goes through [`screen`], which keeps the status line and writes styles with crossterm, and the
-//! form is drawn with crossterm ([`form`]).
+//! The [`Ui`] for a person at a terminal (PRD §8.1). Lines go through rustyline, with history and
+//! editing, and so do approvals, so that Ctrl-C means the same at every question
+//! (`Input::Interrupted` or no answer) and never ends molt by itself. The choices at a boundary
+//! read keys with crossterm and hand a line to rustyline ([`choices`]). What is shown goes through
+//! [`screen`], which keeps the status line and writes styles with crossterm, and the form is drawn
+//! with crossterm ([`form`]).
 
 mod choices;
 mod form;
