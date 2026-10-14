@@ -149,53 +149,73 @@ pub(super) fn keys(
             }
             Action::Focus(_) | Action::None => {}
             Action::Choose(number) => {
-                if let KeyCode::Char(first) = key.code
-                    && events.pending()?
-                {
-                    return typed_after(events, first);
+                if let KeyCode::Char(first) = key.code {
+                    // Keys pressed behind the number make it a line; other events do not.
+                    let behind = pending(events)?;
+                    if behind.iter().any(is_press) {
+                        return Ok(typed_after(
+                            first,
+                            behind.into_iter().chain(pending(events)?),
+                        ));
+                    }
                 }
                 let at = offered.iter().position(|n| *n == number).unwrap_or(focus);
                 redraw(at)?;
                 return Ok(Keys::Picked(Picked::Choice(number)));
             }
-            Action::Line(first) => return typed_after(events, first),
+            Action::Line(first) => return Ok(typed_after(first, pending(events)?)),
             Action::Interrupt => return Ok(Keys::Picked(Picked::Interrupted)),
             Action::Eof => return Ok(Keys::Picked(Picked::Eof)),
         }
     }
 }
 
-/// The line started with `first`, and the keys already typed after it: they are read here, since
-/// crossterm may hold them where rustyline cannot read them. Lines pasted together become one,
-/// their breaks spaces; when the last of them ended with Enter, the line is typed whole.
-fn typed_after(events: &mut impl Events, first: char) -> io::Result<Keys> {
+/// The events that have come already, read without waiting. The keys among them are read here
+/// rather than by rustyline, since crossterm may hold them where rustyline cannot read them.
+fn pending(events: &mut impl Events) -> io::Result<Vec<Event>> {
+    let mut read = Vec::new();
+    while events.pending()? {
+        read.push(events.next()?);
+    }
+    Ok(read)
+}
+
+fn is_press(event: &Event) -> bool {
+    matches!(event, Event::Key(key) if key.kind == KeyEventKind::Press)
+}
+
+/// The line started with `first`, and `typed` after it. Lines pasted together become one, their
+/// breaks a space; when the last of them ended with Enter, the line is typed whole.
+fn typed_after(first: char, typed: impl IntoIterator<Item = Event>) -> Keys {
     let mut line = first.to_string();
     let mut entered = false;
-    while events.pending()? {
-        let Event::Key(key) = events.next()? else {
+    for event in typed {
+        let Event::Key(key) = event else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
             continue;
         }
-        if entered {
-            line.push(' ');
-            entered = false;
-        }
         match key.code {
             KeyCode::Enter => entered = true,
-            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => line.push(c),
+            KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if entered && !line.ends_with(' ') {
+                    line.push(' ');
+                }
+                entered = false;
+                line.push(c);
+            }
             KeyCode::Backspace => {
                 line.pop();
             }
             _ => {}
         }
     }
-    Ok(if entered {
+    if entered {
         Keys::Typed(line)
     } else {
         Keys::Line(line)
-    })
+    }
 }
 
 /// Draws the choices and the guide from where the cursor is, after moving up `above` rows to
@@ -391,6 +411,20 @@ mod tests {
             Keys::Typed("first second".to_owned())
         );
         assert_eq!(keys_of("first\nsec"), Keys::Line("first sec".to_owned()));
+        assert_eq!(keys_of("a\n\nb\n"), Keys::Typed("a b".to_owned()));
+    }
+
+    #[test]
+    fn a_number_with_only_a_release_behind_it_still_chooses() {
+        let mut released = key(KeyCode::Char('2'));
+        released.kind = KeyEventKind::Release;
+        let mut typed = Typed::of("2");
+        typed.0.push_back(Event::Key(released));
+        typed.0.push_back(Event::Resize(80, 24));
+
+        let picked = keys(&mut typed, &CHOICES, |_| Ok(())).unwrap();
+
+        assert_eq!(picked, Keys::Picked(Picked::Choice(2)));
     }
 
     #[test]
