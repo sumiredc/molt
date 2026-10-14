@@ -3,6 +3,7 @@
 //! model's Markdown rendered a line at a time. When stdout is not a terminal, nothing but the
 //! text is written: no spinner, style, cursor movement or `\r`. `NO_COLOR` turns off colors only.
 
+use std::ffi::OsStr;
 use std::io::{self, IsTerminal, Write};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -24,11 +25,60 @@ const TICK: Duration = Duration::from_millis(100);
 /// The output of a terminal, shared with the thread that turns the spinner.
 pub(super) struct Screen {
     state: Arc<Mutex<State>>,
+    style: Style,
+    renderer: Renderer,
+}
+
+/// How text is written to stdout.
+#[derive(Debug, Clone, Copy)]
+struct Style {
     /// Whether stdout is a terminal: styles, the spinner and moving the cursor.
     styled: bool,
-    /// Whether colors are written (a terminal, and no `NO_COLOR`).
+    /// Whether colors are written: a terminal, and `NO_COLOR` unset or empty.
     colors: bool,
-    renderer: Renderer,
+}
+
+impl Style {
+    fn new(terminal: bool, no_color: Option<&OsStr>) -> Self {
+        Self {
+            styled: terminal,
+            colors: terminal && no_color.is_none_or(OsStr::is_empty),
+        }
+    }
+
+    fn toned(self, tone: Tone, line: &str) -> String {
+        if !self.styled {
+            return line.to_owned();
+        }
+        match tone {
+            Tone::Normal => line.to_owned(),
+            Tone::Dim => line.dim().to_string(),
+            Tone::Bold => line.bold().to_string(),
+        }
+    }
+
+    fn span(self, span: &Span) -> String {
+        match span {
+            Span::Plain(text) => text.clone(),
+            Span::Bold(text) if self.styled => text.as_str().bold().to_string(),
+            Span::Italic(text) if self.styled => text.as_str().italic().to_string(),
+            Span::Code(text) if self.colors => text.as_str().cyan().to_string(),
+            Span::Bold(text) => format!("**{text}**"),
+            Span::Italic(text) => format!("*{text}*"),
+            Span::Code(text) => format!("`{text}`"),
+        }
+    }
+
+    /// `line` of the model's Markdown, rendered by `renderer`, or `None` for a fence, which is not
+    /// shown: the code's lines are dim instead.
+    fn markdown(self, renderer: &mut Renderer, line: &str) -> Option<String> {
+        Some(match renderer.line(line) {
+            Styled::Code(None) => return None,
+            Styled::Code(Some(code)) => self.toned(Tone::Dim, &format!("  {code}")),
+            Styled::Heading(text) => self.toned(Tone::Bold, &text),
+            Styled::Prose(spans) => spans.iter().map(|span| self.span(span)).collect(),
+        })
+    }
 }
 
 #[derive(Default)]
@@ -43,18 +93,16 @@ struct State {
 
 impl Screen {
     pub(super) fn new() -> Self {
-        let styled = io::stdout().is_terminal();
-        let colors = styled && std::env::var_os("NO_COLOR").is_none_or(|value| value.is_empty());
+        let no_color = std::env::var_os("NO_COLOR");
         Self {
             state: Arc::new(Mutex::new(State::default())),
-            styled,
-            colors,
+            style: Style::new(io::stdout().is_terminal(), no_color.as_deref()),
             renderer: Renderer::default(),
         }
     }
 
     pub(super) fn styled(&self) -> bool {
-        self.styled
+        self.style.styled
     }
 
     fn lock(&self) -> MutexGuard<'_, State> {
@@ -65,9 +113,9 @@ impl Screen {
     pub(super) fn print(&self, text: &str) {
         let mut state = self.lock();
         let mut out = io::stdout().lock();
-        clear(&mut state, &mut out, self.styled);
+        clear(&mut state, &mut out, self.style.styled);
         let _ = writeln!(out, "{text}");
-        draw(&mut state, &mut out, self.styled);
+        draw(&mut state, &mut out, self.style.styled);
         let _ = out.flush();
     }
 
@@ -75,41 +123,15 @@ impl Screen {
     pub(super) fn print_lines(&self, lines: &[(Tone, String)]) {
         let text: Vec<String> = lines
             .iter()
-            .map(|(tone, line)| self.toned(*tone, line))
+            .map(|(tone, line)| self.style.toned(*tone, line))
             .collect();
         self.print(&text.join("\n"));
     }
 
-    fn toned(&self, tone: Tone, line: &str) -> String {
-        if !self.styled {
-            return line.to_owned();
-        }
-        match tone {
-            Tone::Normal => line.to_owned(),
-            Tone::Dim => line.dim().to_string(),
-            Tone::Bold => line.bold().to_string(),
-        }
-    }
-
     /// Prints a line of the model's Markdown after `indent`, rendered.
     pub(super) fn markdown_line(&mut self, line: &str, indent: &str) {
-        let rendered = match self.renderer.line(line) {
-            // The fences are not shown: the code's lines are dim instead.
-            Styled::Code(None) => return,
-            Styled::Code(Some(code)) => self.toned(Tone::Dim, &format!("  {code}")),
-            Styled::Heading(text) => self.toned(Tone::Bold, &text),
-            Styled::Prose(spans) => spans.iter().map(|span| self.span(span)).collect(),
-        };
-        self.print(&format!("{indent}{rendered}"));
-    }
-
-    fn span(&self, span: &Span) -> String {
-        match span {
-            Span::Plain(text) => text.clone(),
-            Span::Bold(text) => text.as_str().bold().to_string(),
-            Span::Italic(text) => text.as_str().italic().to_string(),
-            Span::Code(text) if self.colors => text.as_str().cyan().to_string(),
-            Span::Code(text) => format!("`{text}`"),
+        if let Some(rendered) = self.style.markdown(&mut self.renderer, line) {
+            self.print(&format!("{indent}{rendered}"));
         }
     }
 
@@ -120,12 +142,12 @@ impl Screen {
 
     /// Shows what molt is doing, or takes the status line away (`None`). On a terminal only.
     pub(super) fn status(&self, doing: Option<&str>) {
-        if !self.styled {
+        if !self.style.styled {
             return;
         }
         let mut state = self.lock();
         let mut out = io::stdout().lock();
-        clear(&mut state, &mut out, self.styled);
+        clear(&mut state, &mut out, self.style.styled);
         state.doing = doing.map(|doing| {
             let since = match &state.doing {
                 // The seconds go on when only the words change.
@@ -134,7 +156,7 @@ impl Screen {
             };
             (doing.to_owned(), since)
         });
-        draw(&mut state, &mut out, self.styled);
+        draw(&mut state, &mut out, self.style.styled);
         let _ = out.flush();
         if state.doing.is_some() && !state.turning {
             state.turning = true;
@@ -197,4 +219,64 @@ fn draw(state: &mut State, out: &mut impl Write, styled: bool) {
     let line: String = line.chars().take(width.saturating_sub(1)).collect();
     let _ = write!(out, "{}", line.dim());
     state.drawn = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Whether `text` has an escape that sets a color (SGR 30–49, 90–107, or 38/48 with more).
+    fn has_color(text: &str) -> bool {
+        text.split("\x1b[").skip(1).any(|sequence| {
+            let params = sequence.split('m').next().unwrap_or_default();
+            params
+                .split(';')
+                .any(|param| matches!(param.parse::<u8>(), Ok(30..=49 | 90..=107)))
+        })
+    }
+
+    fn rendered(style: Style, lines: &[&str]) -> String {
+        let mut renderer = Renderer::default();
+        let mut text: Vec<String> = lines
+            .iter()
+            .filter_map(|line| style.markdown(&mut renderer, line))
+            .collect();
+        text.push(style.toned(Tone::Dim, "a side note"));
+        text.join("\n")
+    }
+
+    const MARKDOWN: [&str; 6] = [
+        "## Heading",
+        "Use `dbg!` **here**, *once*.",
+        "- item",
+        "```rust",
+        "fn main() {}",
+        "```",
+    ];
+
+    #[test]
+    fn with_no_color_a_terminal_gets_styles_but_no_color() {
+        let text = rendered(Style::new(true, Some(OsStr::new("1"))), &MARKDOWN);
+
+        assert!(text.contains('\x1b'), "dim and bold stay: {text:?}");
+        assert!(!has_color(&text), "{text:?}");
+    }
+
+    #[test]
+    fn an_empty_no_color_does_not_turn_colors_off_and_output_not_to_a_terminal_has_none() {
+        // The decision alone: crossterm reads `NO_COLOR` from the environment too, so the
+        // rendered colors depend on where the tests run.
+        assert!(Style::new(true, Some(OsStr::new(""))).colors);
+        assert!(Style::new(true, None).colors);
+        assert!(!Style::new(true, Some(OsStr::new("1"))).colors);
+        assert!(!Style::new(false, None).colors);
+    }
+
+    #[test]
+    fn output_that_is_not_a_terminal_has_no_escape_and_keeps_its_markers() {
+        let text = rendered(Style::new(false, None), &MARKDOWN);
+
+        assert!(!text.contains('\x1b') && !text.contains('\r'), "{text:?}");
+        assert!(text.contains("`dbg!` **here**, *once*"), "{text:?}");
+    }
 }
