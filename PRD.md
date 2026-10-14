@@ -179,7 +179,7 @@ flowchart TB
   classDef bad  fill:#fef2f2,stroke:#dc2626,color:#7f1d1d
 ```
 
-What to read from the figure: a compile failure is not a boundary. Every item that is not `known` reaches the user through a boundary; none is written around without the user's choice.
+What to read from the figure: a compile failure is not a boundary. Every item that is not `known` that molt writes reaches the user through a boundary. molt asks the model to write around an item only when the user chose ②.
 
 - Precondition: a profile exists. The current directory is a cargo project
 - Main flow: request → write → check → write to file → … → `cargo check` at the end of the turn → show the diff and the result. A write of only `known` items needs no approval and does not stop
@@ -188,7 +188,7 @@ What to read from the figure: a compile failure is not a boundary. Every item th
 - Alternative flow: `cargo check` fails → fix using the errors and start again from the check. Past the limit (8.4), show the error and the last state, then stop
 - Alternative flow: a crate the code uses is not yet in `Cargo.toml` → ask the user whether to `cargo add` it, and add it only when approved. `cargo add` of a crate that is not `known` is refused until a step using it has gone through a boundary resolved with ① or ④; the model is told to write that code first, so the user meets the crate's explanation before approving its addition
 - Exception flow: the model writes more in the same response after a step → those tool calls are not run, and the model is told the turn paused at a boundary
-- Exception flow: tool calls in one turn exceed the limit (8.4) → show the state so far and stop
+- Exception flow: tool calls between boundaries exceed the limit (8.4) → show the state so far and stop
 - Exception flow: not a cargo project → report it and stop
 - Exception flow: the API fails (auth, rate limit, network) → report the cause; files are not changed
 - Two molt instances on the same project are not assumed (section 4)
@@ -241,7 +241,7 @@ What to read from the figure: an item becomes `known` only through ① and ③. 
 - Main flow: explanation → questions (optional, unlimited) → choice → back to the main line. The explanation shows the step's changed lines, not the whole file. A step's items share one side line and one choice; the explanation groups them by category
 - Choice ①: the items become `known`, the step stays, and the main line continues using them
 - Choice ②: molt takes the step back (8.4), the items become `seen`, and the main line writes that part again without them. If it cannot, show why and stop
-- Choice ③: molt takes the step back and guides where to write what the step was to do. The user writes and sends `/done` → molt reads the user's lines, runs `cargo check`, and returns a review. `/done` fails only when the user's lines do not parse, or `cargo check` reports an error in a line the user changed (or cannot run); errors elsewhere, such as in a step before it that is not finished yet, are shown and do not stop it. Every item in the user's lines that is not `known` becomes `known` (provenance: wrote it themselves). If the step used a crate, the crate the user added to `Cargo.toml` becomes `known`
+- Choice ③: molt takes the step back and guides where to write what the step was to do. The user writes and sends `/done` → molt reads the user's lines, runs `cargo check`, and returns a review. `/done` fails only when the user's lines do not parse, or `cargo check` reports an error in a line the user changed (or cannot run); errors elsewhere, such as in a step before it that is not finished yet, are shown and do not stop it. An error the user's change causes in a line they did not change (a caller of a function whose arguments they changed) does not stop `/done` either; the `cargo check` at the end of the turn shows it. Every item in the user's lines that is not `known` becomes `known` (provenance: wrote it themselves). If the step used a crate, the crate the user added to `Cargo.toml` becomes `known`
 - Choice ④: the step stays, and the main line continues. Items that were `unknown` become `seen`; `seen` items stay as they are. The next step that uses them stops again, with a shorter explanation
 - Alternative flow: `/done` fails in ③ → show the result; the user fixes it and sends `/done` again, or switches to ① or ②. The profile is not changed until `/done` passes. ① after ③ tells the main line to write the step again, which then no longer stops for those items; ② after ③ tells it to write that part without them. Either way, the main line is also told to re-read the files the user changed in ③, which stay as the user left them. ④ is not offered after ③, since the step is no longer on disk
 - Alternative flow: `/done` without writing anything in ③ → report that there is no change and let the user choose again
@@ -403,8 +403,8 @@ Only one message enters the main line, in one of 4 forms, as the result of the w
 
 | Resolution | Message entering the main line | Profile |
 |---|---|---|
-| ① unlock | `BOUNDARY RESOLVED: unlock` + the item names. The step stays and the approach may proceed. After ③ took the step back, an instruction to write it again | known (unlocked) |
-| ② rewrite | `BOUNDARY RESOLVED: rewrite` + the item names + a one-line policy the light model made from the side-line transcript. The step was taken back; write that part again without the items | seen |
+| ① unlock | `BOUNDARY RESOLVED: unlock` + the item names. The step stays and the approach may proceed. After ③ took the step back, an instruction to write it again and to re-read the files the user changed | known (unlocked) |
+| ② rewrite | `BOUNDARY RESOLVED: rewrite` + the item names + a one-line policy the light model made from the side-line transcript. The step was taken back; write that part again without the items. After ③, also an instruction to re-read the files the user changed | seen |
 | ③ user_wrote | `BOUNDARY RESOLVED: user_wrote` + the item names. The step was taken back and the user wrote it; an instruction to re-read the files | known (wrote_themselves) |
 | ④ next | `BOUNDARY RESOLVED: next` + the item names. The step stays and the approach may proceed; the items still make a step when used again | seen (an unknown item) |
 
