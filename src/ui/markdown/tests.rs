@@ -145,3 +145,15 @@ fn bold_inside_japanese_text_is_bold() {
         ])]
     );
 }
+
+#[test]
+fn double_underscores_are_bold_outside_a_word() {
+    assert_eq!(
+        render(&["__init__ and __bold__"]),
+        [Styled::Prose(vec![
+            Span::Bold("init".to_owned()),
+            Span::Plain(" and ".to_owned()),
+            Span::Bold("bold".to_owned()),
+        ])]
+    );
+}

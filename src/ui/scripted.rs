@@ -205,7 +205,7 @@ impl ScriptedUi {
 
     fn print(&self, text: &str) {
         if self.echo {
-            println!("{text}");
+            println!("{}", super::printable(text));
         }
     }
 

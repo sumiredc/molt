@@ -164,7 +164,9 @@ fn emphasis(chars: &[char], at: usize) -> Option<(Span, usize)> {
             .enumerate()
             .all(|(i, c)| chars.get(at + i) == Some(&c))
     };
-    let marker = ["`", "**", "*", "_"].into_iter().find(|m| starts(m))?;
+    let marker = ["`", "**", "__", "*", "_"]
+        .into_iter()
+        .find(|m| starts(m))?;
     let width = marker.chars().count();
     let first = marker.chars().next()?;
     let inner_start = at + width;
@@ -186,7 +188,7 @@ fn emphasis(chars: &[char], at: usize) -> Option<(Span, usize)> {
             let inner: String = chars[inner_start..end].iter().collect();
             let span = match marker {
                 "`" => Span::Code(inner),
-                "**" => Span::Bold(inner),
+                "**" | "__" => Span::Bold(inner),
                 _ => Span::Italic(inner),
             };
             return Some((span, end + width));
