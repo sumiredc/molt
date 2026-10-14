@@ -961,8 +961,8 @@ mod tests {
         // ヘッダと本文の頭だけ返し、残りを送らない
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            // The whole request first: a response sent before it is read can reach the client
-            // while it still sends, which it takes as an unexpected message.
+            // The whole request first: a response that reaches the client before it has sent its
+            // request is taken as an unexpected message.
             read_request(&stream);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
@@ -1127,8 +1127,6 @@ mod tests {
         );
     }
 
-    /// 127.0.0.1 で 1 回だけリクエストを受け、本文を読んだあと、`events` の各行を `gap` おきに
-    /// server-sent events として送るサーバを立てる。戻り値は base URL と、受け取った本文を返す thread。
     /// Reads one request from `stream`, its headers and its body, and returns the body.
     fn read_request(stream: &TcpStream) -> Vec<u8> {
         let mut reader = BufReader::new(stream.try_clone().unwrap());
@@ -1151,6 +1149,8 @@ mod tests {
         body
     }
 
+    /// 127.0.0.1 で 1 回だけリクエストを受け、本文を読んだあと、`events` の各行を `gap` おきに
+    /// server-sent events として送るサーバを立てる。戻り値は base URL と、受け取った本文を返す thread。
     fn serve_stream(events: Vec<String>, gap: Duration) -> (String, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
