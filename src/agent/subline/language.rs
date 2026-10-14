@@ -119,9 +119,9 @@ fn side_line_requests() -> Vec<ChatRequest> {
     for text in ["answer", "explanation", "answer", "policy"] {
         client.push_chat(Ok(reply(text)));
     }
-    side.ask("what is it?", &log).unwrap();
-    side.explain(&log).unwrap();
-    side.ask("where does it print?", &log).unwrap();
+    side.ask("what is it?", &log, &mut |_| {}).unwrap();
+    side.explain(&log, &mut |_| {}).unwrap();
+    side.ask("where does it print?", &log, &mut |_| {}).unwrap();
     side.resolve(Choice::Rewrite, main_line.tools(), &log)
         .unwrap();
 
@@ -190,7 +190,7 @@ fn a_side_line_opened_after_rewrite_in_the_same_turn_quotes_the_request_the_user
     let mut side = main_line.side_line(again);
     client.push_chat(Ok(reply("explanation")));
 
-    side.explain(&SessionLog::disabled()).unwrap();
+    side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
 
     let request = client.requests().pop().unwrap();
     let [content] = user_messages(&request)[..] else {

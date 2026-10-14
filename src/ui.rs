@@ -64,8 +64,7 @@ pub trait Ui {
     /// Shows the model's `text`, each line after `indent`, Markdown rendered where it can be
     /// (PRD §8.1).
     fn show_markdown(&mut self, text: &str, indent: &str) {
-        let lines: Vec<String> = text.lines().map(|line| format!("{indent}{line}")).collect();
-        self.show(lines.join("\n").trim_end());
+        self.show(&indented(text, indent));
     }
 
     /// What molt is doing while the user waits (`Thinking…`), or `None` when it is done
@@ -83,6 +82,21 @@ pub trait Ui {
 
     /// The end of a text shown with [`Ui::stream_line`].
     fn end_stream(&mut self) {}
+}
+
+/// `text` with `indent` before each line that is not blank. A blank line stays empty.
+pub(crate) fn indented(text: &str, indent: &str) -> String {
+    text.trim_end()
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{indent}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// How a line is shown on a terminal (PRD §8.1).

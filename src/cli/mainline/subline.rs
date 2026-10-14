@@ -9,10 +9,17 @@ use crate::agent::mainline::{Boundary, MainLine};
 use crate::agent::subline::{Choice, Resolution, SubLine};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
-use crate::ui::{Input, Ui};
+use crate::ui::markdown::HoldFirstCode;
+use crate::ui::{Input, Tone, Ui};
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
+
+/// What the user is shown while the explanation comes, and while an answer comes (PRD §8.1).
+const EXPLAINING: &str = "Explaining…";
+/// What the user is shown while `/done` checks and reviews their lines (PRD §8.1).
+const CHECKING: &str = "Checking your lines…";
+pub(super) const THINKING: &str = "Thinking…";
 
 /// What the user can do on the side line (UC3).
 const HINT: &str = "Ask anything about it, as many times as you like. Type /choose to choose how to go on, \
@@ -46,9 +53,9 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
     )));
     if !side.explained() {
         // Before the explanation, which takes a while and refers to them (PRD §8.6).
-        ui.show(&indent(&step_text(side.boundary())));
-        match side.explain(agent.log()) {
-            Ok(explanation) => ui.show(&indent(&explanation)),
+        ui.show_lines(&step_lines(side.boundary()));
+        match explain(ui, side, agent) {
+            Ok(()) => {}
             Err(ChatError::Interrupted) => {
                 show_error_of(ui, agent.log());
                 return leave(ui, Left::Interrupted);
@@ -90,8 +97,8 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
                 } else if line.starts_with('/') {
                     ui.show(&indent(&format!("Unknown command {line}. {}", hint(side))));
                 } else {
-                    match side.ask(line, agent.log()) {
-                        Ok(answer) => ui.show(&indent(&answer)),
+                    match ask(ui, side, agent, line) {
+                        Ok(()) => {}
                         Err(ChatError::Interrupted) => {
                             show_error_of(ui, agent.log());
                             break Left::Interrupted;
@@ -114,6 +121,60 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
     leave(ui, left)
 }
 
+/// Gets the explanation and shows it (PRD §8.1). When the [`Ui`] streams, the items come first,
+/// the prose as it arrives with the first code block held back, and that block, the comparison,
+/// once the reply has come; otherwise the whole explanation once it has come.
+fn explain(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Result<(), ChatError> {
+    let streams = ui.streams();
+    if streams {
+        ui.show_markdown(&side.explanation_head(), "  ");
+    }
+    ui.status(Some(EXPLAINING));
+    let mut hold = HoldFirstCode::default();
+    let explained = side.explain(agent.log(), &mut |line| {
+        if streams && hold.passes(line) {
+            ui.stream_line(line, "  ");
+        }
+    });
+    if streams {
+        ui.end_stream();
+    }
+    ui.status(None);
+    let explanation = explained?;
+    match (streams, &explanation.tail) {
+        (true, Some(tail)) => ui.show_markdown(tail, "  "),
+        (true, None) => {}
+        (false, _) => ui.show_markdown(&explanation.to_string(), "  "),
+    }
+    Ok(())
+}
+
+/// Asks `question` and shows the answer: as it arrives when the [`Ui`] streams, otherwise once it
+/// has come (PRD §8.1).
+fn ask(
+    ui: &mut dyn Ui,
+    side: &mut SubLine,
+    agent: &MainLine,
+    question: &str,
+) -> Result<(), ChatError> {
+    let streams = ui.streams();
+    ui.status(Some(THINKING));
+    let answered = side.ask(question, agent.log(), &mut |line| {
+        if streams {
+            ui.stream_line(line, "  ");
+        }
+    });
+    if streams {
+        ui.end_stream();
+    }
+    ui.status(None);
+    let answer = answered?;
+    if !streams {
+        ui.show_markdown(&answer, "  ");
+    }
+    Ok(())
+}
+
 /// Shows the banner of leaving the side line, and returns `left`.
 fn leave(ui: &mut dyn Ui, left: Left) -> Left {
     ui.show(&banner("back to the main line"));
@@ -129,19 +190,48 @@ fn hint(side: &SubLine) -> &'static str {
     }
 }
 
-/// The step of `boundary` as the user is shown it on entering the side line (PRD §8.6): its file,
-/// then each changed line with its number.
-pub(super) fn step_text(boundary: &Boundary) -> String {
+/// The lines shown around each changed line of a step (PRD §8.6).
+const AROUND: usize = 2;
+
+/// The step of `boundary` as the user is shown it on entering the side line (PRD §8.6), indented:
+/// its file, then each changed line with [`AROUND`] lines before and after it, those dim, and `⋮`
+/// between parts that are apart, so that the numbers run on except at a `⋮`.
+pub(super) fn step_lines(boundary: &Boundary) -> Vec<(Tone, String)> {
     let step = &boundary.step;
-    let width = step
-        .lines
-        .last()
-        .map_or(1, |(line, _)| line.to_string().len());
-    let mut text = format!("The step molt wrote to {}:", step.path);
-    for (line, code) in &step.lines {
-        text.push_str(&format!("\n{line:>width$} | {code}"));
+    let text: Vec<&str> = step.after.lines().collect();
+    let changed: Vec<usize> = step.lines.iter().map(|(line, _)| *line).collect();
+    // 1-based numbers of the lines to show, in order.
+    let mut shown: Vec<usize> = Vec::new();
+    for &line in &changed {
+        let first = line.saturating_sub(AROUND).max(1);
+        let last = (line + AROUND).min(text.len());
+        for number in first..=last {
+            if shown.last().is_none_or(|&last| number > last) {
+                shown.push(number);
+            }
+        }
     }
-    text
+    let width = shown.last().map_or(1, |line| line.to_string().len());
+    let mut lines = vec![(
+        Tone::Normal,
+        format!("  The step molt wrote to {}:", step.path),
+    )];
+    let mut previous = None;
+    for number in shown {
+        if previous.is_some_and(|previous| number > previous + 1) {
+            lines.push((Tone::Dim, format!("  {:>width$} ⋮", "")));
+        }
+        previous = Some(number);
+        let tone = if changed.contains(&number) {
+            Tone::Normal
+        } else {
+            Tone::Dim
+        };
+        let code = text[number - 1];
+        let line = format!("  {number:>width$} | {code}");
+        lines.push((tone, line.trim_end().to_owned()));
+    }
+    lines
 }
 
 /// The side-line prompt (PRD §8.6), e.g. `molt [sub: arc, mutex]> `.
@@ -213,9 +303,9 @@ mod open {
         "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }";
     const SUB: &str = "molt [sub: dbg_macro]> ";
     const TAKEN: &str = "molt took the step back: src/main.rs is as it was before it.";
-    /// The explanation shown for the model's reply `explanation`, which has no code: the reply, then
-    /// the comparison of the step's lines with none within the profile.
-    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
+    /// The explanation shown for the model's reply `explanation`, which has no code, so no
+    /// comparison.
+    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation";
 
     fn write_main(id: &str) -> ChatResponse {
         ChatResponse {
@@ -289,6 +379,52 @@ mod open {
     }
 
     #[test]
+    fn where_text_streams_the_explanation_comes_as_it_arrives_and_its_code_after_the_prose() {
+        let client = stops_at_a_boundary_then(&[
+            "dbg! prints a value.\n```rust\nfn main() {}\n```\nIt returns it, too.",
+            "To stderr.\n\n```rust\neprintln!();\n```",
+        ]);
+        let dir = project_with_a_profile();
+        let profile = Profile::load(&dir.path().join("profile.toml")).unwrap();
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
+        let mut ui = ScriptedUi::new([
+            input("debug 1"),
+            input("where does it print?"),
+            input("/abort"),
+            input("/quit"),
+        ])
+        .streaming();
+
+        main_line(&mut ui, &mut agent);
+
+        let shown = ui.shown();
+        let at = shown.iter().position(|text| text == ENTER).unwrap();
+        assert_eq!(
+            shown[at + 1..at + 11],
+            [
+                STEP,
+                "  `dbg_macro` (macros)",
+                "  dbg! prints a value.",
+                "  It returns it, too.",
+                "  Without `dbg_macro`, within your profile:\n  ```rust\n  fn main() {}\n  ```",
+                HINT_SHOWN,
+                // An answer streams whole, its code included.
+                "  To stderr.",
+                "",
+                "  ```rust",
+                "  eprintln!();",
+            ],
+            "{shown:?}"
+        );
+        let statuses: Vec<Option<&str>> = ui.statuses().iter().map(Option::as_deref).collect();
+        assert!(statuses.contains(&Some("Explaining…")), "{statuses:?}");
+        assert!(statuses.contains(&Some("Thinking…")), "{statuses:?}");
+        assert_eq!(statuses.last(), Some(&None), "{statuses:?}");
+    }
+
+    #[test]
     fn a_boundary_opens_the_side_line_with_a_banner_its_prompt_and_the_explanation_indented() {
         let client = stops_at_a_boundary_then(&[
             "dbg! prints a value.\n\nIt returns it, too.\n\n```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```",
@@ -301,7 +437,7 @@ mod open {
             [
                 ENTER,
                 "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Without `dbg_macro`, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]
@@ -599,6 +735,60 @@ mod open {
             .collect();
         assert_eq!(warnings.len(), 1, "{shown:?}");
         assert_eq!(shown[warnings[0] - 1], EXPLAINED, "{shown:?}");
+    }
+
+    fn step_over(before: &str, after: &str) -> Boundary {
+        Boundary {
+            items: Vec::new(),
+            step: crate::agent::mainline::Step::new(
+                "src/main.rs".to_owned(),
+                Some(before.to_owned()),
+                after.to_owned(),
+            ),
+        }
+    }
+
+    #[test]
+    fn a_step_shows_2_dim_lines_around_each_changed_one_and_numbers_run_on_but_at_a_gap() {
+        let before: String = (1..=12).map(|n| format!("l{n}\n")).collect();
+        let after = before.replace("l3\n", "L3\n").replace("l11\n", "L11\n");
+
+        let lines = step_lines(&step_over(&before, &after));
+
+        use Tone::{Dim, Normal};
+        let expected: Vec<(Tone, String)> = [
+            (Normal, "  The step molt wrote to src/main.rs:"),
+            (Dim, "   1 | l1"),
+            (Dim, "   2 | l2"),
+            (Normal, "   3 | L3"),
+            (Dim, "   4 | l4"),
+            (Dim, "   5 | l5"),
+            (Dim, "     ⋮"),
+            (Dim, "   9 | l9"),
+            (Dim, "  10 | l10"),
+            (Normal, "  11 | L11"),
+            (Dim, "  12 | l12"),
+        ]
+        .into_iter()
+        .map(|(tone, line)| (tone, line.to_owned()))
+        .collect();
+        assert_eq!(lines, expected);
+    }
+
+    #[test]
+    fn parts_of_a_step_that_touch_are_shown_without_a_gap() {
+        let before = "a\nb\nc\nd\ne\nf\ng\nh\n";
+        let after = "A\nb\nc\nd\ne\nF\ng\nh\n";
+
+        let lines = step_lines(&step_over(before, after));
+
+        let numbers: Vec<&str> = lines[1..].iter().map(|(_, line)| line.trim()).collect();
+        assert_eq!(
+            numbers,
+            [
+                "1 | A", "2 | b", "3 | c", "4 | d", "5 | e", "6 | F", "7 | g", "8 | h"
+            ]
+        );
     }
 
     #[test]

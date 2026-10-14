@@ -148,6 +148,26 @@ mod tests {
     }
 
     #[test]
+    fn where_text_streams_each_line_is_shown_as_it_comes_with_code_folded() {
+        let mut ui = ScriptedUi::new([]).streaming();
+        let mut approver = UiApprover::new(&mut ui);
+        approver.working(Some("Thinking…"));
+        for line in [
+            "I will add this:",
+            "```rust",
+            "fn main() {}",
+            "fn f() {}",
+            "```",
+        ] {
+            approver.text(line);
+        }
+        approver.text_end();
+        approver.working(None);
+        assert_eq!(ui.shown(), ["I will add this:", "[code: 2 lines]"]);
+        assert_eq!(ui.statuses(), [Some("Thinking…".to_owned()), None]);
+    }
+
+    #[test]
     fn a_code_block_not_closed_is_folded_to_the_end_of_the_text() {
         let mut ui = ScriptedUi::new([]);
         let mut approver = UiApprover::new(&mut ui);

@@ -16,7 +16,7 @@ use crate::agent::mainline::{
     AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved, SPLIT_BUDGET,
     TOOL_CALL_BUDGET, TakenBack, Turn, TurnEnd,
 };
-use crate::agent::subline::{Choice, Resolution, Unresolved};
+use crate::agent::subline::{Choice, Resolution, SubLine, Unresolved};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
@@ -340,7 +340,7 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 withdraw(ui, agent);
                 return None;
             }
-            Left::Chose(choice) => match side.resolve(choice, agent.tools(), agent.log()) {
+            Left::Chose(choice) => match resolve_choice(ui, &mut side, agent, choice) {
                 Ok(resolution) => {
                     // When the turn went on to its end, the main line takes the next request
                     // (`None`). At another boundary, the side line opens there.
@@ -384,6 +384,20 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
             }
         }
     }
+}
+
+/// Turns the choice made on `side` into what the main line is handed, showing that molt waits
+/// while ② asks the model for its policy (PRD §8.1).
+fn resolve_choice(
+    ui: &mut dyn Ui,
+    side: &mut SubLine,
+    agent: &MainLine,
+    choice: Choice,
+) -> Result<Resolution, Unresolved> {
+    ui.status(Some(subline::THINKING));
+    let resolved = side.resolve(choice, agent.tools(), agent.log());
+    ui.status(None);
+    resolved
 }
 
 /// Ends the main line at a boundary (UC3's exception flow): takes the step back, unless ③ did
@@ -842,7 +856,7 @@ mod write {
                 "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.",
                 "── side line: dbg_macro ────────────────────────────────────",
                 "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.",
                 "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",

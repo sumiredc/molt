@@ -1,10 +1,11 @@
 //! The explanation the user is shown on opening the side line (PRD UC3): the items of the step,
 //! each once, with their category (PRD §11), then what they do in the step's lines, or for those
-//! the user has seen before a note that their idea is not explained again (PRD §7), then a
-//! comparison of the 2 ways to write the lines, the step's lines with the items and the lines the
-//! `reason` model wrote without them, then where the reference repository uses the items, from
-//! the stock-taking `molt init` kept beside the profile.
+//! the user has seen before a note that their idea is not explained again (PRD §7), then the
+//! lines the `reason` model wrote without the items, to compare with the step shown before the
+//! explanation, then where the reference repository uses the items, from the stock-taking
+//! `molt init` kept beside the profile.
 
+use std::fmt;
 use std::fs;
 use std::io;
 use std::path::Path;
@@ -16,10 +17,6 @@ use crate::profile::element::Element;
 use crate::profile::status::{ItemKey, Status};
 use crate::profile::store::Profile;
 use crate::repo_scan::{self, MAX_PLACES, RepoScan};
-
-/// Shown in place of the code without the items when the reply has none.
-pub(crate) const HARD_WITHIN_PROFILE: &str =
-    "Without them, within your profile: hard to write. The model found no good way to.";
 
 /// The items of `items` the user has seen before: `seen` in `profile` (PRD §7). A crate is seen
 /// when an entry of any spelling the checker takes for it ([`crate_key`]) is.
@@ -83,30 +80,76 @@ pub(crate) fn allowed(profile: &Profile) -> Vec<ItemKey> {
         .collect()
 }
 
-/// The explanation the user is shown, from the `reason` model's `reply` to the request for it:
-/// the items of `boundary` ([`heading`]), the note on those of them in `seen` ([`seen_before`]),
-/// the prose of the reply, then the step's lines at `boundary` and the first code block of the
-/// reply, the lines without the items. When the reply has no code block, or an empty one,
-/// [`HARD_WITHIN_PROFILE`] stands in for it. `similar`, where the reference repository uses the
-/// items ([`similar`]), comes last when there is one.
+/// The explanation the user is shown, in the parts the side line shows apart: `head` before the
+/// reply comes, `prose` as it comes, and `tail` once it has come (PRD §8.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Explanation {
+    /// The items of the boundary ([`heading`]), and the note on those the user has seen
+    /// ([`seen_before`]).
+    pub head: String,
+    /// The reply without its first code block.
+    pub prose: String,
+    /// The comparison, the first code block of the reply: the lines without the items, after the
+    /// step shown before the explanation. Then where the reference repository uses the items.
+    /// `None` when there is neither.
+    pub tail: Option<String>,
+}
+
+impl fmt::Display for Explanation {
+    /// The parts with a blank line between, as shown when the text is not streamed.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let parts = [
+            Some(self.head.as_str()),
+            Some(self.prose.as_str()),
+            self.tail.as_deref(),
+        ];
+        let parts: Vec<&str> = parts
+            .into_iter()
+            .flatten()
+            .filter(|part| !part.is_empty())
+            .collect();
+        f.write_str(&parts.join("\n\n"))
+    }
+}
+
+/// The [`Explanation::head`] of `items`, with the note on those in `seen`.
+pub(crate) fn head(items: &[ItemKey], seen: &[ItemKey]) -> String {
+    let mut head = heading(items);
+    if !seen.is_empty() {
+        head.push_str("\n\n");
+        head.push_str(&seen_before(seen));
+    }
+    head
+}
+
+/// The explanation of `boundary` from the `reason` model's `reply` to the request for it, with
+/// the note on the items in `seen`, and `similar`, where the reference repository uses the items
+/// ([`similar`]), when there is one. The comparison is left out when the reply has no code block,
+/// or an empty one (PRD §8.6).
 pub(crate) fn assemble(
     boundary: &Boundary,
     seen: &[ItemKey],
     reply: &str,
     similar: Option<&str>,
-) -> String {
-    let mut text = heading(&boundary.items);
-    text.push_str("\n\n");
-    if !seen.is_empty() {
-        text.push_str(&seen_before(seen));
-        text.push_str("\n\n");
+) -> Explanation {
+    let head = head(&boundary.items, seen);
+    let (prose, code) = split(reply);
+    let compared = code.map(|code| {
+        format!(
+            "Without {}, within your profile:\n{}",
+            names(&boundary.items),
+            rust_block(&code)
+        )
+    });
+    let tail: Vec<String> = compared
+        .into_iter()
+        .chain(similar.map(str::to_owned))
+        .collect();
+    Explanation {
+        head,
+        prose,
+        tail: (!tail.is_empty()).then(|| tail.join("\n\n")),
     }
-    text.push_str(&compare(boundary, reply));
-    if let Some(similar) = similar {
-        text.push_str("\n\n");
-        text.push_str(similar);
-    }
-    text
 }
 
 /// Where the reference repository uses the elements of `items` ([`similar`]), from the
@@ -175,35 +218,14 @@ pub(crate) fn similar(scan: &RepoScan, items: &[ItemKey]) -> Option<String> {
     Some(text)
 }
 
-/// The idea and the comparison of [`assemble`].
-fn compare(boundary: &Boundary, reply: &str) -> String {
-    let attempted = boundary.attempted_code();
-    let (prose, code) = split(reply);
-    let mut text = String::new();
-    if !prose.is_empty() {
-        text.push_str(&prose);
-        text.push_str("\n\n");
-    }
-    text.push_str(&format!(
-        "Two ways to write it\nWith {} (the step molt wrote):\n{}\n",
-        names(&boundary.items),
-        rust_block(attempted)
-    ));
-    match code {
-        Some(code) => {
-            text.push_str("Without them, within your profile:\n");
-            text.push_str(&rust_block(&code));
-        }
-        None => text.push_str(HARD_WITHIN_PROFILE),
-    }
-    text
-}
-
 /// The prose of `reply`, everything outside its first code block, and the code in that block,
 /// `None` when there is no block or nothing in it. A block left open runs to the end.
 fn split(reply: &str) -> (String, Option<String>) {
     let lines: Vec<&str> = reply.lines().collect();
-    let is_fence = |line: &&str| line.trim_start().starts_with("```");
+    let is_fence = |line: &&str| {
+        let line = line.trim_start();
+        line.starts_with("```") || line.starts_with("~~~")
+    };
     let Some(open) = lines.iter().position(is_fence) else {
         return (reply.trim().to_owned(), None);
     };
@@ -255,8 +277,6 @@ mod compare {
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
-
-    use super::HARD_WITHIN_PROFILE;
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     const WITHOUT_DBG: &str = "fn main() {\n    eprintln!(\"{}\", 1);\n}";
@@ -358,7 +378,10 @@ mod compare {
     fn explain(boundary: Boundary, reply: &str) -> (String, String) {
         let mut explanation = String::new();
         let sent = on_side_line(boundary, &Profile::new(), &[Some(reply)], |side| {
-            explanation = side.explain(&SessionLog::disabled()).unwrap();
+            explanation = side
+                .explain(&SessionLog::disabled(), &mut |_| {})
+                .unwrap()
+                .to_string();
         });
         (explanation, sent.into_iter().next().unwrap())
     }
@@ -386,7 +409,7 @@ mod compare {
         let mut sent = String::new();
 
         on_side_line(step_with_dbg(), &profile, &[Some("idea")], |side| {
-            side.explain(&SessionLog::disabled()).unwrap();
+            side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
         })
         .into_iter()
         .for_each(|text| sent = text);
@@ -409,7 +432,7 @@ mod compare {
         let mut sent = String::new();
 
         on_side_line(step_with_dbg(), &profile, &[Some("idea")], |side| {
-            side.explain(&SessionLog::disabled()).unwrap();
+            side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
         })
         .into_iter()
         .for_each(|text| sent = text);
@@ -425,8 +448,9 @@ mod compare {
             &Profile::new(),
             &[None, Some("answer")],
             |side| {
-                assert!(side.explain(&SessionLog::disabled()).is_err());
-                side.ask("what is it?", &SessionLog::disabled()).unwrap();
+                assert!(side.explain(&SessionLog::disabled(), &mut |_| {}).is_err());
+                side.ask("what is it?", &SessionLog::disabled(), &mut |_| {})
+                    .unwrap();
             },
         );
 
@@ -436,52 +460,53 @@ mod compare {
     }
 
     #[test]
-    fn the_explanation_compares_the_attempted_code_with_the_code_of_the_reply_without_the_items() {
+    fn the_explanation_shows_the_code_of_the_reply_without_the_items_and_not_the_step_again() {
         let reply = format!("dbg! prints a value and returns it.\n\n```rust\n{WITHOUT_DBG}\n```\n");
 
         let (explanation, _) = explain(step_with_dbg(), &reply);
 
         let idea = explanation.find("dbg! prints a value and returns it.");
-        let tried = explanation.find("    dbg!(1);");
+        let without = explanation.find("Without `dbg_macro`, within your profile:");
         let within = explanation.find("    eprintln!(\"{}\", 1);");
         assert!(
-            idea.is_some() && tried.is_some() && within.is_some(),
+            idea.is_some() && without.is_some() && within.is_some(),
             "{explanation}"
         );
-        assert!(idea < tried && tried < within, "{explanation}");
-        assert!(explanation.contains("`dbg_macro`"), "{explanation}");
-        assert!(!explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
+        assert!(idea < without && without < within, "{explanation}");
+        // The step was shown before the explanation (PRD §8.6).
+        assert!(!explanation.contains("dbg!(1);"), "{explanation}");
     }
 
     #[test]
-    fn a_reply_without_code_says_it_is_hard_to_write_within_the_profile() {
+    fn a_reply_without_code_has_no_comparison() {
         let (explanation, _) = explain(step_with_dbg(), "dbg! prints a value and returns it.");
 
-        assert!(
-            explanation.starts_with("`dbg_macro` (macros)\n\ndbg! prints a value and returns it."),
-            "{explanation}"
+        assert_eq!(
+            explanation,
+            "`dbg_macro` (macros)\n\ndbg! prints a value and returns it."
         );
-        assert!(explanation.contains("    dbg!(1);"), "{explanation}");
-        assert!(explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
     }
 
     #[test]
-    fn a_reply_with_an_empty_code_block_says_it_is_hard_to_write_within_the_profile() {
+    fn a_reply_with_an_empty_code_block_has_no_comparison() {
         let (explanation, _) = explain(step_with_dbg(), "dbg! prints a value.\n\n```rust\n```");
 
-        assert!(explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
+        assert!(
+            !explanation.contains("within your profile"),
+            "{explanation}"
+        );
+        assert!(!explanation.contains("```"), "{explanation}");
     }
 
     #[test]
     fn the_lines_of_the_step_are_the_attempted_code() {
-        let (explanation, sent) = explain(
+        let (_, sent) = explain(
             step_of("fn main() {\n    dbg!(2);\n}"),
             "dbg! prints a value.",
         );
 
         assert!(sent.contains(REWRITE), "{sent}");
-        assert!(explanation.contains("    dbg!(2);"), "{explanation}");
-        assert!(explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
+        assert!(sent.contains("    dbg!(2);"), "{sent}");
     }
 
     #[test]
@@ -505,9 +530,10 @@ mod compare {
             Some("debug 1"),
             &Profile::new(),
         );
-        side.explain(&SessionLog::disabled()).unwrap();
+        side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
 
-        side.ask("why?", &SessionLog::disabled()).unwrap();
+        side.ask("why?", &SessionLog::disabled(), &mut |_| {})
+            .unwrap();
 
         let request = client.requests().pop().unwrap();
         let Some(Message::Assistant { content, .. }) = request.messages.get(2) else {
@@ -631,7 +657,9 @@ mod similar {
             content: Some(reply.to_owned()),
             tool_calls: Vec::new(),
         }));
-        side.explain(&SessionLog::disabled()).unwrap()
+        side.explain(&SessionLog::disabled(), &mut |_| {})
+            .unwrap()
+            .to_string()
     }
 
     /// Where the profile is saved, in a directory of its own, with `repo_scan_toml` beside it when
@@ -656,7 +684,7 @@ mod similar {
         );
 
         let within = explanation
-            .find("Without them, within your profile:")
+            .find("Without `dbg_macro`, within your profile:")
             .unwrap();
         assert!(within < explanation.find(HEADING).unwrap(), "{explanation}");
         assert_eq!(
@@ -809,7 +837,10 @@ mod short {
     ) -> (String, Vec<String>) {
         let mut explanation = String::new();
         let sent = on_side_line(boundary, &profile_with(statuses), &[Some(reply)], |side| {
-            explanation = side.explain(&SessionLog::disabled()).unwrap();
+            explanation = side
+                .explain(&SessionLog::disabled(), &mut |_| {})
+                .unwrap()
+                .to_string();
         });
         (explanation, sent)
     }
@@ -836,7 +867,7 @@ mod short {
         let note = seen_before(&[dbg_macro()]);
         assert!(
             explanation.starts_with(&format!(
-                "`dbg_macro` (macros)\n\n{note}\n\nTwo ways to write it\n"
+                "`dbg_macro` (macros)\n\n{note}\n\nWithout `dbg_macro`, within your profile:\n"
             )),
             "{explanation}"
         );
@@ -899,7 +930,7 @@ mod short {
         assert!(!sent[0].contains(ANY_IDEA), "{}", sent[0]);
         assert!(
             explanation.starts_with(&format!(
-                "`crate:serde-json` (crates)\n\n{}\n\nTwo ways to write it\n",
+                "`crate:serde-json` (crates)\n\n{}\n\nWithout `crate:serde-json`, within your profile:\n",
                 seen_before(&["crate:serde-json".parse().unwrap()])
             )),
             "{explanation}"
@@ -1001,7 +1032,10 @@ mod merge {
             tool_calls: Vec::new(),
         }));
 
-        let explanation = side.explain(&SessionLog::disabled()).unwrap();
+        let explanation = side
+            .explain(&SessionLog::disabled(), &mut |_| {})
+            .unwrap()
+            .to_string();
 
         assert_eq!(client.requests().len(), before + 1, "one explanation");
         assert_eq!(
@@ -1027,7 +1061,7 @@ mod merge {
             step: Step::new("src/main.rs".to_owned(), None, "fn main() {}\n".to_owned()),
         };
 
-        let explanation = assemble(&boundary, &[], "idea", None);
+        let explanation = assemble(&boundary, &[], "idea", None).to_string();
 
         assert_eq!(
             explanation.lines().next(),
@@ -1045,7 +1079,7 @@ mod merge {
             step: Step::new("src/main.rs".to_owned(), None, "fn main() {}\n".to_owned()),
         };
 
-        let explanation = assemble(&boundary, &[], "idea", None);
+        let explanation = assemble(&boundary, &[], "idea", None).to_string();
 
         assert_eq!(
             explanation.lines().next(),

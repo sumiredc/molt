@@ -21,7 +21,10 @@ pub(super) fn guide(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -
     }
     side.start_writing(agent.tools());
     let log = agent.log();
-    match side.guide(log) {
+    ui.status(Some(super::THINKING));
+    let guidance = side.guide(log);
+    ui.status(None);
+    match guidance {
         Ok(guidance) => ui.show(&indent(&guidance)),
         Err(ChatError::Interrupted) => {
             show_error_of(ui, log);
@@ -47,7 +50,9 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
         ));
         return None;
     }
+    ui.status(Some(super::CHECKING));
     let done = agent.done(side);
+    ui.status(None);
     let shown = match done {
         Done::NoChange => {
             ui.show(&indent(&format!(

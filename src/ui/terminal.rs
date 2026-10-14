@@ -63,8 +63,7 @@ impl Ui for TerminalUi {
 
     fn show_markdown(&mut self, text: &str, indent: &str) {
         if !self.screen.styled() {
-            let lines: Vec<String> = text.lines().map(|line| format!("{indent}{line}")).collect();
-            self.screen.print(lines.join("\n").trim_end());
+            self.screen.print(&super::indented(text, indent));
             return;
         }
         for line in text.lines() {

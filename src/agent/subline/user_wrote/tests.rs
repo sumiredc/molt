@@ -511,7 +511,7 @@ fn the_guidance_is_asked_of_the_reason_model_and_the_side_line_is_writing_from_t
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let mut side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("explanation")));
-    side.explain(&SessionLog::disabled()).unwrap();
+    side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
     assert!(!side.is_writing());
     client.push_chat(Ok(reply("Write it in src/main.rs.")));
 
