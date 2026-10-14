@@ -75,7 +75,7 @@ pub trait Approver {
     fn tool_ran(&mut self, _line: &str) {}
 
     /// The choice made at a boundary was applied, and the turn goes on with it now: what it did
-    /// is shown before the rest of the turn (PRD UC3).
+    /// is shown before the rest of the turn (PRD §8.6).
     fn resolved(&mut self, _resolved: &Resolved<'_>) {}
 }
 
