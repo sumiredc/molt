@@ -10,7 +10,7 @@ use crate::agent::subline::{Choice, Resolution, SubLine};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
 use crate::ui::markdown::HoldFirstCode;
-use crate::ui::{Input, Tone, Ui};
+use crate::ui::{Picked, Tone, Ui};
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
@@ -23,13 +23,13 @@ const CHECKING: &str = "Checking your lines…";
 pub(super) const THINKING: &str = "Thinking…";
 
 /// What the user can do on the side line (UC3).
-const HINT: &str = "Ask anything about it, as many times as you like. Type /choose to choose how to go on, \
-     or /abort to withdraw the request.";
+const HINT: &str = "Ask anything about it, as many times as you like, or choose how to go on below. \
+     Type /abort to withdraw the request.";
 
 /// How the user left the side line.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) enum Left {
-    /// `/choose`, and the user chose ① or ②.
+    /// The user chose ①, ② or ④.
     Chose(Choice),
     /// ③, and `/done` passed: the outcome to hand back to the main line.
     Wrote(Resolution),
@@ -71,25 +71,30 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
     ui.show(&indent(hint(side)));
     let prompt = prompt(&side.boundary().items);
     let left = loop {
-        match ui.read_line(&prompt) {
-            Ok(Input::Line(line)) => {
+        // The choices are listed again each time: after an answer, a command, the guidance of ③ or
+        // a `/done` that did not pass (PRD §8.6).
+        let offered = resolve::offered(side);
+        let choices: Vec<(usize, &str)> = offered
+            .iter()
+            .map(|(choice, label)| (choice.number(), label.as_str()))
+            .collect();
+        match ui.choose(resolve::ASK, &choices, &prompt) {
+            Ok(Picked::Choice(number)) => {
+                match offered.iter().find(|(choice, _)| choice.number() == number) {
+                    Some((Choice::UserWrote, _)) => {
+                        if let Some(left) = user_wrote::guide(ui, side, agent) {
+                            break left;
+                        }
+                    }
+                    Some((choice, _)) => break Left::Chose(*choice),
+                    // The `Ui` returns only a number it listed.
+                    None => {}
+                }
+            }
+            Ok(Picked::Line(line)) => {
                 let line = line.trim();
                 if line == "/abort" {
                     break Left::Aborted;
-                } else if line == "/choose" {
-                    match resolve::choose(ui, side) {
-                        Ok(Some(Choice::UserWrote)) => {
-                            if let Some(left) = user_wrote::guide(ui, side, agent) {
-                                break left;
-                            }
-                        }
-                        Ok(Some(choice)) => break Left::Chose(choice),
-                        Ok(None) => ui.show(&indent(hint(side))),
-                        Err(error) => {
-                            eprintln!("{error}");
-                            return Left::Failed;
-                        }
-                    }
                 } else if line == "/done" {
                     if let Some(left) = user_wrote::done(ui, side, agent) {
                         break left;
@@ -111,8 +116,8 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
                     show_error_of(ui, agent.log());
                 }
             }
-            Ok(Input::Interrupted) => break Left::Interrupted,
-            Ok(Input::Eof) => break Left::Eof,
+            Ok(Picked::Interrupted) => break Left::Interrupted,
+            Ok(Picked::Eof) => break Left::Eof,
             Err(error) => {
                 eprintln!("{error}");
                 return Left::Failed;
@@ -301,7 +306,7 @@ mod open {
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     const ENTER: &str = "── side line: dbg_macro ────────────────────────────────────";
     const LEAVE: &str = "── back to the main line ───────────────────────────────────";
-    const HINT_SHOWN: &str = "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.";
+    const HINT_SHOWN: &str = "  Ask anything about it, as many times as you like, or choose how to go on below. Type /abort to withdraw the request.";
     const STOPPED: &str = "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.";
     /// The step of the boundary, as shown before the explanation.
     const STEP: &str =
@@ -535,6 +540,9 @@ mod open {
             ]
         );
         assert_eq!(client.requests().len(), 5, "a blank line is not a question");
+        // The choices are listed under the explanation, and again after each answer and after the
+        // blank line: every line here was typed at them.
+        assert_eq!(ui.listed(), vec![vec![1, 2, 3, 4]; 5]);
     }
 
     #[test]
@@ -647,6 +655,8 @@ mod open {
             last.contains("q1") && last.contains("answer 1"),
             "the same side line: {last}"
         );
+        // Listed under the explanation, after the answer, and on coming back with `/side`.
+        assert_eq!(ui.listed().len(), 4, "{:?}", ui.listed());
     }
 
     #[test]
@@ -935,7 +945,6 @@ mod open {
                 &cargo,
                 [
                     input("debug 1"),
-                    input("/choose"),
                     Step::Select(2),
                     input("/side"),
                     input("/abort"),

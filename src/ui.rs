@@ -1,9 +1,9 @@
-//! The boundary between molt and its user (PRD §8.2): reading a line, showing text, choosing one
-//! of several items and approving an operation.
+//! The boundary between molt and its user (PRD §8.2): reading a line, showing text, the choices
+//! at a boundary and approving an operation.
 //!
-//! `TerminalUi` talks to a person through rustyline (lines with history and editing, and choices
-//! and approvals as lines), and writes the status line, styles and the [`Form`] of `molt init`
-//! with crossterm (PRD §8.1).
+//! `TerminalUi` talks to a person through rustyline (lines with history and editing, and approvals
+//! as lines), and reads the keys at the choices and writes the status line, styles and the
+//! [`Form`] of `molt init` with crossterm (PRD §8.1).
 //! [`ScriptedUi`] answers from a script instead, so tests and `--ui-script` (PRD §8.6) run without
 //! a terminal.
 
@@ -40,9 +40,14 @@ pub trait Ui {
     /// Shows `text` followed by a line break.
     fn show(&mut self, text: &str);
 
-    /// Lets the user choose one of `items`. Returns its index, or `None` when the user
-    /// interrupted instead of choosing.
-    fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError>;
+    /// Lists `choices` under `prompt`, each with its number (`1` is ①), for the user to choose one
+    /// or to start a line at `line_prompt` instead: a question or a command (PRD §8.6).
+    fn choose(
+        &mut self,
+        prompt: &str,
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<Picked, UiError>;
 
     /// Asks a yes/no question. Returns the answer, or `None` when the user interrupted instead
     /// of answering.
@@ -117,6 +122,25 @@ pub(crate) fn indented(text: &str, indent: &str) -> String {
         .join("\n")
 }
 
+/// What the user did at the choices of [`Ui::choose`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Picked {
+    /// The number of the choice chosen (`1` is ①).
+    Choice(usize),
+    /// A line typed instead, without the line break. Empty when the user went back to the
+    /// choices.
+    Line(String),
+    /// Ctrl-C, at the choices or in the line.
+    Interrupted,
+    /// Ctrl-D, or the end of the input.
+    Eof,
+}
+
+/// `①` for 1, up to `④`.
+pub fn circled(number: usize) -> char {
+    char::from_u32(0x2460 + number.saturating_sub(1) as u32).unwrap_or('?')
+}
+
 /// How a line is shown on a terminal (PRD §8.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tone {
@@ -135,8 +159,8 @@ pub enum UiError {
     ScriptExhausted { asked: &'static str },
     /// The next step in the script answers a different kind of question.
     ScriptMismatch { asked: &'static str, step: Step },
-    /// The script chooses a number that is not one of the items (numbers start at 1).
-    SelectOutOfRange { number: usize, items: usize },
+    /// The script chooses a number that is not one of the choices listed.
+    ChoiceNotOffered { number: usize, offered: Vec<usize> },
     /// The script fills in a form with a different number of tabs.
     FormTabCount { tabs: usize, script: usize },
     /// The script chooses or checks a number that is not one in tab `tab` (numbers start at 1).
@@ -162,9 +186,14 @@ impl fmt::Display for UiError {
                 "the ui script was asked for {asked}, but its next step is {}",
                 step.kind()
             ),
-            UiError::SelectOutOfRange { number, items } => write!(
+            UiError::ChoiceNotOffered { number, offered } => write!(
                 f,
-                "the ui script selects {number}, but there are {items} items (numbered from 1)"
+                "the ui script selects {number}, but the choices listed are {}",
+                offered
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
             UiError::FormTabCount { tabs, script } => write!(
                 f,

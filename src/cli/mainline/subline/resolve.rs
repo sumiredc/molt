@@ -1,21 +1,20 @@
-//! The choice on the side line (PRD UC3): `/choose` lists the choices the side line offers by
-//! number, and the one chosen goes back to the main line (§8.5).
+//! The choices on the side line (PRD UC3, §8.6): listed under the explanation, numbered ① to ④,
+//! and the one chosen goes back to the main line (§8.5).
 
 use super::names;
 use crate::agent::subline::{Choice, SubLine};
 use crate::profile::status::ItemKey;
-use crate::ui::{Ui, UiError};
 
-/// What the choice is asked with.
-const ASK: &str = "How do you want to go on?";
+/// What the choices are listed under.
+pub(super) const ASK: &str = "How do you want to go on?";
 
-/// Lets the user choose one of the choices of `side`. `None` when the user interrupted instead.
-pub(super) fn choose(ui: &mut dyn Ui, side: &SubLine) -> Result<Option<Choice>, UiError> {
+/// The choices `side` offers now, each with its number and what it says.
+pub(super) fn offered(side: &SubLine) -> Vec<(Choice, String)> {
     let items = &side.boundary().items;
-    let choices = side.choices();
-    let labels: Vec<String> = choices.iter().map(|c| label(*c, items)).collect();
-    let labels: Vec<&str> = labels.iter().map(String::as_str).collect();
-    Ok(ui.select(ASK, &labels)?.map(|at| choices[at]))
+    side.choices()
+        .into_iter()
+        .map(|choice| (choice, label(choice, items)))
+        .collect()
 }
 
 fn label(choice: Choice, items: &[ItemKey]) -> String {
@@ -43,7 +42,7 @@ pub(super) fn recurred(items: &[ItemKey]) -> String {
     )
 }
 
-/// ① and ② on the side line through `/choose`, and what the main line does with them. Named so
+/// ① and ② at the choices of the side line, and what the main line does with them. Named so
 /// that `cargo test subline::resolve` selects them.
 #[cfg(test)]
 mod tests;

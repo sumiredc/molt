@@ -42,7 +42,7 @@ Type a request at `molt> `. Writes of what your profile has as `known` need no a
 
 ## Choosing at a boundary
 
-When code needs an item (a syntax element or a crate) your profile does not have as `known`, molt writes it as a small step: at most 3 such items and 30 changed lines. Right after the step it stops and opens a side line `molt [sub: <items>]> `, which shows the step's lines and explains them. Ask as many questions as you like; they never enter the main line. Then type `/choose` and pick one:
+When code needs an item (a syntax element or a crate) your profile does not have as `known`, molt writes it as a small step: at most 3 such items and 30 changed lines. Right after the step it stops and opens a side line `molt [sub: <items>]> `, which shows the step's lines and explains them. The choices are listed under the explanation: choose one with ↑↓ and Enter, or press its number. Typing anything else asks a question instead; ask as many as you like, they never enter the main line, and the choices come back after each answer:
 
 | Choice | What happens |
 |---|---|
@@ -80,7 +80,7 @@ molt --fake "$MOLT_SRC/examples/fake/one_pass.toml" --profile ./profile.toml
 Pass a copy of the profile, because choosing ① rewrites it. Then type:
 
 1. A request at `molt> `, such as `Print 1 to stderr with dbg! in src/main.rs.` (the script does not read it)
-2. `/choose` on the side line, then `1`
+2. `1` at the side line's choices
 3. `y` to `Stage and commit only the files molt changed?` and to `Commit with this message?`
 4. `/quit`
 
