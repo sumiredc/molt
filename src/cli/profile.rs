@@ -84,7 +84,7 @@ fn moved_note(path: &Path, profile: &Profile) -> Option<String> {
         ("were", "they are")
     };
     Some(format!(
-        "{}: {} {were} in `allow`, which molt no longer has (no element is written without asking unless it is `known`); {they} `known` now (manual). The file keeps this from its next save (`molt profile set`, or a choice on the side line)",
+        "{}: {} {were} in `allow`, which molt no longer has (no element is written without asking unless it is `known`); {they} `known` now (manual). molt keeps this in the file when it next saves the profile",
         path.display(),
         names.join(", ")
     ))
