@@ -6,11 +6,11 @@
 //!
 //! ```toml
 //! steps = [
-//!   { input = "add a function that sums a slice" },  # a line at the prompt
+//!   { input = "add a function that sums a slice" },  # a line, at a prompt or at the choices
 //!   { confirm = true },                              # yes (or false: no) to an approval
 //!   { select = 2 },                                  # ② at the choices of a boundary
 //!   "interrupt",                                     # Ctrl-C at any question
-//!   "eof",                                           # Ctrl-D at the prompt
+//!   "eof",                                           # Ctrl-D, at a prompt or at the choices
 //!   { form = [                                       # a form submitted, tab by tab:
 //!     { choice = 1, checked = [1, 3], answer = "…" }, # the choice, the checked items and the
 //!     { choice = 3 },                                #   answer, numbered from 1
@@ -137,6 +137,8 @@ pub struct ScriptedUi {
     /// Whether the model's text is taken a line at a time, as a terminal shows it.
     streaming: bool,
     statuses: Vec<Option<String>>,
+    /// The numbers of the choices listed at each [`Ui::choose`], in order.
+    listed: Vec<Vec<usize>>,
 }
 
 impl ScriptedUi {
@@ -150,6 +152,7 @@ impl ScriptedUi {
             echo: false,
             streaming: false,
             statuses: Vec::new(),
+            listed: Vec::new(),
         }
     }
 
@@ -159,6 +162,11 @@ impl ScriptedUi {
     pub fn streaming(mut self) -> Self {
         self.streaming = true;
         self
+    }
+
+    /// The numbers of the choices listed each time molt listed them ([`Ui::choose`]), in order.
+    pub fn listed(&self) -> &[Vec<usize>] {
+        &self.listed
     }
 
     /// What molt said it was doing while the user waited ([`Ui::status`]), in order.
@@ -265,6 +273,8 @@ impl Ui for ScriptedUi {
             Some(Step::Select(_)) | None => prompt,
             Some(_) => line_prompt,
         };
+        self.listed
+            .push(choices.iter().map(|(number, _)| *number).collect());
         let step = self.next("a choice", asked)?;
         self.print(prompt);
         for (at, (number, label)) in choices.iter().enumerate() {

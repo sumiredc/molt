@@ -256,8 +256,11 @@ impl<'a> SubLine<'a> {
         .into_iter()
         .filter(|choice| match choice {
             Choice::Rewrite => !self.recurred,
-            // After ③ took the step back, ① and ② switch from it (PRD §8.6).
-            Choice::UserWrote | Choice::Next => !self.taken_back,
+            // While the user writes in ③, ① and ② switch from it (PRD §8.6). ③ is offered again
+            // when its guidance was interrupted before the user could write.
+            Choice::UserWrote => !self.writing,
+            // After ③ took the step back, the step is not there to keep.
+            Choice::Next => !self.taken_back,
             Choice::Unlock => true,
         })
         .collect()

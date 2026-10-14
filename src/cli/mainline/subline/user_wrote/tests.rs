@@ -258,6 +258,8 @@ fn a_failed_check_on_done_is_shown_and_the_user_can_send_done_again() {
         "  Your profile is unchanged. Fix it and type /done again, or choose another way."
     );
     assert_eq!(saved(&dir), Some((Status::Known, Provenance::WroteIt)));
+    // After the guidance, and after the `/done` that did not pass, ① and ② are listed again.
+    assert_eq!(ui.listed(), [vec![1, 2, 3, 4], vec![1, 2], vec![1, 2]]);
 }
 
 #[test]
@@ -435,7 +437,10 @@ fn a_guidance_that_cannot_be_got_is_shown_and_the_user_still_writes() {
 #[test]
 fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing() {
     let dir = project_with_a_profile();
-    let client = stops_at_a_boundary_then(vec![Err(ChatError::Interrupted)]);
+    let client = stops_at_a_boundary_then(vec![
+        Err(ChatError::Interrupted),
+        Ok(reply("Write it here.")),
+    ]);
 
     let (code, ui) = run_in(
         &dir,
@@ -447,6 +452,7 @@ fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing(
             Step::Select(3),
             input("/side"),
             input("/done"),
+            Step::Select(3),
             input("/abort"),
             input("/quit"),
         ],
@@ -459,6 +465,10 @@ fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing(
         &ui,
         "  Choose ③ to write it yourself first, then type /done when you wrote it.",
     );
+    // The guidance never came, so the user was not writing: ③ is offered again, and gets it.
+    assert_eq!(ui.listed()[1..3], [vec![1, 2, 3], vec![1, 2, 3]]);
+    shown_at(&ui, "  Write it here.");
+    assert_eq!(ui.listed()[3], [1, 2]);
     assert_eq!(saved(&dir), None);
 }
 

@@ -73,6 +73,7 @@ pub(super) fn line(number: usize, label: &str, focused: bool) -> String {
 
 /// What the user did at the choices, as keys: picked, or started a line, which the caller reads
 /// once raw mode is left.
+#[derive(Debug, PartialEq, Eq)]
 pub(super) enum Keys {
     Picked(Picked),
     /// The line started: its first key and the keys already typed after it, as a paste brings.
@@ -81,36 +82,83 @@ pub(super) enum Keys {
     Typed(String),
 }
 
+/// Where the keys come from: the terminal, or a list of them in tests.
+pub(super) trait Events {
+    /// Whether a key has come already, without waiting for one.
+    fn pending(&mut self) -> io::Result<bool>;
+    /// The next event, waiting for it.
+    fn next(&mut self) -> io::Result<Event>;
+}
+
+/// The terminal's events, through crossterm.
+struct Terminal;
+
+impl Events for Terminal {
+    fn pending(&mut self) -> io::Result<bool> {
+        event::poll(Duration::ZERO)
+    }
+
+    fn next(&mut self) -> io::Result<Event> {
+        event::read()
+    }
+}
+
 /// Lists `choices` under `prompt` and reads keys until one chooses, starts a line, or
 /// interrupts. `styled` writes the choice in focus bold.
 pub(super) fn read(prompt: &str, choices: &[(usize, &str)], styled: bool) -> io::Result<Keys> {
     let mut out = io::stdout();
-    let offered: Vec<usize> = choices.iter().map(|(number, _)| *number).collect();
     let width = terminal::size().map_or(80, |(columns, _)| usize::from(columns).max(1));
     let _raw = Raw::enter()?;
-    // Keys typed while molt worked are not an answer to the choices.
-    while event::poll(Duration::ZERO)? {
-        event::read()?;
-    }
+    let mut events = Terminal;
+    drop_pending(&mut events)?;
     write!(out, "{prompt}\r\n")?;
+    let rows = draw(&mut out, choices, 0, styled, width, 0)?;
+    keys(&mut events, choices, |focus| {
+        draw(&mut out, choices, focus, styled, width, rows).map(|_| ())
+    })
+}
+
+/// Drops the keys typed while molt worked: they are not an answer to the choices (PRD §8.1).
+pub(super) fn drop_pending(events: &mut impl Events) -> io::Result<()> {
+    while events.pending()? {
+        events.next()?;
+    }
+    Ok(())
+}
+
+/// Reads keys at `choices` until one chooses, starts a line, or interrupts, calling `redraw` with
+/// the choice in focus when it moves or is chosen. A number that comes with more keys behind it,
+/// as a paste or an input method brings, starts a line instead of choosing (PRD §8.6).
+pub(super) fn keys(
+    events: &mut impl Events,
+    choices: &[(usize, &str)],
+    mut redraw: impl FnMut(usize) -> io::Result<()>,
+) -> io::Result<Keys> {
+    let offered: Vec<usize> = choices.iter().map(|(number, _)| *number).collect();
     let mut focus = 0;
-    let rows = draw(&mut out, choices, focus, styled, width, 0)?;
     loop {
-        let Event::Key(key) = event::read()? else {
+        // A change of the terminal's width is not followed: the rows to draw over are counted
+        // once (see [`draw`]).
+        let Event::Key(key) = events.next()? else {
             continue;
         };
         match action(&key, &offered, focus) {
             Action::Focus(at) if at != focus => {
                 focus = at;
-                draw(&mut out, choices, focus, styled, width, rows)?;
+                redraw(focus)?;
             }
             Action::Focus(_) | Action::None => {}
             Action::Choose(number) => {
+                if let KeyCode::Char(first) = key.code
+                    && events.pending()?
+                {
+                    return typed_after(events, first);
+                }
                 let at = offered.iter().position(|n| *n == number).unwrap_or(focus);
-                draw(&mut out, choices, at, styled, width, rows)?;
+                redraw(at)?;
                 return Ok(Keys::Picked(Picked::Choice(number)));
             }
-            Action::Line(first) => return typed_after(first),
+            Action::Line(first) => return typed_after(events, first),
             Action::Interrupt => return Ok(Keys::Picked(Picked::Interrupted)),
             Action::Eof => return Ok(Keys::Picked(Picked::Eof)),
         }
@@ -118,18 +166,24 @@ pub(super) fn read(prompt: &str, choices: &[(usize, &str)], styled: bool) -> io:
 }
 
 /// The line started with `first`, and the keys already typed after it: they are read here, since
-/// crossterm may hold them where rustyline cannot read them.
-fn typed_after(first: char) -> io::Result<Keys> {
+/// crossterm may hold them where rustyline cannot read them. Lines pasted together become one,
+/// their breaks spaces; when the last of them ended with Enter, the line is typed whole.
+fn typed_after(events: &mut impl Events, first: char) -> io::Result<Keys> {
     let mut line = first.to_string();
-    while event::poll(Duration::ZERO)? {
-        let Event::Key(key) = event::read()? else {
+    let mut entered = false;
+    while events.pending()? {
+        let Event::Key(key) = events.next()? else {
             continue;
         };
         if key.kind != KeyEventKind::Press {
             continue;
         }
+        if entered {
+            line.push(' ');
+            entered = false;
+        }
         match key.code {
-            KeyCode::Enter => return Ok(Keys::Typed(line)),
+            KeyCode::Enter => entered = true,
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => line.push(c),
             KeyCode::Backspace => {
                 line.pop();
@@ -137,12 +191,18 @@ fn typed_after(first: char) -> io::Result<Keys> {
             _ => {}
         }
     }
-    Ok(Keys::Line(line))
+    Ok(if entered {
+        Keys::Typed(line)
+    } else {
+        Keys::Line(line)
+    })
 }
 
 /// Draws the choices and the guide from where the cursor is, after moving up `above` rows to
 /// where they were drawn before. Returns the rows they take, the lines wider than the terminal
-/// wrapped: molt's words are English, so their width is their number of characters.
+/// wrapped. Each character is taken as 1 column: molt's words are English, and the item names
+/// ASCII. `①` to `④` are of ambiguous width, 2 columns on a terminal set to draw them wide, where
+/// a line that just fits may be counted a row short.
 fn draw(
     out: &mut impl Write,
     choices: &[(usize, &str)],
@@ -271,6 +331,66 @@ mod tests {
             "❯ ② Write it without them"
         );
         assert_eq!(line(4, "Next", false), "  ④ Next");
+    }
+
+    /// Keys that have all come already.
+    struct Typed(std::collections::VecDeque<Event>);
+
+    impl Typed {
+        fn of(text: &str) -> Self {
+            Self(
+                text.chars()
+                    .map(|c| match c {
+                        '\n' => key(KeyCode::Enter),
+                        c => key(KeyCode::Char(c)),
+                    })
+                    .map(Event::Key)
+                    .collect(),
+            )
+        }
+    }
+
+    impl Events for Typed {
+        fn pending(&mut self) -> io::Result<bool> {
+            Ok(!self.0.is_empty())
+        }
+
+        fn next(&mut self) -> io::Result<Event> {
+            Ok(self.0.pop_front().expect("a key left"))
+        }
+    }
+
+    const CHOICES: [(usize, &str); 3] = [(1, "a"), (2, "b"), (4, "d")];
+
+    fn keys_of(text: &str) -> Keys {
+        keys(&mut Typed::of(text), &CHOICES, |_| Ok(())).unwrap()
+    }
+
+    #[test]
+    fn keys_typed_before_the_choices_are_dropped() {
+        let mut typed = Typed::of("2\n");
+        drop_pending(&mut typed).unwrap();
+        assert!(typed.0.is_empty());
+    }
+
+    #[test]
+    fn a_number_alone_chooses_at_once() {
+        assert_eq!(keys_of("2"), Keys::Picked(Picked::Choice(2)));
+    }
+
+    #[test]
+    fn a_number_with_more_keys_behind_it_starts_a_line_with_them() {
+        assert_eq!(keys_of("2行目は？"), Keys::Line("2行目は？".to_owned()));
+    }
+
+    #[test]
+    fn a_line_pasted_with_enter_is_typed_whole_and_lines_pasted_together_become_one() {
+        assert_eq!(keys_of("why?\n"), Keys::Typed("why?".to_owned()));
+        assert_eq!(
+            keys_of("first\nsecond\n"),
+            Keys::Typed("first second".to_owned())
+        );
+        assert_eq!(keys_of("first\nsec"), Keys::Line("first sec".to_owned()));
     }
 
     #[test]

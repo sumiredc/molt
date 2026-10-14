@@ -33,8 +33,6 @@ impl TerminalUi {
         })
     }
 
-    /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
-    /// Ctrl-D: the user did not answer.
     /// The choices listed, and a line read at `line_prompt`: the number of a choice listed
     /// chooses it, and any other line is the line.
     fn choose_by_line(
@@ -72,6 +70,8 @@ impl TerminalUi {
         }
     }
 
+    /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
+    /// Ctrl-D: the user did not answer.
     fn read_answer(&mut self, prompt: &str) -> Result<Option<String>, UiError> {
         answer(self.editor.readline(prompt))
     }
@@ -134,7 +134,6 @@ impl Ui for TerminalUi {
         self.screen.end_markdown();
     }
 
-    /// Lists `items` numbered from 1 and reads a number, asking again until it is one of them.
     /// Keys choose when stdin and stdout are a terminal; otherwise a line chooses by number
     /// (PRD §8.6).
     fn choose(
@@ -163,6 +162,7 @@ impl Ui for TerminalUi {
         self.picked_line(read)
     }
 
+    /// Reads `y`/`yes` or `n`/`no` after `prompt`, asking again until it is one of them.
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
         // A prompt of several lines is printed, and only its last line stays beside the answer.
         let (head, last) = match prompt.rsplit_once('\n') {
@@ -219,7 +219,6 @@ fn confirm_answer(line: &str) -> Option<bool> {
     }
 }
 
-/// The index of the item numbered `line` (from 1) among `items` items, if it is one.
 /// The number of a choice listed that `line` is, as typed or full width.
 fn picked_number(line: &str, choices: &[(usize, &str)]) -> Option<usize> {
     let mut chars = line.trim().chars();
@@ -240,7 +239,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn ctrl_c_and_ctrl_d_at_a_confirmation_or_a_choice_are_no_answer() {
+    fn ctrl_c_and_ctrl_d_at_a_confirmation_are_no_answer() {
         assert_eq!(answer(Err(ReadlineError::Interrupted)).unwrap(), None);
         assert_eq!(answer(Err(ReadlineError::Eof)).unwrap(), None);
     }

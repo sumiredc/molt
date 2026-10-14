@@ -1244,6 +1244,31 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_of_reasoning_alone_that_keeps_arriving_past_timeout_secs_is_not_cut() {
+        let mut events: Vec<String> = (0..5)
+            .map(|_| sse(r#"{"reasoning_content":"thinking"}"#, None))
+            .collect();
+        events.push(sse(r#"{"content":"done"}"#, Some("stop")));
+        let (base_url, server) = serve_stream(events, Duration::from_millis(400));
+        let client = OpenAiClient::new(&api(&base_url, "", 1), no_env).unwrap();
+        let started = Instant::now();
+        let mut reasoning = 0;
+
+        let response = client
+            .chat_streamed(&streamed("m"), &mut |event| {
+                if event == StreamEvent::Reasoning {
+                    reasoning += 1;
+                }
+            })
+            .unwrap();
+
+        assert!(started.elapsed() > Duration::from_secs(2), "it took long");
+        assert_eq!(response.content.as_deref(), Some("done"));
+        assert_eq!(reasoning, 5);
+        server.join().unwrap();
+    }
+
+    #[test]
     fn a_stream_with_nothing_arriving_past_timeout_secs_is_timed_out() {
         let (base_url, _server) = serve_stream(
             vec![sse(r#"{"content":"late"}"#, Some("stop"))],

@@ -540,6 +540,9 @@ mod open {
             ]
         );
         assert_eq!(client.requests().len(), 5, "a blank line is not a question");
+        // The choices are listed under the explanation, and again after each answer and after the
+        // blank line: every line here was typed at them.
+        assert_eq!(ui.listed(), vec![vec![1, 2, 3, 4]; 5]);
     }
 
     #[test]
@@ -652,6 +655,8 @@ mod open {
             last.contains("q1") && last.contains("answer 1"),
             "the same side line: {last}"
         );
+        // Listed under the explanation, after the answer, and on coming back with `/side`.
+        assert_eq!(ui.listed().len(), 4, "{:?}", ui.listed());
     }
 
     #[test]
