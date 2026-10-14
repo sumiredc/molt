@@ -126,10 +126,10 @@ impl Blocks {
     }
 }
 
-/// The spans of a line of prose: `**bold**`, `*italic*` or `_italic_`, and `` `code` ``. Emphasis
-/// opens and closes only at the ends of a word, with no space just inside its markers, so that
-/// `snake_case_name`, `2 * 3` and `src/*.rs` stay as they are. A marker not closed on the line
-/// stays as it is.
+/// The spans of a line of prose: `**bold**`, `*italic*` or `_italic_`, and `` `code` ``, much as
+/// CommonMark reads them: no space just inside the markers, so that `2 * 3` stays as it is, and
+/// `_` not inside a word, so that `snake_case_name` does, while `*` may be (`これは**重要**です`).
+/// A marker not closed on the line stays as it is.
 fn spans(text: &str) -> Vec<Span> {
     let chars: Vec<char> = text.chars().collect();
     let mut spans = Vec::new();
@@ -170,18 +170,18 @@ fn emphasis(chars: &[char], at: usize) -> Option<(Span, usize)> {
     let inner_start = at + width;
     let word = |i: usize| chars.get(i).is_some_and(|c| c.is_alphanumeric());
     if marker != "`" {
-        // Emphasis opens at the start of a word: after a space or an opening bracket or quote,
-        // and before a character that is not a space.
-        let after_space =
-            at == 0 || chars[at - 1].is_whitespace() || "([{\"'".contains(chars[at - 1]);
-        if !after_space || chars.get(inner_start).is_none_or(|c| c.is_whitespace()) {
+        // Emphasis opens before a character that is not a space, and `_` not inside a word.
+        if chars.get(inner_start).is_none_or(|c| c.is_whitespace())
+            || (first == '_' && at > 0 && word(at - 1))
+        {
             return None;
         }
     }
     let mut end = inner_start + 1;
     while end + width <= chars.len() {
         let closes = (0..width).all(|i| chars[end + i] == first)
-            && (marker == "`" || (!chars[end - 1].is_whitespace() && !word(end + width)));
+            && (marker == "`"
+                || (!chars[end - 1].is_whitespace() && !(first == '_' && word(end + width))));
         if closes && end > inner_start {
             let inner: String = chars[inner_start..end].iter().collect();
             let span = match marker {

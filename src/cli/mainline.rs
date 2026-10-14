@@ -1064,6 +1064,37 @@ mod turn_end {
     }
 
     const PRINT_1: &str = "fn main() {\n    let _ = 1;\n}\n";
+
+    #[test]
+    fn the_summary_of_finish_is_shown_with_its_code_folded_after_the_check_was_waited_for() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", PRINT_1)));
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "f".to_owned(),
+                name: "finish".to_owned(),
+                arguments: json!({ "summary": "Wrote:\n```rust\nlet _ = 1;\n```" }).to_string(),
+            }],
+        }));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(true, "")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(ui.shown()[1], "Wrote:\n[code: 1 line]");
+        let statuses: Vec<Option<&str>> = ui.statuses().iter().map(Option::as_deref).collect();
+        assert!(
+            statuses.contains(&Some("Running cargo check…")),
+            "{statuses:?}"
+        );
+        assert_eq!(statuses.last(), Some(&None), "{statuses:?}");
+    }
     const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,3 @@\n-fn main() {}\n+fn main() {\n+    let _ = 1;\n+}";
 
     #[test]

@@ -171,6 +171,17 @@ fn after_a_turn_that_wrote_molt_shows_the_diff_and_the_message_and_commits_on_ye
         "{shown:?}"
     );
     assert_eq!(log(dir.path()), ["Print 1", "first"]);
+    // The waits for `cargo check` and for the message showed what molt was doing (PRD §8.1).
+    let statuses: Vec<Option<&str>> = ui.statuses().iter().map(Option::as_deref).collect();
+    assert!(
+        statuses.contains(&Some("Running cargo check…")),
+        "{statuses:?}"
+    );
+    assert!(
+        statuses.contains(&Some("Writing the commit message…")),
+        "{statuses:?}"
+    );
+    assert_eq!(statuses.last(), Some(&None), "{statuses:?}");
 }
 
 #[test]
@@ -288,6 +299,16 @@ fn with_the_last_check_failing_git_commit_warns_and_asks_before_anything_else() 
     assert_eq!(ui.asked()[1..], ["Commit anyway?", "molt> "]);
     assert!(shows(ui.shown(), "Not committed."));
     assert_eq!(log(dir.path()), ["first"]);
+    // The check `git_commit` ran for its warning showed what molt was doing (PRD §8.1).
+    let statuses: Vec<Option<&str>> = ui.statuses().iter().map(Option::as_deref).collect();
+    let checks = statuses
+        .iter()
+        .filter(|status| **status == Some("Running cargo check…"))
+        .count();
+    assert_eq!(
+        checks, 2,
+        "in git_commit and at the end of the turn: {statuses:?}"
+    );
 }
 
 #[test]

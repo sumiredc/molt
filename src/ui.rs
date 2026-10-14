@@ -85,8 +85,9 @@ pub trait Ui {
     fn end_stream(&mut self) {}
 }
 
-/// `text` without the control characters but tabs and line breaks: what the model wrote is shown
-/// as text, never as escapes that move the cursor or color the terminal (PRD §8.1).
+/// `text` without the control characters but tabs and line breaks. What is shown holds what the
+/// model wrote (its text, paths, commit messages, the code of a step or a diff), and is shown as
+/// text, never as escapes that move the cursor or color the terminal.
 pub(crate) fn printable(text: &str) -> std::borrow::Cow<'_, str> {
     if text
         .chars()

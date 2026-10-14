@@ -99,9 +99,9 @@ fn only_the_first_code_block_of_an_explanation_is_held_back() {
 #[test]
 fn emphasis_needs_a_character_that_is_not_a_space_inside_its_markers() {
     assert_eq!(
-        render(&["2 * 3 * 4 and src/*.rs or tests/*.rs"]),
+        render(&["2 * 3 * 4 is 24"]),
         [Styled::Prose(vec![Span::Plain(
-            "2 * 3 * 4 and src/*.rs or tests/*.rs".to_owned()
+            "2 * 3 * 4 is 24".to_owned()
         )])]
     );
 }
@@ -129,5 +129,19 @@ fn a_block_closes_only_at_a_fence_of_its_own_kind_with_nothing_after_it() {
             Styled::Code(None),
             Styled::Prose(vec![Span::Plain("after".to_owned())]),
         ]
+    );
+}
+
+#[test]
+fn bold_inside_japanese_text_is_bold() {
+    assert_eq!(
+        render(&["これは**重要**です（*注意*）"]),
+        [Styled::Prose(vec![
+            Span::Plain("これは".to_owned()),
+            Span::Bold("重要".to_owned()),
+            Span::Plain("です（".to_owned()),
+            Span::Italic("注意".to_owned()),
+            Span::Plain("）".to_owned()),
+        ])]
     );
 }

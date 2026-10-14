@@ -235,8 +235,9 @@ impl Ui for ScriptedUi {
     }
 
     fn show(&mut self, text: &str) {
-        self.print(text);
-        self.shown.push(text.to_owned());
+        let text = super::printable(text);
+        self.print(&text);
+        self.shown.push(text.into_owned());
     }
 
     fn status(&mut self, doing: Option<&str>) {

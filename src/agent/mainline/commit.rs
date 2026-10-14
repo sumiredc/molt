@@ -72,7 +72,9 @@ impl MainLine<'_> {
         };
         if progress.unchecked {
             // The end of the turn still checks: this check is for the warning only.
+            approver.working(Some("Running cargo check…"));
             let _ = self.checked();
+            approver.working(None);
         }
         self.update_changes(&mut turn.changes, progress);
         let mut candidates = self.uncommitted.clone();

@@ -55,11 +55,15 @@ impl Ui for TerminalUi {
     }
 
     fn show(&mut self, text: &str) {
-        self.screen.print(text);
+        self.screen.print(&super::printable(text));
     }
 
     fn show_lines(&mut self, lines: &[(Tone, String)]) {
-        self.screen.print_lines(lines);
+        let lines: Vec<(Tone, String)> = lines
+            .iter()
+            .map(|(tone, line)| (*tone, super::printable(line).into_owned()))
+            .collect();
+        self.screen.print_lines(&lines);
     }
 
     fn show_markdown(&mut self, text: &str, indent: &str) {
@@ -118,12 +122,12 @@ impl Ui for TerminalUi {
         };
         self.screen.status(None);
         if let Some(head) = head {
-            self.screen.print(head);
+            self.screen.print(&super::printable(head));
         }
         let question = if last.is_empty() {
             "[y/n] ".to_owned()
         } else {
-            format!("{last} [y/n] ")
+            format!("{} [y/n] ", super::printable(last))
         };
         loop {
             let Some(line) = self.read_answer(&question)? else {

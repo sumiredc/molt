@@ -214,6 +214,21 @@ mod tests {
     }
 
     #[test]
+    fn what_molt_is_doing_is_shown_again_after_asking() {
+        let mut ui = ScriptedUi::new([Step::Confirm(true)]);
+        let mut approver = UiApprover::new(&mut ui);
+        approver.working(Some("Running cargo add…"));
+        approver.confirm(&cargo_add());
+        assert_eq!(
+            ui.statuses(),
+            [
+                Some("Running cargo add…".to_owned()),
+                Some("Running cargo add…".to_owned())
+            ]
+        );
+    }
+
+    #[test]
     fn approver_asks_with_the_crate_name() {
         let mut ui = ScriptedUi::new([Step::Confirm(true)]);
         UiApprover::new(&mut ui).confirm(&cargo_add());
