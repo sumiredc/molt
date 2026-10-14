@@ -492,7 +492,7 @@ mod tests {
     use crate::llm::types::{ToolDefinition, parse_arguments};
 
     use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};
     use std::time::Instant;
 
@@ -961,6 +961,9 @@ mod tests {
         // ヘッダと本文の頭だけ返し、残りを送らない
         let server = thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // The whole request first: a response sent before it is read can reach the client
+            // while it still sends, which it takes as an unexpected message.
+            read_request(&stream);
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
                 .unwrap();
@@ -1126,28 +1129,34 @@ mod tests {
 
     /// 127.0.0.1 で 1 回だけリクエストを受け、本文を読んだあと、`events` の各行を `gap` おきに
     /// server-sent events として送るサーバを立てる。戻り値は base URL と、受け取った本文を返す thread。
+    /// Reads one request from `stream`, its headers and its body, and returns the body.
+    fn read_request(stream: &TcpStream) -> Vec<u8> {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            let line = line.trim_end();
+            if line.is_empty() {
+                break;
+            }
+            if let Some((key, value)) = line.split_once(':')
+                && key.trim().eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap();
+            }
+        }
+        let mut body = vec![0; length];
+        reader.read_exact(&mut body).unwrap();
+        body
+    }
+
     fn serve_stream(events: Vec<String>, gap: Duration) -> (String, JoinHandle<String>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
         let handle = thread::spawn(move || {
             let (stream, _) = listener.accept().unwrap();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let mut length = 0;
-            loop {
-                let mut line = String::new();
-                reader.read_line(&mut line).unwrap();
-                let line = line.trim_end();
-                if line.is_empty() {
-                    break;
-                }
-                if let Some((key, value)) = line.split_once(':')
-                    && key.trim().eq_ignore_ascii_case("content-length")
-                {
-                    length = value.trim().parse().unwrap();
-                }
-            }
-            let mut body = vec![0; length];
-            reader.read_exact(&mut body).unwrap();
+            let body = read_request(&stream);
             let mut stream = stream;
             let _ = write!(
                 stream,
