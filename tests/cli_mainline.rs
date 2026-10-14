@@ -120,6 +120,22 @@ fn quit_from_a_ui_script_ends_with_exit_code_0_without_a_terminal() {
 }
 
 #[test]
+fn an_older_profile_with_allow_is_read_with_the_note_and_left_as_it_was() {
+    let setup = Setup::new();
+    let older = "allow = [\"arc\"]\n";
+    fs::write(setup.profile(), older).unwrap();
+    let script = setup.script(r#"steps = [{ input = "/quit" }]"#);
+    let output = molt(&setup, &setup.project(), &setup.profile(), &script);
+    assert_eq!(output.status.code(), Some(0), "stderr: {}", stderr(&output));
+    assert!(
+        stderr(&output).contains("arc was in `allow`"),
+        "{}",
+        stderr(&output)
+    );
+    assert_eq!(fs::read_to_string(setup.profile()).unwrap(), older);
+}
+
+#[test]
 fn an_unreachable_api_is_reported_the_files_stay_and_the_prompt_comes_back() {
     let setup = Setup::new();
     let manifest = fs::read(setup.project().join("Cargo.toml")).unwrap();

@@ -177,7 +177,7 @@ fn the_profile_is_shown_per_category_with_status_provenance_and_the_reason_of_th
 }
 
 #[test]
-fn base_elements_are_shown_together_after_the_crates_and_not_in_their_category() {
+fn result_and_unwrap_are_shown_in_their_category() {
     let mut profile = Profile::new();
     profile.set_report(Category::ErrorHandling, Report::CanRead);
     for key in [element(Element::Result), element(Element::Unwrap)] {
@@ -195,13 +195,13 @@ fn base_elements_are_shown_together_after_the_crates_and_not_in_their_category()
     };
     let heading = |text: &str| lines.iter().position(|line| *line == text).unwrap();
     let error_handling = heading("error_handling (report: can_read)");
-    let base = heading("base elements (used regardless of status)");
-    let unwrap = find(&["unwrap", "seen", "self_report"]);
-    assert_eq!(unwrap.len(), 1, "{shown}");
-    assert!(error_handling < unwrap[0] && unwrap[0] < base, "{shown}");
-    let result = find(&["result", "seen", "self_report"]);
-    assert_eq!(result.len(), 1, "{shown}");
-    assert!(base < result[0], "{shown}");
+    let next = heading("iterators_closures");
+    for name in ["result", "unwrap"] {
+        let row = find(&[name, "seen", "self_report"]);
+        assert_eq!(row.len(), 1, "{shown}");
+        assert!(error_handling < row[0] && row[0] < next, "{shown}");
+    }
+    assert!(!shown.contains("regardless of status"), "{shown}");
 }
 
 #[test]
@@ -220,12 +220,6 @@ fn without_crates_the_crates_heading_is_not_shown() {
     let shown = ui.shown().join("\n");
     assert!(
         !shown.lines().any(|line| line.starts_with("crates")),
-        "{shown}"
-    );
-    assert!(
-        shown
-            .lines()
-            .any(|line| line == "base elements (used regardless of status)"),
         "{shown}"
     );
 }
@@ -434,7 +428,7 @@ fn the_end_of_the_input_at_the_confirmation_saves_nothing_as_an_interruption() {
 #[test]
 fn interrupting_the_confirmation_leaves_an_existing_profile_as_it_was() {
     let (_dir, path) = no_profile();
-    let existing = "# written by hand\ndeny = [\"option\"]\n";
+    let existing = "# written by hand\n[items.arc]\nstatus = \"known\"\nprovenance = \"manual\"\nat = 2026-10-10T12:34:56Z\n";
     fs::write(&path, existing).unwrap();
     let steps = vec![Step::Confirm(true), form(&[]), Step::Interrupt];
     let (_, outcome) = run_init(steps, &FakeChatClient::new(), &path, None);

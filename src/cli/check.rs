@@ -96,14 +96,17 @@ fn line(path: &Path, finding: &Finding) -> String {
 }
 
 /// The profile at `--profile` or in the molt directory. Without one, a profile
-/// of base elements only, and a note on stderr saying so.
+/// with nothing `known`, and a note on stderr saying so.
 fn load_profile(profile_flag: Option<&Path>) -> Result<Profile, String> {
     let path = super::profile::profile_path(profile_flag)?;
     match Profile::load(&path) {
-        Ok(profile) => Ok(profile),
+        Ok(profile) => {
+            super::profile::note_moved(&path, &profile);
+            Ok(profile)
+        }
         Err(StoreError::NotFound { path }) => {
             eprintln!(
-                "no profile at {}; checking with base elements only",
+                "no profile at {}; checking with nothing known",
                 path.display()
             );
             Ok(Profile::new())

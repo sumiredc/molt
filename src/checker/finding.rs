@@ -12,7 +12,7 @@ use crate::profile::store::Profile;
 /// the check itself reads no file and no environment variable.
 #[derive(Debug, Clone, Copy)]
 pub struct CheckContext<'a> {
-    /// Decides which items may be written: base elements and `known` items.
+    /// Decides which items may be written: the `known` ones.
     pub profile: &'a Profile,
     /// The project's own top-level modules. The first segment of a path naming
     /// one of them is not an external crate.
@@ -61,9 +61,9 @@ impl fmt::Display for ParseError {
 /// The result of checking one file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckReport {
-    /// Every item is a base element or `known`.
+    /// Every item is `known`.
     Clean,
-    /// The items that are neither base elements nor `known`, in line order.
+    /// The items that are not `known`, in line order.
     /// Never empty.
     OutOfProfile(Vec<Finding>),
     ParseError(ParseError),

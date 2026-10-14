@@ -871,10 +871,7 @@ mod write {
     fn a_rejection_is_not_shown_to_the_user() {
         let client = FakeChatClient::new();
         client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main(
-            "second",
-            "fn main() {\n    println!(\"1\");\n}\n",
-        )));
+        client.push_chat(Ok(write_main("second", "fn main() {\n    let _ = 1;\n}\n")));
         client.push_chat(Ok(reply("Printed 1.")));
         let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
 
@@ -889,7 +886,7 @@ mod write {
         assert!(
             fs::read_to_string(dir.path().join("src/main.rs"))
                 .unwrap()
-                .contains("println!")
+                .contains("let _ = 1;")
         );
     }
 
@@ -1031,8 +1028,8 @@ mod turn_end {
         ui
     }
 
-    const PRINT_1: &str = "fn main() {\n    println!(\"1\");\n}\n";
-    const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,3 @@\n-fn main() {}\n+fn main() {\n+    println!(\"1\");\n+}";
+    const PRINT_1: &str = "fn main() {\n    let _ = 1;\n}\n";
+    const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,3 @@\n-fn main() {}\n+fn main() {\n+    let _ = 1;\n+}";
 
     #[test]
     fn the_diff_of_the_written_file_and_the_passed_check_are_shown_after_the_reply() {
@@ -1141,7 +1138,7 @@ mod turn_end {
         profile
     }
 
-    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::to_string(&1);\n}\n";
+    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::Value::Null;\n}\n";
 
     #[test]
     fn approving_a_known_crate_missing_from_cargo_toml_adds_it() {
@@ -1229,10 +1226,7 @@ mod session_log {
         let logs = tempfile::tempdir().unwrap();
         let client = FakeChatClient::new();
         // A clean write, then `dbg!` twice: the second rejection is a boundary.
-        client.push_chat(Ok(write_main(
-            "clean",
-            "fn main() {\n    println!(\"1\");\n}\n",
-        )));
+        client.push_chat(Ok(write_main("clean", "fn main() {\n    let _ = 1;\n}\n")));
         client.push_chat(Ok(write_main("first", WITH_DBG)));
         client.push_chat(Ok(write_main("second", WITH_DBG)));
         let cargo = FakeCargo::new();
@@ -1545,7 +1539,7 @@ mod while_waiting {
     use crate::llm::{ChatError, ChatResponse, FakeChatClient, ToolCall};
     use crate::workspace::cargo::{CargoOutput, FakeCargo};
 
-    const PRINT_1: &str = "fn main() {\n    println!(\"1\");\n}\n";
+    const PRINT_1: &str = "fn main() {\n    let _ = 1;\n}\n";
 
     #[test]
     fn an_interruption_stops_the_turn_keeps_what_was_written_and_the_prompt_comes_back() {

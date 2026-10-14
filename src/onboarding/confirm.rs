@@ -66,10 +66,10 @@ pub(crate) fn confirm(ui: &mut dyn Ui, profile: &mut Profile) -> Result<Confirme
     }
 }
 
-/// The profile per category: each element that is not a base element with its status, its
+/// The profile per category: each element with its status, its
 /// provenance and, for the Q&A, the reason of the judgement; then the crates, if there are any (with
 /// no `--repo` there are none), under the reference repository they came from (the same for every
-/// crate, so shown once); then the base elements.
+/// crate, so shown once).
 fn table(profile: &Profile) -> String {
     let width = Element::ALL
         .iter()
@@ -101,7 +101,7 @@ fn table(profile: &Profile) -> String {
         let elements = Element::ALL
             .iter()
             .copied()
-            .filter(|&element| element.category() == category && !profile.is_base(element));
+            .filter(|&element| element.category() == category);
         for element in elements {
             row(&mut text, &ItemKey::Element(element));
         }
@@ -123,10 +123,6 @@ fn table(profile: &Profile) -> String {
         for key in crates {
             row(&mut text, key);
         }
-    }
-    writeln!(text, "base elements (used regardless of status)").unwrap();
-    for &element in Element::ALL.iter().filter(|&&e| profile.is_base(e)) {
-        row(&mut text, &ItemKey::Element(element));
     }
     text.trim_end().to_owned()
 }

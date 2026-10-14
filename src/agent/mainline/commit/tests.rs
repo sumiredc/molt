@@ -65,8 +65,8 @@ impl Approver for Answer {
 const MANIFEST: &str = "[package]\nname = \"demo\"\n\n[dependencies]\n";
 const LOCK: &str = "version = 4\n";
 const MAIN: &str = "fn main() {}\n";
-const PRINTS: &str = "fn main() {\n    println!(\"{}\", 1);\n}\n";
-const PRINTS_2: &str = "fn main() {\n    println!(\"{}\", 2);\n}\n";
+const PRINTS: &str = "fn main() {\n    let _ = 1;\n}\n";
+const PRINTS_2: &str = "fn main() {\n    let _ = 2;\n}\n";
 const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
 
 /// A cargo project in a tempdir.
@@ -341,7 +341,7 @@ fn the_proposal_shows_the_files_against_head_with_the_models_message() {
     assert!(
         proposal
             .diff
-            .contains("-fn main() {}\n+fn main() {\n+    println!(\"{}\", 1);\n+}\n"),
+            .contains("-fn main() {}\n+fn main() {\n+    let _ = 1;\n+}\n"),
         "{}",
         proposal.diff
     );
@@ -360,7 +360,7 @@ fn a_change_the_user_made_before_molt_changed_the_file_is_in_the_diff_the_commit
     client.push_chat(Ok(call(
         "edit",
         "edit_file",
-        json!({ "path": "src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() {\n    println!(\"{}\", 1);\n}" }),
+        json!({ "path": "src/main.rs", "old_string": "fn main() {}", "new_string": "fn main() {\n    let _ = 1;\n}" }),
     )));
     client.push_chat(Ok(reply("done")));
     let turn = main_line.turn("print 1", &mut Answer::no());
@@ -954,9 +954,7 @@ fn a_file_changed_again_after_its_commit_is_proposed_from_its_committed_content(
     };
     assert_eq!(proposal.files, ["src/main.rs"]);
     assert!(
-        proposal
-            .diff
-            .contains("-    println!(\"{}\", 1);\n+    println!(\"{}\", 2);\n"),
+        proposal.diff.contains("-    let _ = 1;\n+    let _ = 2;\n"),
         "{}",
         proposal.diff
     );
@@ -1085,7 +1083,7 @@ fn lines_the_user_wrote_in_3_without_passing_done_come_along_when_molt_changes_t
     client.push_chat(Ok(call(
         "edit",
         "edit_file",
-        json!({ "path": "src/main.rs", "old_string": "fn main() {", "new_string": "fn main() {\n    println!(\"{}\", 1);" }),
+        json!({ "path": "src/main.rs", "old_string": "fn main() {", "new_string": "fn main() {\n    let _ = 1;" }),
     )));
     client.push_chat(Ok(reply("done")));
     let resumed = main_line

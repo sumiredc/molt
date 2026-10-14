@@ -20,7 +20,7 @@ pub use finding::{CheckContext, CheckReport, Finding, ParseError};
 /// Checks `new`, the content about to be written to `path`, against
 /// `ctx.profile`.
 ///
-/// An element or crate is reported unless it is a base element or `known`.
+/// An element or crate is reported unless it is `known`.
 /// Content that does not parse (as Rust, or as TOML for a `Cargo.toml`) is
 /// `ParseError`, whatever else it contains and whichever lines changed.
 ///
@@ -100,7 +100,7 @@ pub(crate) fn undeclared_known_crates(
     names
 }
 
-/// Whether the content may use the item: a base element, or `known`. A crate
+/// Whether the content may use the item: whether it is `known`. A crate
 /// is looked up under every spelling `crates::crate_key` takes to its key
 /// (`crate:serde-json` for `serde_json`), and is `known` when one of them is
 /// and none is anything else: a spelling the user made `seen` or `unknown`
@@ -109,13 +109,11 @@ fn is_allowed(finding: &Finding, ctx: &CheckContext) -> bool {
     allows(ctx.profile, &finding.key)
 }
 
-/// Whether `profile` lets content use `item`, as [`check_file`] decides: a base element, or
-/// `known`. A crate is judged under its key (`crates::crate_key`), whatever spelling `item` has.
+/// Whether `profile` lets content use `item`, as [`check_file`] decides: whether it is `known`
+/// (PRD §2: no element is used without being `known`). A crate is judged under its key (`crates::crate_key`), whatever spelling `item` has.
 pub(crate) fn allows(profile: &Profile, item: &ItemKey) -> bool {
     match item {
-        ItemKey::Element(element) => {
-            profile.is_base(*element) || profile.status(item) == Status::Known
-        }
+        ItemKey::Element(_) => profile.status(item) == Status::Known,
         ItemKey::Crate(name) => {
             let item = crates::crate_key(name);
             let mut statuses = profile
@@ -172,13 +170,13 @@ mod tests {
     }
 
     #[test]
-    fn content_with_only_base_elements_is_clean() {
-        let report = check(&Profile::new(), "fn main() {\n    println!(\"hi\");\n}\n");
+    fn content_with_no_element_is_clean() {
+        let report = check(&Profile::new(), "fn main() {\n    let _ = 1;\n}\n");
         assert_eq!(report, CheckReport::Clean);
     }
 
     #[test]
-    fn an_element_that_is_neither_base_nor_known_is_reported_with_its_line() {
+    fn an_element_that_is_not_known_is_reported_with_its_line() {
         let report = check(&Profile::new(), "fn main() {\n    dbg!(1);\n}\n");
         assert_eq!(
             reported(&report),
@@ -204,14 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn a_base_element_in_deny_is_reported() {
-        let profile = with_status(Element::PrintMacro, Status::Unknown);
-        assert!(profile.deny().contains(&Element::PrintMacro));
-        let report = check(&profile, "fn main() {\n    println!(\"hi\");\n}\n");
+    fn println_is_reported_unless_known() {
+        let source = "fn main() {\n    println!(\"hi\");\n}\n";
         assert_eq!(
-            reported(&report),
+            reported(&check(&Profile::new(), source)),
             [(2, ItemKey::Element(Element::PrintMacro))]
         );
+        let known = with_status(Element::PrintMacro, Status::Known);
+        assert_eq!(check(&known, source), CheckReport::Clean);
     }
 
     #[test]
@@ -250,7 +248,7 @@ mod tests {
     }
 
     const MANIFEST: &str = "[package]\nname = \"demo\"\n\n[dependencies]\n";
-    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::to_string(&1);\n}\n";
+    const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::Value::Null;\n}\n";
 
     #[test]
     fn a_known_crate_the_manifest_does_not_declare_is_to_be_added() {
@@ -293,7 +291,7 @@ mod tests {
     fn a_crate_used_twice_is_to_be_added_once() {
         let profile = with_crate("serde_json", Status::Known);
         let source =
-            format!("{USES_SERDE_JSON}fn g() {{\n    let _ = serde_json::to_string(&2);\n}}\n");
+            format!("{USES_SERDE_JSON}fn g() {{\n    let _ = serde_json::Value::Null;\n}}\n");
         assert_eq!(undeclared(&profile, &source, MANIFEST), ["serde_json"]);
     }
 }

@@ -52,13 +52,42 @@ pub(super) fn profile_path(profile_flag: Option<&Path>) -> Result<PathBuf, Strin
 /// Reads the profile, turning a missing file into the prompt for `molt init`
 /// (UC5's exception flow).
 pub(super) fn load(path: &Path) -> Result<Profile, String> {
-    Profile::load(path).map_err(|error| match error {
+    let profile = Profile::load(path).map_err(|error| match error {
         StoreError::NotFound { path } => format!(
             "no profile at {}\nrun `molt init` to create one",
             path.display()
         ),
         error => error.to_string(),
-    })
+    })?;
+    note_moved(path, &profile);
+    Ok(profile)
+}
+
+/// Tells the user, on stderr, which elements reading the profile at `path`
+/// moved from `allow` to `known` (PRD §8.3), if any.
+pub(super) fn note_moved(path: &Path, profile: &Profile) {
+    if let Some(note) = moved_note(path, profile) {
+        eprintln!("{note}");
+    }
+}
+
+/// The note of [`note_moved`].
+fn moved_note(path: &Path, profile: &Profile) -> Option<String> {
+    let moved = profile.moved_from_allow();
+    if moved.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = moved.iter().map(|element| element.name()).collect();
+    let (were, they) = if names.len() == 1 {
+        ("was", "it is")
+    } else {
+        ("were", "they are")
+    };
+    Some(format!(
+        "{}: {} {were} in `allow`, which molt no longer has (no element is written without asking unless it is `known`); {they} `known` now (manual). molt keeps this in the file when it next saves the profile",
+        path.display(),
+        names.join(", ")
+    ))
 }
 
 fn show(path: &Path) -> Result<(), String> {
@@ -85,8 +114,7 @@ fn set(path: &Path, key: &str, status: &str) -> Result<(), String> {
 }
 
 /// The profile as `molt profile show` prints it: per category the status,
-/// provenance and time of each element that is not a base element, then the
-/// crates, then the base elements together, then the history.
+/// provenance and time of each element, then the crates, then the history.
 fn render(profile: &Profile) -> String {
     let width = Element::ALL
         .iter()
@@ -116,7 +144,7 @@ fn render(profile: &Profile) -> String {
             Some(report) => writeln!(text, "{category} (report: {report})").unwrap(),
             None => writeln!(text, "{category}").unwrap(),
         }
-        for element in category.elements().filter(|&e| !profile.is_base(e)) {
+        for element in category.elements() {
             row(&mut text, &ItemKey::Element(element));
         }
     }
@@ -124,12 +152,6 @@ fn render(profile: &Profile) -> String {
     writeln!(text, "crates").unwrap();
     for (key, _) in profile.entries().filter(|(key, _)| is_crate(key)) {
         row(&mut text, key);
-    }
-
-    // Their status column does not decide whether generation uses them.
-    writeln!(text, "base elements (used regardless of status)").unwrap();
-    for &element in Element::ALL.iter().filter(|&&e| profile.is_base(e)) {
-        row(&mut text, &ItemKey::Element(element));
     }
 
     writeln!(text, "history ({})", profile.history().len()).unwrap();

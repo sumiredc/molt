@@ -189,11 +189,26 @@ mod tests {
         reported
     }
 
-    /// What `check_file` reports for `new` as a new file, with an empty
-    /// profile.
+    /// What `check_file` reports for `new` as a new file, with a profile that
+    /// knows what most code needs ([`EVERYDAY`]), so that the findings are
+    /// the ones a test is about.
     fn check(new: &str) -> Vec<(usize, ItemKey)> {
-        check_with(&Profile::new(), "", new)
+        check_with(&denying(&[]), "", new)
     }
+
+    /// Elements most code uses, `known` in the profile of [`check`].
+    const EVERYDAY: &[Element] = &[
+        Element::SharedRef,
+        Element::Result,
+        Element::Option,
+        Element::QuestionMark,
+        Element::ForLoop,
+        Element::Range,
+        Element::PrintMacro,
+        Element::FormatMacro,
+        Element::VecMacro,
+        Element::AssertMacro,
+    ];
 
     /// `findings` sorted as `check_with` sorts them.
     fn sorted<const N: usize>(findings: [(usize, ItemKey); N]) -> Vec<(usize, ItemKey)> {
@@ -207,15 +222,15 @@ mod tests {
         format!("fn f() {{\n    {body}\n}}\n")
     }
 
-    /// A profile in which the base elements `denied` are `unknown`, and so
-    /// reported.
+    /// A profile in which the elements of [`EVERYDAY`] but `denied` are
+    /// `known`, and `denied` are reported.
     fn denying(denied: &[Element]) -> Profile {
         let mut profile = Profile::new();
-        for element in denied {
+        for element in EVERYDAY.iter().filter(|e| !denied.contains(e)) {
             profile
                 .transition(
                     ItemKey::Element(*element),
-                    Status::Unknown,
+                    Status::Known,
                     Provenance::Manual,
                     Timestamp::from_unix_seconds(0),
                     None,

@@ -69,8 +69,8 @@ fn heading(items: &[ItemKey]) -> String {
     format!("{} ({})", names(&once), categories.join(", "))
 }
 
-/// The items `profile` lets the code use, as the checker decides (PRD §8.4): the base elements and
-/// the `known` elements, in the order of [`Element::ALL`], then the `known` crates.
+/// The items `profile` lets the code use, as the checker decides (PRD §8.4): the `known`
+/// elements, in the order of [`Element::ALL`], then the `known` crates.
 pub(crate) fn allowed(profile: &Profile) -> Vec<ItemKey> {
     let elements = Element::ALL
         .iter()
@@ -261,8 +261,7 @@ mod compare {
     use crate::agent::tools::Tools;
     use crate::config::Config;
     use crate::llm::{ChatError, ChatResponse, FakeChatClient, Message, Router};
-    use crate::profile::element::Element;
-    use crate::profile::status::{ItemKey, Provenance, Status};
+    use crate::profile::status::{Provenance, Status};
     use crate::profile::store::{Profile, Timestamp};
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
@@ -393,8 +392,7 @@ mod compare {
     }
 
     #[test]
-    fn the_request_for_the_explanation_names_the_base_and_known_items_and_not_the_others() {
-        let base = ItemKey::Element(Element::ForLoop).to_string();
+    fn the_request_for_the_explanation_names_the_known_items_and_not_the_others() {
         let profile = profile_with(&[
             ("arc", Status::Known),
             ("crate:serde", Status::Known),
@@ -410,10 +408,10 @@ mod compare {
         .for_each(|text| sent = text);
 
         let allowed = &sent[sent.find(ONLY_ALLOWED).expect("the instruction")..];
-        for name in [base.as_str(), "arc", "crate:serde"] {
+        for name in ["arc", "crate:serde"] {
             assert!(allowed.contains(&format!("`{name}`")), "{name}: {allowed}");
         }
-        for name in ["mutex", "crate:tokio", "dbg_macro"] {
+        for name in ["mutex", "crate:tokio", "dbg_macro", "for_loop"] {
             assert!(!allowed.contains(&format!("`{name}`")), "{name}: {allowed}");
         }
     }

@@ -124,9 +124,9 @@ impl FileChange {
 /// What [`Tools::write`] did with a [`FileChange`].
 #[derive(Debug)]
 pub enum WriteOutcome {
-    /// Every item is a base element or `known`, and the content was written.
+    /// Every item is `known`, and the content was written.
     Written,
-    /// The content uses items that are neither base elements nor `known` (in line order, never
+    /// The content uses items that are not `known` (in line order, never
     /// empty). Nothing was written. `change` is handed back for what was tried, which a boundary
     /// carries (UC3).
     OutOfProfile {
@@ -685,7 +685,7 @@ mod tests {
         Tools::new(Root::new(dir.path()).unwrap(), cargo)
     }
 
-    /// Writes `change` with a profile of base elements only, which its content must pass.
+    /// Writes `change` with a profile that knows nothing, which its content must pass.
     fn write_clean(tools: &Tools, change: FileChange) {
         let outcome = tools.write(change, &Profile::new()).unwrap();
         assert!(matches!(outcome, WriteOutcome::Written), "{outcome:?}");

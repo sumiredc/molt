@@ -126,9 +126,9 @@ fn known(element: Element) -> Profile {
     profile
 }
 
-/// Uses `dbg!`, which is neither a base element nor in a new profile.
+/// Uses `dbg!`, which is not `known` in a new profile.
 const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
-const WITHOUT_DBG: &str = "fn main() {\n    println!(\"{}\", 1);\n}\n";
+const WITHOUT_DBG: &str = "fn main() {\n    let _ = 1;\n}\n";
 
 fn dbg_macro() -> ItemKey {
     ItemKey::Element(Element::DbgMacro)
@@ -557,7 +557,7 @@ fn request_boundary_on_items_the_profile_allows_is_not_a_boundary() {
     client.push_chat(Ok(call(
         "b",
         "request_boundary",
-        json!({ "items": ["dbg_macro", "print_macro"], "reason": "debugging" }),
+        json!({ "items": ["dbg_macro"], "reason": "debugging" }),
     )));
     client.push_chat(Ok(reply("ok")));
     let mut main_line = main_line(&client, &cargo, &dir, known(Element::DbgMacro));
@@ -567,9 +567,7 @@ fn request_boundary_on_items_the_profile_allows_is_not_a_boundary() {
     assert!(matches!(turn.end, TurnEnd::Finished), "{:?}", turn.end);
     let result = result_of(&main_line, "b");
     assert!(
-        result.starts_with(
-            "not a boundary: the user's profile already allows dbg_macro, print_macro."
-        ),
+        result.starts_with("not a boundary: the user's profile already allows dbg_macro."),
         "{result}"
     );
 }
