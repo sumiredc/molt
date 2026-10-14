@@ -1,8 +1,9 @@
 //! `molt doctor`: 設定した接続先のモデルが何を受け付けるかを役割ごとに確かめて表にし、
 //! `[capabilities]` を `config.toml` に書く（PRD §8.7・§11）。
 //!
-//! 確かめる 5 項目は、ID の存在（`models()`）、素の chat、`tool_choice: required`、
-//! `response_format: json_schema` の遵守、`reasoning_effort` の受け付け。
+//! 確かめる 6 項目は、ID の存在（`models()`）、素の chat、`tool_choice: required`、
+//! `response_format: json_schema` の遵守、`reasoning_effort` の受け付け、ストリーミング
+//! （流した応答から文章とツールの呼び出しを組み立てられること）。
 //! 接続の失敗は機能の欠落と分けて報告し、`[capabilities]` を書き換えない。
 //! 落ちているだけのエンドポイントを「非対応」と記録すると、`[capabilities]` が誤るため。
 
@@ -115,6 +116,8 @@ struct RoleReport {
     tool_choice: Check,
     json_schema: Check,
     reasoning_effort: Check,
+    /// 流して受けた応答から、文章とツールの呼び出しを組み立てられるか（PRD §8.7）。
+    streaming: Check,
 }
 
 /// 確かめを続けられなかった理由（接続の失敗か設定の誤り）。どの役割を確かめている途中か
@@ -171,7 +174,7 @@ fn is_connection_failure(error: &ChatError) -> bool {
     }
 }
 
-/// 役割ごとに 5 項目を確かめる。`models()` が返らないか、確かめる途中で接続に失敗したら、
+/// 役割ごとに 6 項目を確かめる。`models()` が返らないか、確かめる途中で接続に失敗したら、
 /// それまでの結果を捨てて [`Unchecked`] を返す。
 fn diagnose(
     config: &Config,
@@ -215,9 +218,10 @@ fn check_role(
         tool_choice: Check::Skipped,
         json_schema: Check::Skipped,
         reasoning_effort: Check::Skipped,
+        streaming: Check::Skipped,
     };
     if !available.iter().any(|id| id == model) {
-        // 無い ID に送っても拒否されるだけなので、残りの 4 項目は確かめない
+        // 無い ID に送っても拒否されるだけなので、残りの 5 項目は確かめない
         report.exists = Check::Fail("not in the endpoint's model list".to_owned());
         return Ok(report);
     }
@@ -230,6 +234,14 @@ fn check_role(
     let mut request = plain_request(model);
     request.reasoning_effort = Some(effort.to_owned());
     report.reasoning_effort = probe(client, &request, judge_reply)?;
+    // 流して受けた文章と、断片から組み立てたツールの呼び出しの両方が読めれば使える
+    let mut request = plain_request(model);
+    request.stream = true;
+    let text = probe(client, &request, judge_reply)?;
+    let mut request = tool_request(model);
+    request.stream = true;
+    let tool = probe(client, &request, judge_tool_call)?;
+    report.streaming = if text.passed() { tool } else { text };
     Ok(report)
 }
 
@@ -257,6 +269,7 @@ fn request(model: &str, prompt: &str) -> ChatRequest {
         tool_choice: None,
         response_format: None,
         reasoning_effort: None,
+        stream: false,
     }
 }
 
@@ -370,6 +383,7 @@ fn capabilities(reports: &[RoleReport]) -> Capabilities {
             tool_choice_required: report.tool_choice.passed(),
             json_schema: report.json_schema.passed(),
             reasoning_effort: report.reasoning_effort.passed(),
+            streaming: report.streaming.passed(),
         };
     }
     capabilities
@@ -390,6 +404,7 @@ fn render(reports: &[RoleReport]) -> String {
         "tool_choice: required".to_owned(),
         "json_schema".to_owned(),
         "reasoning_effort".to_owned(),
+        "streaming".to_owned(),
     ]];
     for r in reports {
         rows.push([
@@ -400,6 +415,7 @@ fn render(reports: &[RoleReport]) -> String {
             cell(&r.tool_choice).to_owned(),
             cell(&r.json_schema).to_owned(),
             format!("{} ({})", cell(&r.reasoning_effort), r.effort),
+            cell(&r.streaming).to_owned(),
         ]);
     }
     let widths: Vec<usize> = (0..rows[0].len())
@@ -428,6 +444,7 @@ fn render(reports: &[RoleReport]) -> String {
             ("tool_choice: required", &r.tool_choice),
             ("json_schema", &r.json_schema),
             ("reasoning_effort", &r.reasoning_effort),
+            ("streaming", &r.streaming),
         ] {
             if let Check::Fail(reason) = check {
                 text.push_str(&format!("{} {item}: {reason}\n", role_name(r.role)));
@@ -525,7 +542,7 @@ fn write_capabilities(path: &Path, checked: &Config, capabilities: &Capabilities
     Ok(())
 }
 
-/// `document` の `[capabilities.<役割>]` の 3 キーを書き換える。無い節・キーは足す。
+/// `document` の `[capabilities.<役割>]` の 4 キーを書き換える。無い節・キーは足す。
 /// 既にある値は前後の空白とコメントを残して値だけを替える。
 /// `[capabilities]` か役割が表でなければ `None`（`Config` として読めた後なので起きない）。
 fn set_capabilities(document: &mut DocumentMut, capabilities: &Capabilities) -> Option<()> {
@@ -556,6 +573,7 @@ fn set_capabilities(document: &mut DocumentMut, capabilities: &Capabilities) -> 
         set_bool(table, "tool_choice_required", role.tool_choice_required);
         set_bool(table, "json_schema", role.json_schema);
         set_bool(table, "reasoning_effort", role.reasoning_effort);
+        set_bool(table, "streaming", role.streaming);
     }
     Some(())
 }
@@ -594,16 +612,19 @@ reason = "reason-model"
 tool_choice_required = false # measured by doctor
 json_schema = false
 reasoning_effort = false
+streaming = false
 
 [capabilities.generate]
 tool_choice_required = false
 json_schema = false
 reasoning_effort = false
+streaming = false
 
 [capabilities.reason]
 tool_choice_required = false
 json_schema = false
 reasoning_effort = false
+streaming = false
 "#;
 
     const MODELS: [&str; 3] = ["light-model", "generate-model", "reason-model"];
@@ -640,12 +661,15 @@ reasoning_effort = false
         }
     }
 
-    /// 1 つの役割の 4 回の chat（素の chat・tool_choice・json_schema・reasoning_effort）への応答。
+    /// 1 つの役割の 6 回の chat（素の chat・tool_choice・json_schema・reasoning_effort・流した
+    /// 文章・流したツールの呼び出し）への応答。
     struct Replies {
         chat: std::result::Result<ChatResponse, ChatError>,
         tool_choice: std::result::Result<ChatResponse, ChatError>,
         json_schema: std::result::Result<ChatResponse, ChatError>,
         reasoning_effort: std::result::Result<ChatResponse, ChatError>,
+        streamed_text: std::result::Result<ChatResponse, ChatError>,
+        streamed_tool: std::result::Result<ChatResponse, ChatError>,
     }
 
     fn passing() -> Replies {
@@ -654,6 +678,8 @@ reasoning_effort = false
             tool_choice: Ok(tool_call(TOOL_NAME, r#"{"answer": 5}"#)),
             json_schema: Ok(reply(r#"{"answer": 5}"#)),
             reasoning_effort: Ok(reply("OK")),
+            streamed_text: Ok(reply("OK")),
+            streamed_tool: Ok(tool_call(TOOL_NAME, r#"{"answer": 5}"#)),
         }
     }
 
@@ -662,6 +688,8 @@ reasoning_effort = false
         fake.push_chat(replies.tool_choice);
         fake.push_chat(replies.json_schema);
         fake.push_chat(replies.reasoning_effort);
+        fake.push_chat(replies.streamed_text);
+        fake.push_chat(replies.streamed_tool);
     }
 
     fn fake_with(roles: [Replies; 3]) -> FakeChatClient {
@@ -697,6 +725,7 @@ reasoning_effort = false
             tool_choice_required: value,
             json_schema: value,
             reasoning_effort: value,
+            streaming: value,
         }
     }
 
@@ -818,7 +847,7 @@ reasoning_effort = false
         assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
     }
 
-    // --- 5 項目の判定 ---
+    // --- 6 項目の判定 ---
 
     #[test]
     fn doctor_writes_every_capability_when_every_check_passes() {
@@ -1015,6 +1044,34 @@ reasoning_effort = false
     }
 
     #[test]
+    fn doctor_sets_streaming_false_when_a_streamed_reply_has_no_tool_call_or_fails() {
+        let env = env_with(Some(CONFIG));
+        let no_tool = Replies {
+            streamed_tool: Ok(reply("OK")),
+            ..passing()
+        };
+        let broken = Replies {
+            streamed_text: Err(ChatError::InvalidResponse(
+                "the stream ended before its finish_reason".to_owned(),
+            )),
+            ..passing()
+        };
+        let fake = fake_with([passing(), no_tool, broken]);
+
+        let (_, output) = run_doctor(&env, &fake);
+
+        let capabilities = written(&env).capabilities;
+        assert!(capabilities.light.streaming);
+        assert!(!capabilities.generate.streaming);
+        assert!(!capabilities.reason.streaming);
+        assert!(
+            output.contains("generate streaming: the reply had no tool call"),
+            "{output}"
+        );
+        assert!(output.contains("reason streaming: "), "{output}");
+    }
+
+    #[test]
     fn doctor_sends_each_feature_only_in_its_own_check() {
         // 既存の [capabilities] が真でも、素の chat に reasoning_effort を混ぜない
         let env = env_with(Some(&CONFIG.replace("= false", "= true")));
@@ -1023,13 +1080,20 @@ reasoning_effort = false
         run_doctor(&env, &fake);
 
         let requests = fake.requests();
-        assert_eq!(requests.len(), 12);
+        assert_eq!(requests.len(), 18);
         let efforts = ["low", "medium", "high"];
-        for (i, role) in requests.chunks(4).enumerate() {
+        for (i, role) in requests.chunks(6).enumerate() {
             assert!(role.iter().all(|r| r.model == MODELS[i]));
-            let [chat, tool, json, effort] = role else {
+            let [chat, tool, json, effort, streamed_text, streamed_tool] = role else {
                 unreachable!()
             };
+            assert!(
+                [chat, tool, json, effort].iter().all(|r| !r.stream),
+                "only the streaming check streams"
+            );
+            assert!(streamed_text.stream && streamed_text.tools.is_empty());
+            assert!(streamed_tool.stream);
+            assert_eq!(streamed_tool.tool_choice, Some(ToolChoice::Required));
             assert_eq!(
                 (&chat.tools.len(), &chat.tool_choice, &chat.response_format),
                 (&0, &None, &None)
@@ -1083,7 +1147,8 @@ reasoning_effort = false
                 "ok",
                 "ok",
                 "ok",
-                "(low)"
+                "(low)",
+                "ok"
             ]
         );
         assert_eq!(
@@ -1096,7 +1161,8 @@ reasoning_effort = false
                 "ok",
                 "no",
                 "ok",
-                "(medium)"
+                "(medium)",
+                "ok"
             ]
         );
     }
@@ -1116,7 +1182,8 @@ reasoning_effort = false
                 "tool_choice_required = true",
             )
             .replace("json_schema = false", "json_schema = true")
-            .replace("reasoning_effort = false", "reasoning_effort = true");
+            .replace("reasoning_effort = false", "reasoning_effort = true")
+            .replace("streaming = false", "streaming = true");
         assert_eq!(fs::read_to_string(&env.path).unwrap(), expected);
     }
 

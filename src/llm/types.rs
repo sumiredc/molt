@@ -19,6 +19,19 @@ pub struct ChatRequest {
     pub response_format: Option<ResponseFormat>,
     /// `None` なら送らない。値は `[reasoning_effort]` の文字列をそのまま使う。
     pub reasoning_effort: Option<String>,
+    /// 応答を server-sent events で流して受ける（`stream: true`）。`[capabilities]` で
+    /// `streaming` が真の役割だけ（PRD §8.7）。
+    pub stream: bool,
+}
+
+/// 流して受ける応答から、届いたそばに呼び出し側へ渡すもの（PRD §8.1）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StreamEvent {
+    /// 文章（`content`）の 1 行。改行まで届いたものだけ渡し、最後の行は応答の終わりに渡す。
+    /// API キーは伏せてある。
+    Line(String),
+    /// モデルの推論（`reasoning_content` など）が届いた。中身は渡さない。
+    Reasoning,
 }
 
 /// 会話の 1 件。

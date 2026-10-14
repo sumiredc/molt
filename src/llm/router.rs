@@ -110,6 +110,7 @@ impl Router {
             tool_choice: None,
             response_format: None,
             reasoning_effort: self.reasoning_effort(role).map(str::to_owned),
+            stream: self.capabilities(role).streaming,
         }
     }
 
@@ -319,6 +320,20 @@ mod tests {
         assert_eq!(router.reasoning_effort(Role::Light), None);
         assert_eq!(router.reasoning_effort(Role::Generate), None);
         assert_eq!(router.reasoning_effort(Role::Reason), Some("high"));
+    }
+
+    #[test]
+    fn a_request_streams_only_for_a_role_whose_capability_says_so() {
+        let mut config = config();
+        config.capabilities.generate.streaming = true;
+        let router = Router::new(&config);
+
+        let streams: Vec<bool> = ROLES
+            .iter()
+            .map(|&role| router.request(role, user("hi")).stream)
+            .collect();
+
+        assert_eq!(streams, [false, true, false]);
     }
 
     #[test]

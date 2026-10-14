@@ -73,6 +73,7 @@ fn request(model: &str, prompt: &str) -> ChatRequest {
         tool_choice: None,
         response_format: None,
         reasoning_effort: None,
+        stream: false,
     }
 }
 

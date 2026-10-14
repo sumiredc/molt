@@ -97,6 +97,50 @@ impl Interrupt {
             }
         }
     }
+
+    /// Runs `work` on its own thread like [`Interrupt::wait`], and hands each event it sends to
+    /// `on_event` on this thread as it comes. When the interrupt is raised, `work` is told so
+    /// through the flag it gets, which it is to look at between its events (a streamed response
+    /// then drops its connection, PRD §8.1), and `None` is returned at once.
+    pub(crate) fn stream<E: Send + 'static, T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut dyn FnMut(E), &AtomicBool) -> T + Send + 'static,
+        on_event: &mut dyn FnMut(E),
+    ) -> Option<T> {
+        enum Message<E, T> {
+            Event(E),
+            Done(T),
+        }
+        let _armed = Armed::new(self);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let flag = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            let events = sender.clone();
+            let mut emit = |event| {
+                // The receiver is gone when the wait was interrupted.
+                let _ = events.send(Message::Event(event));
+            };
+            let result = work(&mut emit, &flag);
+            let _ = sender.send(Message::Done(result));
+        });
+        loop {
+            if self.interrupted.load(Ordering::SeqCst) {
+                cancelled.store(true, Ordering::SeqCst);
+                return None;
+            }
+            match receiver.recv_timeout(POLL) {
+                Ok(_) if self.interrupted.load(Ordering::SeqCst) => {
+                    cancelled.store(true, Ordering::SeqCst);
+                    return None;
+                }
+                Ok(Message::Event(event)) => on_event(event),
+                Ok(Message::Done(result)) => return Some(result),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("the request thread panicked"),
+            }
+        }
+    }
 }
 
 /// A wait going on. The first of the waits going on together starts by forgetting an interrupt
@@ -132,6 +176,59 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn a_stream_hands_over_each_event_and_returns_the_result_of_the_work() {
+        let interrupt = Interrupt::new();
+        let mut events = Vec::new();
+
+        let result = interrupt.stream(
+            |emit: &mut dyn FnMut(u8), _cancelled: &AtomicBool| {
+                emit(1);
+                emit(2);
+                7
+            },
+            &mut |event| events.push(event),
+        );
+
+        assert_eq!(result, Some(7));
+        assert_eq!(events, [1, 2]);
+        assert!(interrupt.idle.load(Ordering::SeqCst), "the wait has ended");
+    }
+
+    #[test]
+    fn raising_the_interrupt_during_a_stream_tells_the_work_and_returns_none() {
+        let interrupt = Interrupt::new();
+        let told = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&told);
+        let raise = interrupt.clone();
+        let mut events = Vec::new();
+
+        let result = interrupt.stream(
+            move |emit: &mut dyn FnMut(u8), cancelled: &AtomicBool| {
+                emit(1);
+                raise.raise();
+                while !cancelled.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                seen.store(true, Ordering::SeqCst);
+                emit(2);
+            },
+            &mut |event| events.push(event),
+        );
+
+        assert_eq!(result, None);
+        let started = Instant::now();
+        while !told.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(told.load(Ordering::SeqCst), "the work was told");
+        assert!(
+            !events.contains(&2),
+            "nothing after the interrupt: {events:?}"
+        );
+        assert!(interrupt.idle.load(Ordering::SeqCst), "the wait has ended");
+    }
 
     #[test]
     fn a_wait_returns_the_result_of_the_work() {
