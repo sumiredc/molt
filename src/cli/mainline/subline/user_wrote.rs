@@ -96,6 +96,11 @@ fn failed(failure: &Failure) -> String {
         .collect();
     match &failure.check {
         Ok(output) if output.success => {}
+        // Only the user's lines did not parse: the errors elsewhere do not stop `/done`.
+        Ok(output) if !failure.parse_errors.is_empty() => lines.push(format!(
+            "cargo check failed, though not only in your lines:\n{}",
+            printed(output)
+        )),
         Ok(output) => lines.push(format!(
             "cargo check found errors in your lines:\n{}",
             printed(output)

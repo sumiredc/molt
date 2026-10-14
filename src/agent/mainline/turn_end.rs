@@ -101,7 +101,8 @@ impl MainLine<'_> {
                 check: None,
             };
         };
-        if held.changes.is_empty() && !held.progress.unchecked {
+        // Nothing the turn wrote stays, once the step is taken back.
+        if held.changes.is_empty() && !held.progress.crate_added {
             return Withdrawal {
                 taken_back,
                 changes: Vec::new(),

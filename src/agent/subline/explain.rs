@@ -792,7 +792,7 @@ mod short {
 
     const WITHOUT_DBG: &str = "```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```";
     /// The instruction for the idea of every item.
-    const IDEA: &str = "Explain these items as they are used in these lines, in one paragraph.";
+    const IDEA: &str = "Explain these items as they are used in these lines: one short paragraph for the items of each category.";
     /// The words every instruction for an idea has.
     const ANY_IDEA: &str = "Explain these items";
 
@@ -870,7 +870,8 @@ mod short {
         assert!(
             sent[0].contains(
                 "The user has seen `arc` before: do not explain the idea of those items again. \
-                 Explain the idea of the other items in one paragraph."
+                 Explain the other items as they are used in these lines: one short paragraph for \
+                 the items of each category."
             ),
             "{}",
             sent[0]

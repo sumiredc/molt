@@ -45,18 +45,15 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> 
         names(&side.boundary().items)
     )));
     if !side.explained() {
-        // The step's lines come with the explanation, which refers to them.
-        let step = step_text(side.boundary());
+        // Before the explanation, which takes a while and refers to them (PRD §8.6).
+        ui.show(&indent(&step_text(side.boundary())));
         match side.explain(agent.log()) {
-            Ok(explanation) => ui.show(&indent(&format!("{step}\n\n{explanation}"))),
+            Ok(explanation) => ui.show(&indent(&explanation)),
             Err(ChatError::Interrupted) => {
-                ui.show(&indent(&step));
                 show_error_of(ui, agent.log());
                 return leave(ui, Left::Interrupted);
             }
-            Err(error) => ui.show(&indent(&format!(
-                "{step}\n\nCould not get the explanation: {error}"
-            ))),
+            Err(error) => ui.show(&indent(&format!("Could not get the explanation: {error}"))),
         }
         show_error_of(ui, agent.log());
     }
@@ -218,7 +215,7 @@ mod open {
     const TAKEN: &str = "molt took the step back: src/main.rs is as it was before it.";
     /// The explanation shown for the model's reply `explanation`, which has no code: the reply, then
     /// the comparison of the step's lines with none within the profile.
-    const EXPLAINED: &str = "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }\n\n  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
+    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
 
     fn write_main(id: &str) -> ChatResponse {
         ChatResponse {
@@ -300,10 +297,11 @@ mod open {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
-            ui.shown()[2..6],
+            ui.shown()[2..7],
             [
                 ENTER,
-                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }\n\n  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
+                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]
@@ -383,8 +381,9 @@ mod open {
         );
 
         assert_eq!(
-            ui.shown()[3..8],
+            ui.shown()[3..9],
             [
+                STEP,
                 EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
@@ -403,7 +402,7 @@ mod open {
             [input("debug 1"), input("/quit"), input("/abort"), Step::Eof],
         );
 
-        assert_eq!(ui.shown()[5], format!("  Unknown command /quit. {HINT}"));
+        assert_eq!(ui.shown()[6], format!("  Unknown command /quit. {HINT}"));
         assert_eq!(client.requests().len(), 2);
     }
 
@@ -418,11 +417,11 @@ mod open {
         );
 
         assert!(
-            ui.shown()[3].starts_with(&format!("{STEP}\n\n  Could not get the explanation: ")),
+            ui.shown()[4].starts_with("  Could not get the explanation: "),
             "{:?}",
             ui.shown()
         );
-        assert_eq!(ui.shown()[5], "  answer");
+        assert_eq!(ui.shown()[6], "  answer");
     }
 
     #[test]
@@ -445,7 +444,7 @@ mod open {
         );
 
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(ui.shown()[6..], [LEAVE, "Request withdrawn.", TAKEN]);
+        assert_eq!(ui.shown()[7..], [LEAVE, "Request withdrawn.", TAKEN]);
         assert_eq!(snapshot(dir.path()), before);
         assert!(cargo.calls().is_empty());
     }
@@ -475,6 +474,7 @@ mod open {
                 STOPPED,
                 "Tool calls in this turn: write_file (1)",
                 ENTER,
+                STEP,
                 EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
@@ -540,7 +540,7 @@ mod open {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
-            ui.shown()[5..],
+            ui.shown()[6..],
             [LEAVE, PAUSED, "Request withdrawn.", TAKEN, "hello again"]
         );
     }
@@ -637,6 +637,7 @@ mod open {
                     LEAVE,
                     PAUSED,
                     ENTER,
+                    STEP,
                     EXPLAINED,
                     HINT_SHOWN,
                     LEAVE,
@@ -669,7 +670,7 @@ mod open {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
-                ui.shown()[5..],
+                ui.shown()[6..],
                 [
                     LEAVE,
                     PAUSED,
@@ -747,7 +748,7 @@ mod open {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
-                ui.shown()[5..],
+                ui.shown()[6..],
                 [
                     LEAVE,
                     PAUSED,

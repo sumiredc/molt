@@ -60,6 +60,7 @@ fn the_example_script_and_profile_copied_out_take_one_pass_to_an_approved_commit
             "Paused after a step: molt wrote ",
             "── side line: dbg_macro ────",
             "  The step molt wrote to src/main.rs:",
+            "2 |     dbg!(1);",
             "Your profile has dbg_macro as known now.",
             "cargo check passed.",
             "Message:\n  Print 1 with dbg!",

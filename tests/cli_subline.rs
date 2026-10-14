@@ -202,6 +202,61 @@ fn interrupt_on_the_side_line_pauses_the_main_line_at_the_boundary_and_changes_n
     assert_eq!(fs::read_to_string(&profile).unwrap(), "");
 }
 
+/// While the main line is paused at a boundary, the step is on disk: when the side line asks for
+/// the explanation, `src/main.rs` has the lines of the step, and the side line shows them with
+/// their numbers (#152's condition 3, through the binary).
+#[test]
+fn the_step_is_on_disk_while_the_main_line_is_paused_at_its_boundary() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+    let dir = TempDir::new().unwrap();
+    let (home, profile, project) = setup(&dir, &base_url);
+    let main_rs = project.join("src/main.rs");
+    let server = thread::spawn(move || {
+        let (stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        respond(stream, &write_dbg("step"));
+        // The request for the explanation: the main line is paused at the boundary now.
+        let (stream, _) = listener.accept().unwrap();
+        read_request(&stream);
+        let on_disk = fs::read_to_string(&main_rs).unwrap();
+        respond(stream, &reply("dbg! prints a value and returns it."));
+        on_disk
+    });
+    let script = dir.path().join("ui.toml");
+    fs::write(
+        &script,
+        r#"steps = [{ input = "debug 1" }, { input = "/abort" }, { input = "/quit" }]"#,
+    )
+    .unwrap();
+
+    let output = cargo_bin_cmd!("molt")
+        .current_dir(&project)
+        .env("MOLT_HOME", &home)
+        .env_remove("XDG_CONFIG_HOME")
+        .env_remove("HOME")
+        .env_remove("MOLT_LOG")
+        .arg("--profile")
+        .arg(&profile)
+        .arg("--ui-script")
+        .arg(&script)
+        .output()
+        .unwrap();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert_eq!(output.status.code(), Some(0), "{stdout}");
+    assert_eq!(server.join().unwrap(), "fn main() {\n    dbg!(1);\n}\n");
+    assert_in_order(
+        &stdout,
+        &[
+            "  The step molt wrote to src/main.rs:",
+            "2 |     dbg!(1);",
+            "  dbg! prints a value and returns it.",
+            "molt took the step back: src/main.rs is as it was before it.",
+        ],
+    );
+}
+
 /// Ctrl-C (a real SIGINT) while the side line waits for the explanation: molt does not end, the
 /// main line is paused at the boundary, and `/side` asks for the explanation again.
 #[cfg(unix)]

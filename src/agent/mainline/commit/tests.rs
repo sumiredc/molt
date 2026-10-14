@@ -1251,3 +1251,41 @@ fn only_the_system_prompt_of_the_commit_message_request_speaks_of_the_language()
         "{system}"
     );
 }
+
+#[test]
+fn a_file_whose_only_change_by_molt_was_a_step_taken_back_is_not_among_the_files_molt_changed() {
+    let (dir, git) = repository();
+    // The user's own change, not committed, before the request.
+    let mine = "fn main() {\n    let _mine = 1;\n}\n";
+    fs::write(dir.path().join("src/main.rs"), mine).unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("Print the value with println! instead.")));
+    let resolution = side
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
+    client.push_chat(Ok(reply("done")));
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        mine
+    );
+    client.push_chat(Ok(reply("Add one")));
+    let mut answer = Answer::no();
+
+    main_line.offer_commit(&resumed.turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert_eq!(proposal.files, ["src/lib.rs"]);
+    assert_eq!(
+        proposal.others,
+        ["src/main.rs"],
+        "the user's change stays theirs"
+    );
+}

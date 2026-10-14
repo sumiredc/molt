@@ -76,7 +76,9 @@ pub const NOT_RUN_AFTER_SPLIT: &str = "not run: a write before this tool call wa
 
 /// The result of the tool call that would go over the budget of `budget` tool calls per turn.
 pub fn over_budget(budget: usize) -> String {
-    format!("not run: this turn has used all {budget} tool calls, so it stops here")
+    format!(
+        "not run: this turn has used all {budget} tool calls since its last boundary, so it stops here"
+    )
 }
 
 /// The result of a tool call that failed: unknown tool, arguments that do not fit, a path
@@ -196,8 +198,8 @@ pub fn check_failed(stdout: &str, stderr: &str, notes: &[String]) -> String {
         result.push_str(note);
     }
     result.push_str(
-        "\nFix the errors, then call `finish` again. If they cannot be fixed within the user's \
-         profile, call `finish` and say why.",
+        "\nFix the errors, then call `finish` again. If they cannot be fixed, call `finish` and \
+         say why.",
     );
     result
 }
@@ -357,11 +359,14 @@ fn idea_request(items: &[ItemKey], seen: &[ItemKey]) -> String {
         .collect();
     match (seen.is_empty(), unseen) {
         (true, _) => {
-            "Explain these items as they are used in these lines, in one paragraph.".to_owned()
+            "Explain these items as they are used in these lines: one short paragraph for the \
+             items of each category."
+                .to_owned()
         }
         (false, true) => format!(
             "The user has seen {} before: do not explain the idea of those items again. Explain \
-             the idea of the other items in one paragraph.",
+             the other items as they are used in these lines: one short paragraph for the items of \
+             each category.",
             item_names(&seen)
         ),
         (false, false) => "The user has seen all of these items before: do not explain their \
@@ -417,11 +422,11 @@ pub fn boundary_resolved(
         ),
         _ => match after_user_wrote {
             Some(_) => format!(
-                "The user understood {names} and has written them now. The step was taken back: \
-                 write it again, using them."
+                "The user understood {names}, which may be used from now on. The step was taken \
+                 back: write it again, using them."
             ),
             None => format!(
-                "The user understood {names} and has written them now. The step stays as you \
+                "The user understood {names}, which may be used from now on. The step stays as you \
                  wrote it. Go on with the request the way you were going."
             ),
         },
@@ -446,7 +451,7 @@ pub fn boundary_resolved(
 /// The one message the side line hands to the main line after ③ (PRD §8.5): `BOUNDARY RESOLVED:
 /// user_wrote`, the items in the user's lines that are `known` now, and the files to
 /// re-read.
-pub fn user_wrote_resolved(items: &[ItemKey], paths: &[&str]) -> String {
+pub fn user_wrote_resolved(step_items: &[ItemKey], items: &[ItemKey], paths: &[&str]) -> String {
     let allowed = if items.is_empty() {
         "Their lines use nothing new to the profile.".to_owned()
     } else {
@@ -461,11 +466,21 @@ pub fn user_wrote_resolved(items: &[ItemKey], paths: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "BOUNDARY RESOLVED: user_wrote\nThe step was taken back, and the user wrote that part of \
-         the request themselves. {allowed}\nRe-read these files before going on, since the user changed them: \
+        "BOUNDARY RESOLVED: user_wrote\nThe step with {} was taken back, and the user wrote that \
+         part of the request themselves. {allowed}\nRe-read these files before going on, since the user changed them: \
          {paths}. Go on with the rest of the request from there, and keep what the user wrote.\n\
          Keep answering in the language of the user's request, not in the language of this \
-         message."
+         message.",
+        item_names(step_items)
+    )
+}
+
+/// Added to the message of the choice when the step at `path` could not be taken back, since the
+/// file changed after it (PRD UC3).
+pub fn step_left(path: &str) -> String {
+    format!(
+        "\nNote: the step could not be taken back, since `{path}` changed after it. Re-read it \
+         before going on."
     )
 }
 
@@ -520,19 +535,16 @@ pub fn review_request(items: &[ItemKey], request: Option<&str>, files: &[Change]
 /// What the `light` model is asked for the one-line policy of ②, after the side line's messages.
 pub fn policy_request(items: &[ItemKey]) -> String {
     format!(
-        "The user chose to have the step written without {}, using only \
-         constructs they have written before. Write the coding policy for that in one line: how to \
-         write the request without these items. Answer with that line only.",
+        "The user chose to have the step written without {}. Write the coding policy for that in \
+         one line: how to write that part without these items. Other items may still be used; \
+         molt shows them to the user as steps. Answer with that line only.",
         item_names(items)
     )
 }
 
 /// The policy of ② when the `light` model cannot make one.
 pub fn fixed_policy(items: &[ItemKey]) -> String {
-    format!(
-        "Write it without {}, using only what the user has written before.",
-        item_names(items)
-    )
+    format!("Write that part without {}.", item_names(items))
 }
 
 /// `` `dbg_macro`, `crate:tokio` ``.

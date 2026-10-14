@@ -32,7 +32,7 @@ use crate::llm::{
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, StoreError, Timestamp};
 use crate::session::{self, Event, SessionLog};
-use crate::workspace::cargo::{CargoError, CargoOutput};
+use crate::workspace::cargo::{CargoError, CargoOutput, CrateName};
 
 pub use commit::{CommitOutcome, CommitProposal};
 
@@ -127,6 +127,8 @@ struct Held {
     boundary: Boundary,
     /// Whether the step of `boundary` was taken back (③, before the user writes).
     taken_back: bool,
+    /// The file of the step, when taking it back found it changed and left it.
+    left: Option<String>,
 }
 
 /// How the turn held at a boundary went on after the user's choice on the side line.
@@ -473,10 +475,8 @@ impl<'a> MainLine<'a> {
                         .retain(|path| !tools.same_file(path, &step.path));
                 }
             }
-            // Nothing the turn wrote is left to check.
-            if held.changes.is_empty() && !held.progress.crate_added {
-                held.progress.unchecked = false;
-            }
+        } else {
+            held.left = Some(step.path.clone());
         }
         let taken = TakenBack {
             path: step.path.clone(),
@@ -559,9 +559,11 @@ impl<'a> MainLine<'a> {
                 None => changes.push(file.clone()),
             }
         }
-        self.messages.push(Message::User {
-            content: resolution.message(),
-        });
+        let mut message = resolution.message();
+        if let Some(path) = &held.left {
+            message.push_str(&prompts::step_left(path));
+        }
+        self.messages.push(Message::User { content: message });
         let turn = Turn {
             end: TurnEnd::Finished,
             tool_calls: held.tool_calls,
@@ -703,6 +705,7 @@ impl<'a> MainLine<'a> {
                         rewritten,
                         boundary: boundary.clone(),
                         taken_back: false,
+                        left: None,
                     });
                 } else {
                     self.absorb(&turn.changes, &progress.committed);
@@ -826,6 +829,7 @@ impl<'a> MainLine<'a> {
             && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
             && subcommand == "add"
             && let [name] = &args[..]
+            && CrateName::new(name).is_ok()
             && !self.may_add(name)
         {
             return (prompts::crate_add_before_step(name), Next::Continue);

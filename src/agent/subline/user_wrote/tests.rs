@@ -687,6 +687,13 @@ fn lines_with_no_item_new_to_the_profile_pass_and_make_nothing_known() {
         "{}",
         resolution.message()
     );
+    assert!(
+        resolution
+            .message()
+            .contains("The step with `dbg_macro` was taken back"),
+        "PRD §8.5 names the step's items: {}",
+        resolution.message()
+    );
     assert_eq!(
         main_line.profile().status(&key("dbg_macro")),
         Status::Unknown
@@ -800,6 +807,67 @@ fn error_places_reads_the_path_and_line_of_each_error_and_not_of_warnings() {
 
     assert_eq!(
         crate::agent::subline::user_wrote::error_places(&output),
-        [("src/main.rs".to_owned(), 12)]
+        [Some(("src/main.rs".to_owned(), 12))]
     );
+}
+
+#[test]
+fn error_places_takes_the_place_of_the_error_and_not_of_its_notes() {
+    // rustc on a call with one argument too many: the note points at the function.
+    let output = CargoOutput {
+        success: false,
+        stdout: String::new(),
+        stderr: "error[E0061]: this function takes 0 arguments but 1 argument was supplied\n --> src/main.rs:2:5\n  |\n2 |     f(1);\n  |     ^ -\n  |\nnote: function defined here\n --> src/main.rs:5:4\n  |\n5 | fn f() {}\n  |    ^\n\nerror: could not compile `demo` (bin \"demo\") due to 1 previous error\n".to_owned(),
+    };
+
+    assert_eq!(
+        crate::agent::subline::user_wrote::error_places(&output),
+        [Some(("src/main.rs".to_owned(), 2))]
+    );
+}
+
+#[test]
+fn an_error_of_cargo_without_a_place_counts_as_one() {
+    let output = CargoOutput {
+        success: false,
+        stdout: String::new(),
+        stderr: "error: no matching package named `no-such-crate` found\n".to_owned(),
+    };
+
+    assert_eq!(
+        crate::agent::subline::user_wrote::error_places(&output),
+        [None]
+    );
+}
+
+#[test]
+fn an_error_on_a_line_the_user_did_not_change_in_their_file_does_not_fail_done() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = FakeCargo::new();
+    // The user changes the function (lines 5 to 7); the error is at its caller on line 2, which
+    // they did not change, and its note points at line 5.
+    let error = "error[E0061]: this function takes 0 arguments but 1 argument was supplied\n --> src/main.rs:2:5\nnote: function defined here\n --> src/main.rs:5:4\n";
+    cargo.push(Ok(output(false, error)));
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let mut side = main_line.side_line(boundary);
+    main_line.take_back();
+    // The file as it was when the user started to write.
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    f(1);\n}\n\nfn f() {}\n",
+    )
+    .unwrap();
+    side.start_writing(main_line.tools());
+    fs::write(
+        dir.path().join("src/main.rs"),
+        "fn main() {\n    f(1);\n}\n\nfn f() {\n    dbg!(1);\n}\n",
+    )
+    .unwrap();
+    client.push_chat(Ok(reply("review")));
+
+    let done = main_line.done(&mut side);
+
+    assert!(matches!(done, Done::Passed { .. }), "{done:?}");
 }

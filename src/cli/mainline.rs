@@ -857,7 +857,8 @@ mod write {
                 "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.",
                 "Tool calls in this turn: write_file (1)",
                 "── side line: dbg_macro ────────────────────────────────────",
-                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }\n\n  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
+                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
                 "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
@@ -1329,6 +1330,40 @@ mod session_log {
             events.iter().all(|event| event.get("line").is_none()),
             "main-line events carry no `line`"
         );
+    }
+
+    #[test]
+    fn content_that_does_not_parse_is_in_the_session_log_as_rejected_for_a_parse_error() {
+        let dir = project();
+        fs::create_dir(dir.path().join("src")).unwrap();
+        let logs = tempfile::tempdir().unwrap();
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("broken", "fn main() {\n    let = 1;\n}\n")));
+        client.push_chat(Ok(super::tests::reply("gave up")));
+        let cargo = FakeCargo::new();
+        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+        let log = SessionLog::create(logs.path(), false).unwrap();
+        let path = log.path().unwrap().to_owned();
+        let mut agent = MainLine::new(
+            &client,
+            Router::new(&Config::default()),
+            tools,
+            Profile::new(),
+        )
+        .with_log(log);
+        let mut ui = ScriptedUi::new([input("write it"), input("/quit")]);
+
+        main_line(&mut ui, &mut agent);
+
+        let rejected: Vec<Value> = fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str::<Value>(line).unwrap())
+            .filter(|event| event["event"] == "rejected")
+            .collect();
+        assert_eq!(rejected.len(), 1, "{rejected:?}");
+        assert_eq!(rejected[0]["reason"], "parse_error");
+        assert_eq!(rejected[0]["items"], json!([]));
     }
 
     #[test]

@@ -102,7 +102,7 @@ impl Resolution {
                     .map(|file| file.path.as_str())
                     .filter(|path| *path != LOCK)
                     .collect();
-                prompts::user_wrote_resolved(&self.items, &paths)
+                prompts::user_wrote_resolved(&self.answers, &self.items, &paths)
             }
             _ => {
                 let after: Option<Vec<&str>> = self

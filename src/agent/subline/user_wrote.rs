@@ -47,24 +47,38 @@ pub struct Failure {
     pub check: Result<CargoOutput, CargoError>,
 }
 
-/// The places `cargo check` reports an error at in `output`: each `error` and the
-/// `--> path:line:column` under it, as path relative to the project root and 1-based line.
-/// Warnings are left out.
-pub(crate) fn error_places(output: &CargoOutput) -> Vec<(String, usize)> {
+/// The places `cargo check` reports its errors at in `output`, as path relative to the project
+/// root and 1-based line: for each `error` line, the first `--> path:line:column` after it,
+/// which is the error's own place. The places of the notes under it, and of warnings, are left
+/// out. An error with no place (cargo's own, such as a dependency it cannot find) is `None`.
+pub(crate) fn error_places(output: &CargoOutput) -> Vec<Option<(String, usize)>> {
     let mut places = Vec::new();
-    let mut in_error = false;
+    let mut open = false;
     for line in output.stderr.lines().chain(output.stdout.lines()) {
         if line.starts_with("error") {
-            in_error = true;
+            if open {
+                places.push(None);
+            }
+            // `error: aborting due to …` and `error: could not compile …` sum up the others.
+            open = !line.starts_with("error: aborting")
+                && !line.starts_with("error: could not compile");
         } else if line.starts_with("warning") {
-            in_error = false;
-        } else if in_error && let Some(place) = line.trim_start().strip_prefix("--> ") {
+            if open {
+                places.push(None);
+            }
+            open = false;
+        } else if open && let Some(place) = line.trim_start().strip_prefix("--> ") {
+            open = false;
             let mut parts = place.rsplitn(3, ':');
             let (_column, line, path) = (parts.next(), parts.next(), parts.next());
-            if let (Some(path), Some(line)) = (path, line.and_then(|l| l.parse().ok())) {
-                places.push((path.trim_start_matches("./").to_owned(), line));
-            }
+            places.push(match (path, line.and_then(|l| l.parse().ok())) {
+                (Some(path), Some(line)) => Some((path.trim_start_matches("./").to_owned(), line)),
+                _ => None,
+            });
         }
+    }
+    if open {
+        places.push(None);
     }
     places
 }
@@ -153,13 +167,16 @@ impl SubLine<'_> {
         }
         let reviewed = files.len();
         let check = tools.cargo_check();
+        // An error without a place may come of the user's change (a crate added to `Cargo.toml`
+        // that cannot be found), so it counts as theirs.
         let in_user_lines = |output: &CargoOutput| {
-            error_places(output).iter().any(|(path, line)| {
-                files.iter().any(|file| {
+            error_places(output).iter().any(|place| match place {
+                None => true,
+                Some((path, line)) => files.iter().any(|file| {
                     tools.same_file(&file.path, path)
                         && diff::changed_lines(file.before.as_deref().unwrap_or(""), &file.after)
                             .contains(*line)
-                })
+                }),
             })
         };
         let passed = match &check {
