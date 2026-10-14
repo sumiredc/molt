@@ -42,10 +42,15 @@ struct PartialCall {
 struct WireChunk {
     #[serde(default)]
     choices: Vec<WireChoice>,
+    /// An error the endpoint sent in the middle of the stream.
+    error: Option<serde_json::Value>,
 }
 
 #[derive(Deserialize)]
 struct WireChoice {
+    /// Only the first choice is read, as for a response that is not streamed.
+    #[serde(default)]
+    index: u64,
     #[serde(default)]
     delta: WireDelta,
     finish_reason: Option<String>,
@@ -61,8 +66,7 @@ struct WireDelta {
 
 #[derive(Deserialize)]
 struct WireToolCallDelta {
-    #[serde(default)]
-    index: u64,
+    index: Option<u64>,
     id: Option<String>,
     function: Option<WireFunctionDelta>,
 }
@@ -101,8 +105,13 @@ impl Assembler {
         }
         let chunk: WireChunk = serde_json::from_str(data)
             .map_err(|error| ChatError::InvalidResponse(self.redact(&error.to_string())))?;
+        if let Some(error) = chunk.error {
+            return Err(ChatError::InvalidResponse(
+                self.redact(&format!("the endpoint sent an error: {error}")),
+            ));
+        }
         let mut events = Vec::new();
-        for choice in chunk.choices {
+        for choice in chunk.choices.into_iter().filter(|choice| choice.index == 0) {
             let delta = choice.delta;
             let reasoning = [delta.reasoning_content, delta.reasoning]
                 .into_iter()
@@ -116,11 +125,26 @@ impl Assembler {
                 self.pending.push_str(&text);
                 while let Some(at) = self.pending.find('\n') {
                     let line: String = self.pending.drain(..=at).collect();
-                    events.push(StreamEvent::Line(self.redact(line.trim_end_matches('\n'))));
+                    let line = line.trim_end_matches('\n');
+                    let line = line.strip_suffix('\r').unwrap_or(line);
+                    events.push(StreamEvent::Line(self.redact(line)));
                 }
             }
             for call in delta.tool_calls.unwrap_or_default() {
-                let partial = self.calls.entry(call.index).or_default();
+                // Without an index, a call with an id other than the last one's is a new call.
+                let index = call.index.unwrap_or_else(|| {
+                    let last = self.calls.last_key_value();
+                    match (last, &call.id) {
+                        (Some((&index, partial)), Some(id))
+                            if !id.is_empty() && *id != partial.id =>
+                        {
+                            index + 1
+                        }
+                        (Some((&index, _)), _) => index,
+                        (None, _) => 0,
+                    }
+                });
+                let partial = self.calls.entry(index).or_default();
                 if let Some(id) = call.id.filter(|id| !id.is_empty()) {
                     partial.id = id;
                 }
@@ -156,15 +180,16 @@ impl Assembler {
         let mut events = Vec::new();
         if !self.pending.is_empty() {
             let last = std::mem::take(&mut self.pending);
-            events.push(StreamEvent::Line(self.redact(&last)));
+            let last = last.strip_suffix('\r').unwrap_or(&last);
+            events.push(StreamEvent::Line(self.redact(last)));
         }
         let content = (!self.content.is_empty()).then(|| self.redact(&self.content));
         let tool_calls = std::mem::take(&mut self.calls)
             .into_values()
             .map(|call| ToolCall {
-                id: call.id,
-                name: call.name,
-                arguments: call.arguments,
+                id: self.redact(&call.id),
+                name: self.redact(&call.name),
+                arguments: self.redact(&call.arguments),
             })
             .collect();
         Ok((

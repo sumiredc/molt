@@ -1,8 +1,9 @@
 //! `molt doctor`: 設定した接続先のモデルが何を受け付けるかを役割ごとに確かめて表にし、
 //! `[capabilities]` を `config.toml` に書く（PRD §8.7・§11）。
 //!
-//! 確かめる 5 項目は、ID の存在（`models()`）、素の chat、`tool_choice: required`、
-//! `response_format: json_schema` の遵守、`reasoning_effort` の受け付け。
+//! 確かめる 6 項目は、ID の存在（`models()`）、素の chat、`tool_choice: required`、
+//! `response_format: json_schema` の遵守、`reasoning_effort` の受け付け、ストリーミング
+//! （流した応答から文章とツールの呼び出しを組み立てられること）。
 //! 接続の失敗は機能の欠落と分けて報告し、`[capabilities]` を書き換えない。
 //! 落ちているだけのエンドポイントを「非対応」と記録すると、`[capabilities]` が誤るため。
 
@@ -173,7 +174,7 @@ fn is_connection_failure(error: &ChatError) -> bool {
     }
 }
 
-/// 役割ごとに 5 項目を確かめる。`models()` が返らないか、確かめる途中で接続に失敗したら、
+/// 役割ごとに 6 項目を確かめる。`models()` が返らないか、確かめる途中で接続に失敗したら、
 /// それまでの結果を捨てて [`Unchecked`] を返す。
 fn diagnose(
     config: &Config,
@@ -220,7 +221,7 @@ fn check_role(
         streaming: Check::Skipped,
     };
     if !available.iter().any(|id| id == model) {
-        // 無い ID に送っても拒否されるだけなので、残りの 4 項目は確かめない
+        // 無い ID に送っても拒否されるだけなので、残りの 5 項目は確かめない
         report.exists = Check::Fail("not in the endpoint's model list".to_owned());
         return Ok(report);
     }
@@ -541,7 +542,7 @@ fn write_capabilities(path: &Path, checked: &Config, capabilities: &Capabilities
     Ok(())
 }
 
-/// `document` の `[capabilities.<役割>]` の 3 キーを書き換える。無い節・キーは足す。
+/// `document` の `[capabilities.<役割>]` の 4 キーを書き換える。無い節・キーは足す。
 /// 既にある値は前後の空白とコメントを残して値だけを替える。
 /// `[capabilities]` か役割が表でなければ `None`（`Config` として読めた後なので起きない）。
 fn set_capabilities(document: &mut DocumentMut, capabilities: &Capabilities) -> Option<()> {
@@ -846,7 +847,7 @@ streaming = false
         assert_eq!(fs::read_to_string(&env.path).unwrap(), CONFIG);
     }
 
-    // --- 5 項目の判定 ---
+    // --- 6 項目の判定 ---
 
     #[test]
     fn doctor_writes_every_capability_when_every_check_passes() {

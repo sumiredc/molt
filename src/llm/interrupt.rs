@@ -178,6 +178,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_stream_hands_over_each_event_and_returns_the_result_of_the_work() {
+        let interrupt = Interrupt::new();
+        let mut events = Vec::new();
+
+        let result = interrupt.stream(
+            |emit: &mut dyn FnMut(u8), _cancelled: &AtomicBool| {
+                emit(1);
+                emit(2);
+                7
+            },
+            &mut |event| events.push(event),
+        );
+
+        assert_eq!(result, Some(7));
+        assert_eq!(events, [1, 2]);
+        assert!(interrupt.idle.load(Ordering::SeqCst), "the wait has ended");
+    }
+
+    #[test]
+    fn raising_the_interrupt_during_a_stream_tells_the_work_and_returns_none() {
+        let interrupt = Interrupt::new();
+        let told = Arc::new(AtomicBool::new(false));
+        let seen = Arc::clone(&told);
+        let raise = interrupt.clone();
+        let mut events = Vec::new();
+
+        let result = interrupt.stream(
+            move |emit: &mut dyn FnMut(u8), cancelled: &AtomicBool| {
+                emit(1);
+                raise.raise();
+                while !cancelled.load(Ordering::SeqCst) {
+                    thread::sleep(Duration::from_millis(10));
+                }
+                seen.store(true, Ordering::SeqCst);
+                emit(2);
+            },
+            &mut |event| events.push(event),
+        );
+
+        assert_eq!(result, None);
+        let started = Instant::now();
+        while !told.load(Ordering::SeqCst) && started.elapsed() < Duration::from_secs(2) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert!(told.load(Ordering::SeqCst), "the work was told");
+        assert!(
+            !events.contains(&2),
+            "nothing after the interrupt: {events:?}"
+        );
+        assert!(interrupt.idle.load(Ordering::SeqCst), "the wait has ended");
+    }
+
+    #[test]
     fn a_wait_returns_the_result_of_the_work() {
         let interrupt = Interrupt::new();
         assert_eq!(interrupt.wait(|| 7), Some(7));

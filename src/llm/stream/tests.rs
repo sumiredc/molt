@@ -158,3 +158,124 @@ fn a_chunk_that_is_not_json_is_an_invalid_response_with_the_key_hidden() {
     assert!(matches!(&error, ChatError::InvalidResponse(_)), "{error:?}");
     assert!(!error.to_string().contains("sk-x"), "{error}");
 }
+
+#[test]
+fn a_stream_of_the_wire_format_fixture_puts_together_its_text_reasoning_and_tool_call() {
+    let path = format!(
+        "{}/tests/fixtures/llm/chat_stream.sse",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(&path).unwrap();
+    let mut assembler = Assembler::new(None);
+    let mut events = Vec::new();
+
+    for line in text.lines() {
+        events.extend(assembler.feed(line).unwrap());
+        if assembler.is_done() {
+            break;
+        }
+    }
+    let (last, response) = assembler.finish().unwrap();
+    events.extend(last);
+
+    assert_eq!(
+        events,
+        [
+            StreamEvent::Reasoning,
+            StreamEvent::Line("I will read it.".to_owned()),
+            StreamEvent::Line("First:".to_owned()),
+        ]
+    );
+    assert_eq!(
+        response.content.as_deref(),
+        Some("I will read it.\r\nFirst:")
+    );
+    assert_eq!(
+        response.tool_calls,
+        [ToolCall {
+            id: "call_1".to_owned(),
+            name: "read_file".to_owned(),
+            arguments: r#"{"path": "src/main.rs"}"#.to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn the_api_key_is_hidden_in_a_tool_call_put_together_across_pieces() {
+    const KEY: &str = "sk-tool-key";
+    let mut assembler = Assembler::new(Some(KEY));
+    let lines = [
+        chunk(
+            r#"{"tool_calls":[{"index":0,"id":"c","function":{"name":"write_file","arguments":"{\"content\":\"sk-to"}}]}"#,
+            None,
+        ),
+        chunk(
+            r#"{"tool_calls":[{"index":0,"function":{"arguments":"ol-key\"}"}}]}"#,
+            Some("tool_calls"),
+        ),
+    ];
+
+    feed_all(&mut assembler, &lines);
+    let (_, response) = assembler.finish().unwrap();
+
+    assert_eq!(
+        response.tool_calls[0].arguments,
+        r#"{"content":"<redacted>"}"#
+    );
+}
+
+#[test]
+fn an_error_in_the_stream_is_an_invalid_response_with_its_message() {
+    let mut assembler = Assembler::new(None);
+
+    let error = assembler
+        .feed(r#"data: {"error":{"message":"out of memory"}}"#)
+        .unwrap_err();
+
+    assert!(
+        matches!(&error, ChatError::InvalidResponse(why) if why.contains("out of memory")),
+        "{error:?}"
+    );
+}
+
+#[test]
+fn only_the_first_choice_is_read() {
+    let mut assembler = Assembler::new(None);
+    let lines = [
+        r#"data: {"choices":[{"index":1,"delta":{"content":"other\n"},"finish_reason":null}]}"#
+            .to_owned(),
+        chunk(r#"{"content":"first"}"#, Some("stop")),
+    ];
+
+    let events = feed_all(&mut assembler, &lines);
+    let (last, response) = assembler.finish().unwrap();
+
+    assert!(events.is_empty(), "{events:?}");
+    assert_eq!(last, [StreamEvent::Line("first".to_owned())]);
+    assert_eq!(response.content.as_deref(), Some("first"));
+}
+
+#[test]
+fn tool_calls_without_an_index_are_told_apart_by_their_id() {
+    let mut assembler = Assembler::new(None);
+    let lines = [
+        chunk(
+            r#"{"tool_calls":[{"id":"a","function":{"name":"list_files","arguments":"{}"}}]}"#,
+            None,
+        ),
+        chunk(
+            r#"{"tool_calls":[{"id":"b","function":{"name":"git_status","arguments":"{}"}}]}"#,
+            Some("tool_calls"),
+        ),
+    ];
+
+    feed_all(&mut assembler, &lines);
+    let (_, response) = assembler.finish().unwrap();
+
+    let names: Vec<&str> = response
+        .tool_calls
+        .iter()
+        .map(|call| call.name.as_str())
+        .collect();
+    assert_eq!(names, ["list_files", "git_status"]);
+}

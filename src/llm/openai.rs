@@ -92,8 +92,9 @@ impl OpenAiClient {
     }
 
     /// chat の応答を待つ間に `interrupt` が上がったら、応答を待たずに [`ChatError::Interrupted`]
-    /// を返すようにする。要求は別のスレッドで送り、中断したらその応答は捨てる（接続は切らないので、
-    /// エンドポイントは生成を続けうる）。
+    /// を返すようにする。要求は別のスレッドで送り、中断したらその応答は捨てる。ストリーミングでない
+    /// 応答は接続を切らないので、エンドポイントは生成を続けうる。流して受ける応答は、次の断片が
+    /// 届いたところで接続を閉じる（PRD §8.1）。
     pub(crate) fn with_interrupt(mut self, interrupt: Interrupt) -> Self {
         self.interrupt = Some(interrupt);
         self
@@ -223,9 +224,19 @@ fn read_failed(error: io::Error, timeout_secs: u64) -> ChatError {
             .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
             .is_some_and(reqwest::Error::is_timeout);
     if timed_out {
-        ChatError::TimedOut { secs: timeout_secs }
-    } else {
-        ChatError::InvalidResponse(format!("the stream could not be read: {error}"))
+        return ChatError::TimedOut { secs: timeout_secs };
+    }
+    // A failure of the connection, such as a reset, is a failure to reach the endpoint, as it is
+    // for a response that is not streamed; anything else is a response molt cannot read.
+    match error
+        .into_inner()
+        .map(|inner| inner.downcast::<reqwest::Error>())
+    {
+        Some(Ok(source)) => ChatError::Request(*source),
+        Some(Err(inner)) => {
+            ChatError::InvalidResponse(format!("the stream could not be read: {inner}"))
+        }
+        None => ChatError::InvalidResponse("the stream could not be read".to_owned()),
     }
 }
 
@@ -1257,7 +1268,8 @@ mod tests {
     #[test]
     fn an_interrupt_while_streaming_returns_at_once() {
         let events: Vec<String> = (0..20).map(|_| sse(r#"{"content":"x\n"}"#, None)).collect();
-        let (base_url, _server) = serve_stream(events, Duration::from_millis(200));
+        let (base_url, server) = serve_stream(events, Duration::from_millis(200));
+        let started = Instant::now();
         let interrupt = Interrupt::new();
         let client = OpenAiClient::new(&api(&base_url, "", 5), no_env)
             .unwrap()
@@ -1275,5 +1287,13 @@ mod tests {
 
         assert!(matches!(error, ChatError::Interrupted), "{error:?}");
         assert!(lines < 20, "it stopped early: {lines}");
+        // The connection was closed at the next piece, so the server could not send the rest,
+        // which would take 4 seconds.
+        server.join().unwrap();
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            started.elapsed()
+        );
     }
 }

@@ -323,6 +323,20 @@ mod tests {
     }
 
     #[test]
+    fn a_request_streams_only_for_a_role_whose_capability_says_so() {
+        let mut config = config();
+        config.capabilities.generate.streaming = true;
+        let router = Router::new(&config);
+
+        let streams: Vec<bool> = ROLES
+            .iter()
+            .map(|&role| router.request(role, user("hi")).stream)
+            .collect();
+
+        assert_eq!(streams, [false, true, false]);
+    }
+
+    #[test]
     fn chat_json_with_json_schema_sends_the_schema_as_response_format() {
         let fake = FakeChatClient::new();
         fake.push_chat(Ok(reply(r#"{"known": true}"#)));
