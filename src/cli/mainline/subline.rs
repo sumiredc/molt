@@ -128,6 +128,7 @@ fn explain(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Result<(), 
     let streams = ui.streams();
     if streams {
         ui.show_markdown(&side.explanation_head(), "  ");
+        ui.show("");
     }
     ui.status(Some(EXPLAINING));
     let mut hold = HoldFirstCode::default();
@@ -402,10 +403,11 @@ mod open {
         let shown = ui.shown();
         let at = shown.iter().position(|text| text == ENTER).unwrap();
         assert_eq!(
-            shown[at + 1..at + 11],
+            shown[at + 1..at + 12],
             [
                 STEP,
                 "  `dbg_macro` (macros)",
+                "",
                 "  dbg! prints a value.",
                 "  It returns it, too.",
                 "  Without `dbg_macro`, within your profile:\n  ```rust\n  fn main() {}\n  ```",
