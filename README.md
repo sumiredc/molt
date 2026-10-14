@@ -28,7 +28,7 @@ molt doctor
 molt init
 ```
 
-`molt doctor` checks what the endpoint and models support and records it in `config.toml` (recommended: molt sends `json_schema` and `reasoning_effort` only to the models it has found to support them). `molt init` asks about the Rust you know and saves your profile after you confirm it. `molt init --repo PATH` also reads which crates a repository of yours uses.
+`molt doctor` checks what the endpoint and models support and records it in `config.toml` (recommended: molt sends `json_schema` and `reasoning_effort`, and streams responses, only for the models it has found to support them). `molt init` asks about the Rust you know and saves your profile after you confirm it. `molt init --repo PATH` also reads which crates a repository of yours uses.
 
 ## Develop with molt
 
@@ -61,7 +61,7 @@ What molt does not guarantee is listed in [PRD §4](PRD.md#4-non-guarantees); fo
 
 Settings live in `config.toml` in molt's directory; [`examples/config.toml`](examples/config.toml) shows where that directory is (`MOLT_HOME`, `XDG_CONFIG_HOME`), every key with its default, and how to point at a local endpoint. The API key is read from the environment variable named by `api_key_env`.
 
-molt waits `timeout_secs` (300 by default) for each response. A slow model, such as a local one, can take longer than that to write one file: when molt stops with `the chat API did not respond within 300 seconds`, raise `timeout_secs` under `[api]`.
+molt waits `timeout_secs` (300 by default) for each response, or, for a model `molt doctor` found it can stream, for anything of the response to arrive. A slow model, such as a local one, can take longer than that to write one file: run `molt doctor` first, and when molt still stops with `the chat API did not respond within 300 seconds`, raise `timeout_secs` under `[api]`.
 
 Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and `molt` prints both paths when it ends with `/quit` or Ctrl-D ([PRD §8.8](PRD.md#88-persistence)).
 

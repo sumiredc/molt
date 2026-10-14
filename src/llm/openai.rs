@@ -10,10 +10,15 @@ use reqwest::StatusCode;
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
+use std::io::{self, BufRead, BufReader};
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use super::ChatClient;
 use super::interrupt::Interrupt;
+use super::stream::Assembler;
 use super::types::{
-    ChatError, ChatRequest, ChatResponse, Message, ResponseFormat, ToolCall, ToolChoice,
+    ChatError, ChatRequest, ChatResponse, Message, ResponseFormat, StreamEvent, ToolCall,
+    ToolChoice,
 };
 use crate::config::Api;
 
@@ -159,6 +164,71 @@ fn plain_http_host_off_this_machine(base_url: &str) -> Option<String> {
     })
 }
 
+/// 要求を `stream: true` で送り、server-sent events を 1 行ずつ読んで、届けるものを `emit` に
+/// 渡しながら応答を組み立てる（PRD §8.1・§8.7）。`timeout_secs` は、1 回の読み出しで何も届かない
+/// 時間の上限になる（blocking の reqwest は読み出しごとに待つ）。`cancelled` が立ったら、次に読めた
+/// ところで読むのをやめて接続を閉じる。API キー `key` は、行・応答・エラーから伏せる。
+fn read_stream(
+    builder: reqwest::blocking::RequestBuilder,
+    timeout_secs: u64,
+    key: Option<&str>,
+    cancelled: &AtomicBool,
+    emit: &mut dyn FnMut(StreamEvent),
+) -> Result<ChatResponse, ChatError> {
+    let redact = |text: String| match key {
+        Some(key) => text.replace(key, "<redacted>"),
+        None => text,
+    };
+    let failed = |source: reqwest::Error| {
+        if source.is_timeout() {
+            ChatError::TimedOut { secs: timeout_secs }
+        } else {
+            ChatError::Request(source)
+        }
+    };
+    let response = builder.send().map_err(failed)?;
+    let status = response.status();
+    if !status.is_success() {
+        let body = redact(response.text().map_err(failed)?);
+        return Err(ChatError::Status {
+            status: status.as_u16(),
+            body,
+        });
+    }
+    let mut assembler = Assembler::new(key);
+    for line in BufReader::new(response).lines() {
+        if cancelled.load(Ordering::SeqCst) {
+            return Err(ChatError::Interrupted);
+        }
+        let line = line.map_err(|error| read_failed(error, timeout_secs))?;
+        for event in assembler.feed(&line)? {
+            emit(event);
+        }
+        if assembler.is_done() {
+            break;
+        }
+    }
+    let (last, response) = assembler.finish()?;
+    for event in last {
+        emit(event);
+    }
+    Ok(response)
+}
+
+/// 流している本文の読み出しの失敗。reqwest の時間切れなら [`ChatError::TimedOut`]。
+fn read_failed(error: io::Error, timeout_secs: u64) -> ChatError {
+    let timed_out = error.kind() == io::ErrorKind::TimedOut
+        || error
+            .get_ref()
+            .and_then(|inner| inner.downcast_ref::<reqwest::Error>())
+            .is_some_and(reqwest::Error::is_timeout);
+    if timed_out {
+        ChatError::TimedOut { secs: timeout_secs }
+    } else {
+        ChatError::InvalidResponse(format!("the stream could not be read: {error}"))
+    }
+}
+
 /// 要求を送り、応答の状態と本文を受け取る。`timeout_secs` は、タイムアウトのエラーに載せる
 /// `[api]` の値。
 fn exchange(
@@ -180,6 +250,9 @@ fn exchange(
 
 impl ChatClient for OpenAiClient {
     fn chat(&self, request: &ChatRequest) -> Result<ChatResponse, ChatError> {
+        if request.stream {
+            return self.chat_streamed(request, &mut |_| {});
+        }
         let builder = self
             .http
             .post(self.endpoint("chat/completions"))
@@ -193,6 +266,46 @@ impl ChatClient for OpenAiClient {
             None => exchange(builder, timeout_secs)?,
         };
         parse_chat_response(&self.read_body(exchanged)?)
+    }
+
+    fn chat_streamed(
+        &self,
+        request: &ChatRequest,
+        on_event: &mut dyn FnMut(StreamEvent),
+    ) -> Result<ChatResponse, ChatError> {
+        if !request.stream {
+            let response = self.chat(request)?;
+            if let Some(content) = &response.content {
+                for line in content.lines() {
+                    on_event(StreamEvent::Line(line.to_owned()));
+                }
+            }
+            return Ok(response);
+        }
+        let builder = self
+            .http
+            .post(self.endpoint("chat/completions"))
+            .json(&request_body(request));
+        let builder = self.authorize(builder);
+        let timeout_secs = self.timeout_secs;
+        let key = self.api_key.as_ref().map(|ApiKey(key)| key.clone());
+        match &self.interrupt {
+            Some(interrupt) => interrupt
+                .stream(
+                    move |emit, cancelled| {
+                        read_stream(builder, timeout_secs, key.as_deref(), cancelled, emit)
+                    },
+                    on_event,
+                )
+                .unwrap_or(Err(ChatError::Interrupted)),
+            None => read_stream(
+                builder,
+                timeout_secs,
+                key.as_deref(),
+                &AtomicBool::new(false),
+                on_event,
+            ),
+        }
     }
 
     fn models(&self) -> Result<Vec<String>, ChatError> {
@@ -246,6 +359,9 @@ pub(crate) fn request_body(request: &ChatRequest) -> Value {
     }
     if let Some(effort) = &request.reasoning_effort {
         body.insert("reasoning_effort".to_owned(), json!(effort));
+    }
+    if request.stream {
+        body.insert("stream".to_owned(), json!(true));
     }
     Value::Object(body)
 }
@@ -389,6 +505,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             reasoning_effort: None,
+            stream: false,
         }
     }
 
@@ -994,5 +1111,169 @@ mod tests {
             server.join().unwrap().request_line,
             "GET /v1/models HTTP/1.1"
         );
+    }
+
+    /// 127.0.0.1 で 1 回だけリクエストを受け、本文を読んだあと、`events` の各行を `gap` おきに
+    /// server-sent events として送るサーバを立てる。戻り値は base URL と、受け取った本文を返す thread。
+    fn serve_stream(events: Vec<String>, gap: Duration) -> (String, JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
+        let handle = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut length = 0;
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                let line = line.trim_end();
+                if line.is_empty() {
+                    break;
+                }
+                if let Some((key, value)) = line.split_once(':')
+                    && key.trim().eq_ignore_ascii_case("content-length")
+                {
+                    length = value.trim().parse().unwrap();
+                }
+            }
+            let mut body = vec![0; length];
+            reader.read_exact(&mut body).unwrap();
+            let mut stream = stream;
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n"
+            );
+            for event in events {
+                thread::sleep(gap);
+                if write!(stream, "{event}\n\n").is_err() {
+                    break;
+                }
+                let _ = stream.flush();
+            }
+            String::from_utf8(body).unwrap()
+        });
+        (base_url, handle)
+    }
+
+    fn sse(delta: &str, finish: Option<&str>) -> String {
+        let finish = finish.map_or("null".to_owned(), |reason| format!("\"{reason}\""));
+        format!(
+            "data: {{\"choices\":[{{\"index\":0,\"delta\":{delta},\"finish_reason\":{finish}}}]}}"
+        )
+    }
+
+    fn streamed(model: &str) -> ChatRequest {
+        let mut request = request(model, vec![user("hi")]);
+        request.stream = true;
+        request
+    }
+
+    #[test]
+    fn a_streamed_reply_hands_over_its_lines_as_they_come_and_asks_to_stream() {
+        let (base_url, server) = serve_stream(
+            vec![
+                sse(r#"{"reasoning_content":"hmm"}"#, None),
+                sse(r#"{"content":"one\ntw"}"#, None),
+                sse(r#"{"content":"o"}"#, Some("stop")),
+                "data: [DONE]".to_owned(),
+            ],
+            Duration::ZERO,
+        );
+        let client = OpenAiClient::new(&api(&base_url, "", 5), no_env).unwrap();
+        let mut events = Vec::new();
+
+        let response = client
+            .chat_streamed(&streamed("m"), &mut |event| events.push(event))
+            .unwrap();
+
+        assert_eq!(
+            events,
+            [
+                StreamEvent::Reasoning,
+                StreamEvent::Line("one".to_owned()),
+                StreamEvent::Line("two".to_owned()),
+            ]
+        );
+        assert_eq!(response.content.as_deref(), Some("one\ntwo"));
+        let sent: Value = serde_json::from_str(&server.join().unwrap()).unwrap();
+        assert_eq!(sent["stream"], json!(true));
+    }
+
+    #[test]
+    fn a_request_that_does_not_stream_does_not_ask_to() {
+        assert_eq!(
+            request_body(&request("m", vec![user("hi")])).get("stream"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_stream_that_keeps_arriving_past_timeout_secs_is_not_cut() {
+        let mut events: Vec<String> = (0..5)
+            .map(|i| sse(&format!(r#"{{"content":"{i}\n"}}"#), None))
+            .collect();
+        events.push(sse("{}", Some("stop")));
+        let (base_url, server) = serve_stream(events, Duration::from_millis(400));
+        let client = OpenAiClient::new(&api(&base_url, "", 1), no_env).unwrap();
+        let started = Instant::now();
+
+        let response = client.chat(&streamed("m")).unwrap();
+
+        assert!(started.elapsed() > Duration::from_secs(2), "it took long");
+        assert_eq!(response.content.as_deref(), Some("0\n1\n2\n3\n4\n"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_stream_with_nothing_arriving_past_timeout_secs_is_timed_out() {
+        let (base_url, _server) = serve_stream(
+            vec![sse(r#"{"content":"late"}"#, Some("stop"))],
+            Duration::from_secs(3),
+        );
+        let client = OpenAiClient::new(&api(&base_url, "", 1), no_env).unwrap();
+
+        let error = client.chat(&streamed("m")).unwrap_err();
+
+        assert!(
+            matches!(error, ChatError::TimedOut { secs: 1 }),
+            "{error:?}"
+        );
+    }
+
+    #[test]
+    fn a_stream_that_ends_before_its_finish_reason_is_a_failure() {
+        let (base_url, server) =
+            serve_stream(vec![sse(r#"{"content":"half"}"#, None)], Duration::ZERO);
+        let client = OpenAiClient::new(&api(&base_url, "", 5), no_env).unwrap();
+
+        let error = client.chat(&streamed("m")).unwrap_err();
+
+        assert!(
+            matches!(&error, ChatError::InvalidResponse(why) if why.contains("finish_reason")),
+            "{error:?}"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn an_interrupt_while_streaming_returns_at_once() {
+        let events: Vec<String> = (0..20).map(|_| sse(r#"{"content":"x\n"}"#, None)).collect();
+        let (base_url, _server) = serve_stream(events, Duration::from_millis(200));
+        let interrupt = Interrupt::new();
+        let client = OpenAiClient::new(&api(&base_url, "", 5), no_env)
+            .unwrap()
+            .with_interrupt(interrupt.clone());
+        let mut lines = 0;
+
+        let error = client
+            .chat_streamed(&streamed("m"), &mut |_| {
+                lines += 1;
+                if lines == 2 {
+                    interrupt.raise();
+                }
+            })
+            .unwrap_err();
+
+        assert!(matches!(error, ChatError::Interrupted), "{error:?}");
+        assert!(lines < 20, "it stopped early: {lines}");
     }
 }

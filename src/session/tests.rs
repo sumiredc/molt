@@ -31,6 +31,7 @@ fn request() -> ChatRequest {
         tool_choice: Some(ToolChoice::Auto),
         response_format: None,
         reasoning_effort: None,
+        stream: false,
     }
 }
 

@@ -104,6 +104,8 @@ pub struct RoleCapabilities {
     pub tool_choice_required: bool,
     pub json_schema: bool,
     pub reasoning_effort: bool,
+    /// 応答を server-sent events で流して受けられる（PRD §8.7）。
+    pub streaming: bool,
 }
 
 impl Config {
@@ -255,6 +257,7 @@ mod tests {
             tool_choice_required: false,
             json_schema: false,
             reasoning_effort: false,
+            streaming: false,
         };
         let capabilities = Config::default().capabilities;
         assert_eq!(capabilities.light, none);

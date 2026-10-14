@@ -7,7 +7,8 @@
 base_url = "https://api.tokenfactory.nebius.com/v1"
 # The name of the environment variable to read the API key from. Do not write the key itself here
 api_key_env = "NEBIUS_API_KEY"
-# The timeout of one request, in seconds
+# How long molt waits, in seconds: for a whole response, or, for a role that streams
+# (streaming = true below), for anything to arrive
 timeout_secs = 300
 
 [models]
@@ -26,16 +27,19 @@ reason = "high"
 tool_choice_required = false
 json_schema = false
 reasoning_effort = false
+streaming = false
 
 [capabilities.generate]
 tool_choice_required = false
 json_schema = false
 reasoning_effort = false
+streaming = false
 
 [capabilities.reason]
 tool_choice_required = false
 json_schema = false
 reasoning_effort = false
+streaming = false
 
 # To use a local OpenAI-compatible endpoint, replace both base_url and api_key_env in [api] above
 # as below, with <local-endpoint> as the actual host and port.
@@ -48,5 +52,7 @@ reasoning_effort = false
 # - With a key, molt does not send it over http:// to a host other than loopback (localhost,
 #   127.0.0.0/8, ::1): it returns an error without making a client. To send a key, use https
 # - If the endpoint requires a key, name a variable of its own (e.g. api_key_env = "LOCAL_API_KEY")
-# - A local model can take longer than timeout_secs to write one file. If molt stops with
-#   "the chat API did not respond within 300 seconds", raise timeout_secs in [api] (e.g. 1200)
+# - A local model can take longer than timeout_secs to write one file. Run molt doctor, so that
+#   the roles it can stream are streamed and timeout_secs bounds only a pause in the response.
+#   If molt still stops with "the chat API did not respond within 300 seconds", raise
+#   timeout_secs in [api] (e.g. 1200)

@@ -97,6 +97,50 @@ impl Interrupt {
             }
         }
     }
+
+    /// Runs `work` on its own thread like [`Interrupt::wait`], and hands each event it sends to
+    /// `on_event` on this thread as it comes. When the interrupt is raised, `work` is told so
+    /// through the flag it gets, which it is to look at between its events (a streamed response
+    /// then drops its connection, PRD §8.1), and `None` is returned at once.
+    pub(crate) fn stream<E: Send + 'static, T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut dyn FnMut(E), &AtomicBool) -> T + Send + 'static,
+        on_event: &mut dyn FnMut(E),
+    ) -> Option<T> {
+        enum Message<E, T> {
+            Event(E),
+            Done(T),
+        }
+        let _armed = Armed::new(self);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let (sender, receiver) = mpsc::channel();
+        let flag = Arc::clone(&cancelled);
+        thread::spawn(move || {
+            let events = sender.clone();
+            let mut emit = |event| {
+                // The receiver is gone when the wait was interrupted.
+                let _ = events.send(Message::Event(event));
+            };
+            let result = work(&mut emit, &flag);
+            let _ = sender.send(Message::Done(result));
+        });
+        loop {
+            if self.interrupted.load(Ordering::SeqCst) {
+                cancelled.store(true, Ordering::SeqCst);
+                return None;
+            }
+            match receiver.recv_timeout(POLL) {
+                Ok(_) if self.interrupted.load(Ordering::SeqCst) => {
+                    cancelled.store(true, Ordering::SeqCst);
+                    return None;
+                }
+                Ok(Message::Event(event)) => on_event(event),
+                Ok(Message::Done(result)) => return Some(result),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => panic!("the request thread panicked"),
+            }
+        }
+    }
 }
 
 /// A wait going on. The first of the waits going on together starts by forgetting an interrupt

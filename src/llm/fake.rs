@@ -116,6 +116,7 @@ mod tests {
             tool_choice: None,
             response_format: None,
             reasoning_effort: None,
+            stream: false,
         }
     }
 

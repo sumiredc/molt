@@ -110,6 +110,7 @@ impl Router {
             tool_choice: None,
             response_format: None,
             reasoning_effort: self.reasoning_effort(role).map(str::to_owned),
+            stream: self.capabilities(role).streaming,
         }
     }
 
