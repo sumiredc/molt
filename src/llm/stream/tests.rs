@@ -279,3 +279,46 @@ fn tool_calls_without_an_index_are_told_apart_by_their_id() {
         .collect();
     assert_eq!(names, ["list_files", "git_status"]);
 }
+
+#[test]
+fn an_error_in_the_stream_with_an_http_code_is_a_status() {
+    let mut assembler = Assembler::new(Some("sk-secret"));
+
+    let error = assembler
+        .feed(r#"data: {"error":{"message":"busy sk-secret","code":503}}"#)
+        .unwrap_err();
+
+    match error {
+        ChatError::Status { status, body } => {
+            assert_eq!(status, 503);
+            assert!(
+                body.contains("busy") && !body.contains("sk-secret"),
+                "{body}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_call_whose_id_comes_after_its_first_piece_stays_one_call() {
+    let mut assembler = Assembler::new(None);
+    let lines = [
+        chunk(
+            r#"{"tool_calls":[{"function":{"name":"read_file","arguments":""}}]}"#,
+            None,
+        ),
+        chunk(
+            r#"{"tool_calls":[{"id":"call_1","function":{"arguments":"{\"path\":\"a\"}"}}]}"#,
+            None,
+        ),
+        chunk("{}", Some("tool_calls")),
+    ];
+
+    feed_all(&mut assembler, &lines);
+    let (_, response) = assembler.finish().unwrap();
+
+    assert_eq!(response.tool_calls.len(), 1, "{:?}", response.tool_calls);
+    assert_eq!(response.tool_calls[0].id, "call_1");
+    assert_eq!(response.tool_calls[0].name, "read_file");
+}

@@ -106,9 +106,18 @@ impl Assembler {
         let chunk: WireChunk = serde_json::from_str(data)
             .map_err(|error| ChatError::InvalidResponse(self.redact(&error.to_string())))?;
         if let Some(error) = chunk.error {
-            return Err(ChatError::InvalidResponse(
-                self.redact(&format!("the endpoint sent an error: {error}")),
-            ));
+            // An error with an HTTP code is the same failure a reply that does not stream gets as a
+            // status, so doctor does not record it as a missing capability.
+            let status = error
+                .get("code")
+                .and_then(serde_json::Value::as_u64)
+                .and_then(|code| u16::try_from(code).ok())
+                .filter(|code| (400..600).contains(code));
+            let body = self.redact(&error.to_string());
+            return Err(match status {
+                Some(status) => ChatError::Status { status, body },
+                None => ChatError::InvalidResponse(format!("the endpoint sent an error: {body}")),
+            });
         }
         let mut events = Vec::new();
         for choice in chunk.choices.into_iter().filter(|choice| choice.index == 0) {
@@ -131,12 +140,13 @@ impl Assembler {
                 }
             }
             for call in delta.tool_calls.unwrap_or_default() {
-                // Without an index, a call with an id other than the last one's is a new call.
+                // Without an index, a call with an id other than the last one's is a new call. A last call
+                // with no id yet takes the id that comes.
                 let index = call.index.unwrap_or_else(|| {
                     let last = self.calls.last_key_value();
                     match (last, &call.id) {
                         (Some((&index, partial)), Some(id))
-                            if !id.is_empty() && *id != partial.id =>
+                            if !id.is_empty() && !partial.id.is_empty() && *id != partial.id =>
                         {
                             index + 1
                         }
