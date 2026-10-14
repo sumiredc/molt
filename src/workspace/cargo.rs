@@ -164,8 +164,10 @@ impl Cargo {
     }
 
     fn execute(&self, argv: &[&str]) -> Result<CargoOutput, CargoError> {
+        // Plain output: the side line reads the places of errors from it (PRD UC3 ③).
         let output = Command::new("cargo")
             .args(argv)
+            .env("CARGO_TERM_COLOR", "never")
             .current_dir(self.root.as_path())
             .stdin(Stdio::null())
             .output()

@@ -23,6 +23,16 @@ impl ChangedLines {
             .copied()
             .unwrap_or(true)
     }
+
+    /// The changed lines, 1-based, in order.
+    pub fn numbers(&self) -> Vec<usize> {
+        self.changed
+            .iter()
+            .enumerate()
+            .filter(|(_, changed)| **changed)
+            .map(|(index, _)| index + 1)
+            .collect()
+    }
 }
 
 /// The lines of `new` that are changed from `old`. When `old` is empty, every

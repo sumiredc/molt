@@ -9,19 +9,20 @@
 
 use std::fmt::Display;
 
-use super::mainline::{Boundary, BoundaryCause, Change, CommitOutcome};
+use super::mainline::{Boundary, Change, CommitOutcome};
+use crate::checker::ParseError;
 use crate::checker::diff::{DiffLine, line_diff};
-use crate::checker::{Finding, ParseError};
 use crate::profile::status::ItemKey;
 
 /// The system prompt of the main line.
 pub const MAIN_LINE_SYSTEM: &str = "\
 You are molt, a coding agent for Rust working in the cargo project at the current directory.
-Do what the user asks by calling the tools you are given, one step at a time.
+Do what the user asks by calling the tools you are given.
 Read the files before you talk about their content, and do not guess what they contain.
 Use only the tools you are given, with arguments that are one JSON object matching the tool's schema.
-Every `write_file` and `edit_file` is checked against the user's comprehension profile before it reaches the disk: content using a syntax element or crate outside the profile is rejected and not written.
-After a rejection, rewrite the content with only what the profile allows. If the request cannot be done well without those items, call `request_boundary` instead.
+Write the code the request needs, with whatever Rust it needs. Do not avoid a construct because the user may not know it: molt explains it to them.
+molt compares every `write_file` and `edit_file` with the user's comprehension profile, the Rust syntax elements and crates the user has written before. A write whose changed lines use only those is written as it is. A write whose changed lines use anything else is a step: molt writes it, stops, and explains those lines to the user, who chooses how to go on.
+Keep each step small: at most 3 distinct syntax elements or crates the user has not written, and at most 30 changed lines. A larger write is sent back to you, not written, to be split into smaller steps. Write what the user knows in larger pieces, and what they do not know one small step at a time.
 When the request is done, or you cannot go further, call `finish` with a short summary for the user.
 If files were written, molt runs `cargo check` after you finish and gives you its errors to fix.
 Answer in the language of the user's latest input.";
@@ -33,13 +34,13 @@ pub const LIST_FILES_PATH: &str =
 pub const READ_FILE: &str = "Read the content of a file in the project.";
 pub const READ_FILE_PATH: &str = "The file, relative to the project root.";
 pub const WRITE_FILE: &str = "Write the whole content of a file in the project, creating it and \
-     its directories if needed. The content is checked against the user's profile first, and \
-     written only if it passes.";
+     its directories if needed. The changed lines are compared with the user's profile first: \
+     a step stops the turn for the user, and a write larger than a step is sent back to be split.";
 pub const WRITE_FILE_PATH: &str = "The file, relative to the project root.";
 pub const WRITE_FILE_CONTENT: &str = "The whole new content of the file.";
 pub const EDIT_FILE: &str = "Replace the one place in an existing file where `old_string` \
-     occurs with `new_string`. The edited content is checked against the user's profile first, \
-     and written only if it passes.";
+     occurs with `new_string`. The changed lines are compared with the user's profile first: \
+     a step stops the turn for the user, and a write larger than a step is sent back to be split.";
 pub const EDIT_FILE_PATH: &str = "The file, relative to the project root.";
 pub const EDIT_FILE_OLD_STRING: &str =
     "The exact text to replace. It must occur exactly once in the file.";
@@ -58,15 +59,6 @@ pub const GIT_COMMIT: &str = "Commit the files molt changed in this session that
      user the diff and the message and commits only if the user approves; other changes in the \
      working tree are left out.";
 pub const GIT_COMMIT_MESSAGE: &str = "The commit message.";
-pub const REQUEST_BOUNDARY: &str = "Stop and hand the request to the user when it cannot be \
-     done well without items outside the user's profile. The user then chooses how to go on. \
-     Call it instead of writing code that you know uses such items.";
-pub const REQUEST_BOUNDARY_ITEMS: &str = "The items the request needs: element names as the \
-     rejections name them (`clone`, `arc`), or `crate:<name>` for a crate.";
-pub const REQUEST_BOUNDARY_REASON: &str =
-    "Why the request is hard without these items, in one or two sentences.";
-pub const REQUEST_BOUNDARY_PROPOSED_CODE: &str =
-    "The code you would write with these items, if you have it.";
 pub const FINISH: &str = "End your turn. Call it when the request is done or you cannot go \
      further. Tool calls after it in the same response are not run.";
 pub const FINISH_SUMMARY: &str =
@@ -78,9 +70,15 @@ pub const FINISHED: &str = "finished";
 /// The result of a tool call the loop did not run because the turn had already stopped.
 pub const NOT_RUN: &str = "not run: the turn stopped before this tool call";
 
+/// The result of a tool call the loop did not run because a write before it in the same
+/// response was sent back to be split: the model is to split that write first.
+pub const NOT_RUN_AFTER_SPLIT: &str = "not run: a write before this tool call was sent back to be split; split it first, then call this again if it is still needed";
+
 /// The result of the tool call that would go over the budget of `budget` tool calls per turn.
 pub fn over_budget(budget: usize) -> String {
-    format!("not run: this turn has used all {budget} tool calls, so it stops here")
+    format!(
+        "not run: this turn has used all {budget} tool calls since its last boundary, so it stops here"
+    )
 }
 
 /// The result of a tool call that failed: unknown tool, arguments that do not fit, a path
@@ -94,36 +92,10 @@ pub fn written(path: &str) -> String {
     format!("written: {path}")
 }
 
-/// The result of `write_file` or `edit_file` whose content uses items outside the profile: each
-/// item with its line and category, and what to do instead (PRD §8.4). The file was not written.
-pub fn rejected(path: &str, findings: &[Finding]) -> String {
-    format!(
-        "rejected: {path} was not written, because the content uses items outside the user's profile:\n{}\n\
-         Rewrite the content without these items, using only what the profile allows. \
-         If the request cannot be done well without them, call `request_boundary` with them instead.",
-        finding_lines(findings)
-    )
-}
-
-/// The result of `write_file` or `edit_file` whose content repeats `repeated`, items already
-/// rejected in this turn. The file was not written, and the turn stops at a boundary.
-pub fn rejected_again(path: &str, findings: &[Finding], repeated: &[ItemKey]) -> String {
-    let repeated = repeated
-        .iter()
-        .map(|key| format!("`{key}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    format!(
-        "rejected again: {path} was not written, because the content uses items outside the user's profile:\n{}\n\
-         Already rejected before in this turn: {repeated}. So the turn stops here at a boundary. \
-         {AT_BOUNDARY}",
-        finding_lines(findings)
-    )
-}
-
-/// The result of `request_boundary`.
-pub fn boundary_requested() -> String {
-    format!("boundary: the turn stops here. {AT_BOUNDARY}")
+/// The result of `write_file` or `edit_file` that molt wrote as a step: the turn stops at a
+/// boundary, for the user to choose how to go on (PRD UC3).
+pub fn step_written(path: &str) -> String {
+    format!("written as a step: {path}. The turn stops here. {AT_BOUNDARY}")
 }
 
 /// What the model is told at a boundary. The user may withdraw the request there, so the next
@@ -131,11 +103,39 @@ pub fn boundary_requested() -> String {
 const AT_BOUNDARY: &str = "The user decides how to go on: the next user message either says \
      how, or is a new request that replaces this one.";
 
-/// The result of `request_boundary` naming only `allowed`, items the profile already allows.
-/// The turn goes on.
-pub fn all_allowed(allowed: &str) -> String {
+/// The result of `write_file` or `edit_file` whose changed lines are more than a step holds: the
+/// `changed` lines hold `items` the user has not written (PRD §2, §8.4). The file was not
+/// written. It asks only for smaller steps, not for doing without the items (PRD §3).
+pub fn split(path: &str, items: &[ItemKey], changed: usize) -> String {
+    let items = items
+        .iter()
+        .map(|key| format!("`{key}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
     format!(
-        "not a boundary: the user's profile already allows {allowed}. Write the code with them."
+        "not written: {path} changes {changed} lines with items the user has not written ({items}), \
+         more than one step holds: at most {} of them and at most {} changed lines. Split it into smaller writes, \
+         each a step the user can follow, and write the first one now. Use the items the code needs; \
+         the user is shown each step.",
+        super::mainline::STEP_ITEMS,
+        super::mainline::STEP_LINES
+    )
+}
+
+/// The result of the write over the step limit after `budget` split requests in a row: the turn
+/// stops. The file was not written.
+pub fn split_over_budget(path: &str, budget: usize) -> String {
+    format!(
+        "not written: {path} is still more than one step holds, after {budget} requests to split in a row. The turn stops here."
+    )
+}
+
+/// The result of `run_cargo add` for a crate that is not `known` and has not been through a
+/// boundary yet (PRD UC2): the user meets it in a step first.
+pub fn crate_add_before_step(name: &str) -> String {
+    format!(
+        "not run: the user has not written the crate `{name}`. Write the code that uses it first; \
+         molt shows it to the user as a step, and adds the crate after their choice."
     )
 }
 
@@ -147,23 +147,6 @@ pub fn parse_error(path: &str, error: &ParseError) -> String {
          Fix the content and write the file again.",
         error.line, error.column, error.message
     )
-}
-
-/// `- line 3: clone (ownership) in `x.clone()``, one per finding.
-fn finding_lines(findings: &[Finding]) -> String {
-    findings
-        .iter()
-        .map(|finding| {
-            let category = finding
-                .category()
-                .map_or("crates", |category| category.name());
-            format!(
-                "- line {}: {} ({category}) in `{}`",
-                finding.line, finding.key, finding.text
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
 }
 
 /// The result of a tool call whose arguments are not a JSON object, asking the model to send
@@ -215,8 +198,8 @@ pub fn check_failed(stdout: &str, stderr: &str, notes: &[String]) -> String {
         result.push_str(note);
     }
     result.push_str(
-        "\nFix the errors, then call `finish` again. If they cannot be fixed within the user's \
-         profile, call `finish` and say why.",
+        "\nFix the errors, then call `finish` again. If they cannot be fixed, call `finish` and \
+         say why.",
     );
     result
 }
@@ -318,15 +301,15 @@ pub fn fixed_commit_message(files: &[String]) -> String {
 /// The system prompt of the side line (PRD UC3). The side line has a message list of its own, so
 /// none of it reaches the main line.
 pub const SIDE_LINE_SYSTEM: &str = "\
-You are molt's side line. A request of the user stopped at a boundary: the code for it needs Rust syntax elements or crates that the user's comprehension profile does not allow yet, because the user does not understand them yet.
-Your job is to help the user understand them. Do not decide how the request goes on: the user does.
-First explain the idea of the items you are asked to explain: what problem they solve and how they work, in one paragraph of plain prose. When you are told the user has seen an item before, do not explain its idea again. Then, when asked, write the one other way to write the code: without the items, with only what the user's profile allows, so that the user can compare it with the code that uses them. Do not write the rest of the request's code, and do not list other alternatives.
+You are molt's side line. molt wrote a small step of the code for a request of the user, and stopped: the lines of the step use Rust syntax elements or crates the user has not written before.
+Your job is to help the user understand those lines. Do not decide how the request goes on: the user does.
+First explain each item you are asked to explain, as it is used in those lines: what problem it solves there and how it works, in plain prose, one short paragraph. When you are told the user has seen an item before, explain only what it does in these lines, in a sentence or two. Then, when asked, write the one other way to write the lines: without the items, with only what the user has written before, so that the user can compare. Do not write the rest of the request's code, and do not list other alternatives.
 Then answer the user's questions about them, briefly and concretely. Short code examples are fine when they help.
 Answer in the language of the user's latest input.";
 
-/// What the side line tells the model about `boundary` to get the explanation: the items, what the
-/// main line tried, and the user's request on the main line, whose language the explanation is
-/// to follow. The items of `seen` the user has seen before (PRD §7): their idea is not asked for,
+/// What the side line tells the model about `boundary` to get the explanation: the items, the
+/// step's lines, and the user's request on the main line, whose language the explanation is to
+/// follow. The items of `seen` the user has seen before (PRD §7): their idea is not asked for,
 /// and when every item is one of them, no idea is (the explanation is shorter).
 pub fn side_line_context(boundary: &Boundary, request: Option<&str>, seen: &[ItemKey]) -> String {
     let items = boundary
@@ -346,29 +329,18 @@ pub fn side_line_context(boundary: &Boundary, request: Option<&str>, seen: &[Ite
         })
         .collect::<Vec<_>>()
         .join("\n");
+    let step = &boundary.step;
+    let lines = step
+        .lines
+        .iter()
+        .map(|(line, text)| format!("{line:>4} | {text}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let mut context = format!(
-        "The request needs these items, which the user's profile does not allow:\n{items}\n\n"
+        "The step uses these items, which the user has not written before:\n{items}\n\n\
+         molt wrote these lines to `{}` (line numbers on the left):\n```\n{lines}\n```",
+        step.path
     );
-    match &boundary.cause {
-        BoundaryCause::RejectedTwice { path, content } => context.push_str(&format!(
-            "The main line tried to write this to `{path}`, and it was rejected:\n```rust\n{}\n```",
-            content.trim_end()
-        )),
-        BoundaryCause::Requested {
-            reason,
-            proposed_code,
-        } => {
-            context.push_str(&format!(
-                "The main line asked the user for them, because: {reason}"
-            ));
-            if let Some(code) = proposed_code {
-                context.push_str(&format!(
-                    "\nIt proposed this code:\n```rust\n{}\n```",
-                    code.trim_end()
-                ));
-            }
-        }
-    }
     if let Some(request) = request {
         context.push_str(&format!("\n\nThe user's request was:\n{request}"));
     }
@@ -386,10 +358,15 @@ fn idea_request(items: &[ItemKey], seen: &[ItemKey]) -> String {
         .cloned()
         .collect();
     match (seen.is_empty(), unseen) {
-        (true, _) => "Explain the idea of these items in one paragraph.".to_owned(),
+        (true, _) => {
+            "Explain these items as they are used in these lines: one short paragraph for the \
+             items of each category."
+                .to_owned()
+        }
         (false, true) => format!(
             "The user has seen {} before: do not explain the idea of those items again. Explain \
-             the idea of the other items in one paragraph.",
+             the other items as they are used in these lines: one short paragraph for the items of \
+             each category.",
             item_names(&seen)
         ),
         (false, false) => "The user has seen all of these items before: do not explain their \
@@ -414,27 +391,57 @@ pub fn compare_request(allowed: &[ItemKey], paragraph: bool) -> String {
         "Write no paragraph. Instead"
     };
     format!(
-        "{first}, rewrite the code the main line tried without these items, using \
-         only the syntax elements and crates the user's profile allows: {allowed}. Write it as \
+        "{first}, rewrite these lines without these items, using \
+         only the syntax elements and crates the user has written before: {allowed}. Write it as \
          one ```rust code block, and write nothing after it. If it cannot be written well that \
          way, write no code block."
     )
 }
 
 /// The one message the side line hands to the main line (PRD §8.5): `BOUNDARY RESOLVED:` and the
-/// kind of resolution (`choice`), the items, and for ② the one-line `policy`.
-pub fn boundary_resolved(choice: &str, items: &[ItemKey], policy: Option<&str>) -> String {
+/// kind of resolution (`choice`: `unlock`, `rewrite` or `next`), the items, and for ② the
+/// one-line `policy`. `after_user_wrote` holds the files the user changed when ③ was chosen
+/// before and took the step back: the step is to be written again (①) or without the items (②),
+/// and those files re-read.
+pub fn boundary_resolved(
+    choice: &str,
+    items: &[ItemKey],
+    policy: Option<&str>,
+    after_user_wrote: Option<&[&str]>,
+) -> String {
     let names = item_names(items);
-    let what = match policy {
-        None => format!(
-            "The user understood these items and allows them now: {names}. Go on with the \
-             request the way you tried, using them."
+    let mut what = match (choice, policy) {
+        ("next", _) => format!(
+            "The user read the explanation of {names} and goes on. The step stays as you wrote \
+             it. Go on with the request; the user has still not written these items, so a later \
+             step with them is explained again."
         ),
-        Some(policy) => format!(
-            "These items are still not allowed: {names}. Rewrite the code for the request \
-             without them.\nPolicy: {policy}"
+        (_, Some(policy)) => format!(
+            "The user wants the code without {names}. The step was taken back: write that part \
+             again without them.\nPolicy: {policy}"
         ),
+        _ => match after_user_wrote {
+            Some(_) => format!(
+                "The user understood {names}, which may be used from now on. The step was taken \
+                 back: write it again, using them."
+            ),
+            None => format!(
+                "The user understood {names}, which may be used from now on. The step stays as you \
+                 wrote it. Go on with the request the way you were going."
+            ),
+        },
     };
+    if let Some(paths) = after_user_wrote.filter(|paths| !paths.is_empty()) {
+        let paths = paths
+            .iter()
+            .map(|path| format!("`{path}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        what.push_str(&format!(
+            "\nRe-read these files first: the user started writing in them, and they stay as the \
+             user left them: {paths}."
+        ));
+    }
     format!(
         "BOUNDARY RESOLVED: {choice}\n{what}\nKeep answering in the language of the user's \
          request, not in the language of this message."
@@ -442,14 +449,14 @@ pub fn boundary_resolved(choice: &str, items: &[ItemKey], policy: Option<&str>) 
 }
 
 /// The one message the side line hands to the main line after ③ (PRD §8.5): `BOUNDARY RESOLVED:
-/// user_wrote`, the items in the user's lines that the profile allows now, and the files to
+/// user_wrote`, the items in the user's lines that are `known` now, and the files to
 /// re-read.
-pub fn user_wrote_resolved(items: &[ItemKey], paths: &[&str]) -> String {
+pub fn user_wrote_resolved(step_items: &[ItemKey], items: &[ItemKey], paths: &[&str]) -> String {
     let allowed = if items.is_empty() {
         "Their lines use nothing new to the profile.".to_owned()
     } else {
         format!(
-            "The profile allows the items in their lines now: {}.",
+            "The items in their lines are known now: {}.",
             item_names(items)
         )
     };
@@ -459,27 +466,37 @@ pub fn user_wrote_resolved(items: &[ItemKey], paths: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!(
-        "BOUNDARY RESOLVED: user_wrote\nThe user wrote that part of the request themselves, and \
-         it builds. {allowed}\nRe-read these files before going on, since the user changed them: \
+        "BOUNDARY RESOLVED: user_wrote\nThe step with {} was taken back, and the user wrote that \
+         part of the request themselves. {allowed}\nRe-read these files before going on, since the user changed them: \
          {paths}. Go on with the rest of the request from there, and keep what the user wrote.\n\
          Keep answering in the language of the user's request, not in the language of this \
-         message."
+         message.",
+        item_names(step_items)
+    )
+}
+
+/// Added to the message of the choice when the step at `path` could not be taken back, since the
+/// file changed after it (PRD UC3).
+pub fn step_left(path: &str) -> String {
+    format!(
+        "\nNote: the step could not be taken back, since `{path}` changed after it. Re-read it \
+         before going on."
     )
 }
 
 /// What the `reason` model is asked when the user chooses ③, after the side line's messages.
 pub fn guidance_request(items: &[ItemKey]) -> String {
     format!(
-        "The user chose to write the code that needs {} themselves. Tell them where to write \
-         what: the file and the place in it, and what that code is to do for the request. Do not \
-         write the code for them. Be brief.",
+        "The user chose to write the step that needs {} themselves, and molt took the step \
+         back. Tell them where to write what: the file and the place in it, and what that code is \
+         to do for the request. Do not write the code for them. Be brief.",
         item_names(items)
     )
 }
 
 /// The system prompt of the review of ③ (PRD §8.7: the `generate` model).
 pub const REVIEW_SYSTEM: &str = "\
-You review Rust code that the user wrote themselves for a request, while learning the syntax elements and crates it uses. It builds with `cargo check`.
+You review Rust code that the user wrote themselves for a request, while learning the syntax elements and crates it uses. `cargo check` finds no error in the lines they wrote.
 Point out what is wrong or could be better in the lines the user wrote, briefly and concretely, and say what is good about them. Do not rewrite the whole code.
 Answer in the language of the user's request.";
 
@@ -518,19 +535,16 @@ pub fn review_request(items: &[ItemKey], request: Option<&str>, files: &[Change]
 /// What the `light` model is asked for the one-line policy of ②, after the side line's messages.
 pub fn policy_request(items: &[ItemKey]) -> String {
     format!(
-        "The user chose to have the code of the request written without {}, using only \
-         constructs they already know. Write the coding policy for that in one line: how to \
-         write the request without these items. Answer with that line only.",
+        "The user chose to have the step written without {}. Write the coding policy for that in \
+         one line: how to write that part without these items. Other items may still be used; \
+         molt shows them to the user as steps. Answer with that line only.",
         item_names(items)
     )
 }
 
 /// The policy of ② when the `light` model cannot make one.
 pub fn fixed_policy(items: &[ItemKey]) -> String {
-    format!(
-        "Write it without {}, using only what the profile allows.",
-        item_names(items)
-    )
+    format!("Write that part without {}.", item_names(items))
 }
 
 /// `` `dbg_macro`, `crate:tokio` ``.

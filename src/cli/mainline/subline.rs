@@ -5,7 +5,7 @@ mod resolve;
 mod user_wrote;
 
 use super::show_error_of;
-use crate::agent::mainline::MainLine;
+use crate::agent::mainline::{Boundary, MainLine};
 use crate::agent::subline::{Choice, Resolution, SubLine};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
@@ -39,22 +39,23 @@ pub(super) enum Left {
 /// Runs the side line of `agent`, which stopped at its boundary, until the user leaves it. The
 /// explanation is asked for the first time only; when the side line is opened again, the
 /// questions go on where they were, and so does ③ when the user was writing.
-pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Left {
-    let log = agent.log();
+pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> Left {
     ui.show(&banner(&format!(
         "side line: {}",
         names(&side.boundary().items)
     )));
     if !side.explained() {
-        match side.explain(log) {
+        // Before the explanation, which takes a while and refers to them (PRD §8.6).
+        ui.show(&indent(&step_text(side.boundary())));
+        match side.explain(agent.log()) {
             Ok(explanation) => ui.show(&indent(&explanation)),
             Err(ChatError::Interrupted) => {
-                show_error_of(ui, log);
+                show_error_of(ui, agent.log());
                 return leave(ui, Left::Interrupted);
             }
             Err(error) => ui.show(&indent(&format!("Could not get the explanation: {error}"))),
         }
-        show_error_of(ui, log);
+        show_error_of(ui, agent.log());
     }
     if side.is_recurrence() {
         ui.show(&indent(&resolve::recurred(&side.boundary().items)));
@@ -70,7 +71,7 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Left
                 } else if line == "/choose" {
                     match resolve::choose(ui, side) {
                         Ok(Some(Choice::UserWrote)) => {
-                            if let Some(left) = user_wrote::guide(ui, side, log) {
+                            if let Some(left) = user_wrote::guide(ui, side, agent) {
                                 break left;
                             }
                         }
@@ -89,17 +90,17 @@ pub(super) fn run(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Left
                 } else if line.starts_with('/') {
                     ui.show(&indent(&format!("Unknown command {line}. {}", hint(side))));
                 } else {
-                    match side.ask(line, log) {
+                    match side.ask(line, agent.log()) {
                         Ok(answer) => ui.show(&indent(&answer)),
                         Err(ChatError::Interrupted) => {
-                            show_error_of(ui, log);
+                            show_error_of(ui, agent.log());
                             break Left::Interrupted;
                         }
                         Err(error) => {
                             ui.show(&indent(&format!("Could not get an answer: {error}")))
                         }
                     }
-                    show_error_of(ui, log);
+                    show_error_of(ui, agent.log());
                 }
             }
             Ok(Input::Interrupted) => break Left::Interrupted,
@@ -126,6 +127,21 @@ fn hint(side: &SubLine) -> &'static str {
     } else {
         HINT
     }
+}
+
+/// The step of `boundary` as the user is shown it on entering the side line (PRD §8.6): its file,
+/// then each changed line with its number.
+pub(super) fn step_text(boundary: &Boundary) -> String {
+    let step = &boundary.step;
+    let width = step
+        .lines
+        .last()
+        .map_or(1, |(line, _)| line.to_string().len());
+    let mut text = format!("The step molt wrote to {}:", step.path);
+    for (line, code) in &step.lines {
+        text.push_str(&format!("\n{line:>width$} | {code}"));
+    }
+    text
 }
 
 /// The side-line prompt (PRD §8.6), e.g. `molt [sub: arc, mutex]> `.
@@ -191,11 +207,15 @@ mod open {
     const ENTER: &str = "── side line: dbg_macro ────────────────────────────────────";
     const LEAVE: &str = "── back to the main line ───────────────────────────────────";
     const HINT_SHOWN: &str = "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.";
-    const STOPPED: &str = "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.";
+    const STOPPED: &str = "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.";
+    /// The step of the boundary, as shown before the explanation.
+    const STEP: &str =
+        "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }";
     const SUB: &str = "molt [sub: dbg_macro]> ";
+    const TAKEN: &str = "molt took the step back: src/main.rs is as it was before it.";
     /// The explanation shown for the model's reply `explanation`, which has no code: the reply, then
-    /// the comparison of the code the main line tried with none within the profile.
-    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
+    /// the comparison of the step's lines with none within the profile.
+    const EXPLAINED: &str = "  `dbg_macro` (macros)\n\n  explanation\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.";
 
     fn write_main(id: &str) -> ChatResponse {
         ChatResponse {
@@ -208,12 +228,11 @@ mod open {
         }
     }
 
-    /// A model that tries `dbg!` twice, which stops the first turn at a boundary, then answers
+    /// A model that writes `dbg!`, a step that stops the first turn at a boundary, then answers
     /// with each of `replies` in turn.
     fn stops_at_a_boundary_then(replies: &[&str]) -> FakeChatClient {
         let client = FakeChatClient::new();
         client.push_chat(Ok(write_main("first")));
-        client.push_chat(Ok(write_main("second")));
         for text in replies {
             client.push_chat(Ok(reply(text)));
         }
@@ -278,10 +297,11 @@ mod open {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
-            ui.shown()[2..6],
+            ui.shown()[2..7],
             [
                 ENTER,
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
+                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]
@@ -296,9 +316,12 @@ mod open {
             content: None,
             tool_calls: vec![ToolCall {
                 id: "b".to_owned(),
-                name: "request_boundary".to_owned(),
-                arguments: json!({ "items": ["arc", "mutex"], "reason": "threads share it" })
-                    .to_string(),
+                name: "write_file".to_owned(),
+                arguments: json!({
+                    "path": "src/main.rs",
+                    "content": "use std::sync::{Arc, Mutex};\n\nfn main() {\n    let _a = Arc::new(Mutex::new(0));\n}\n",
+                })
+                .to_string(),
             }],
         }));
         client.push_chat(Ok(reply("Arc shares, Mutex locks.")));
@@ -309,6 +332,36 @@ mod open {
             ui.shown()[2],
             "── side line: arc, mutex ───────────────────────────────────"
         );
+    }
+
+    #[test]
+    fn ending_molt_at_a_boundary_takes_the_step_back_first() {
+        for (steps, code) in [
+            (vec![input("debug 1"), Step::Eof], ExitCode::SUCCESS),
+            (
+                vec![input("debug 1"), Step::Interrupt, Step::Eof],
+                ExitCode::SUCCESS,
+            ),
+            (
+                vec![input("debug 1"), Step::Interrupt, Step::Interrupt],
+                ExitCode::from(INTERRUPTED),
+            ),
+        ] {
+            let client = stops_at_a_boundary_then(&["explanation"]);
+            let dir = project_with_a_profile();
+            let (ended, ui) = run_in(&dir, &client, &FakeCargo::new(), steps);
+
+            assert_eq!(ended, code);
+            assert!(ui.shown().contains(&TAKEN.to_owned()), "{:?}", ui.shown());
+            assert_eq!(
+                fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+                "fn main() {}\n"
+            );
+            assert_eq!(
+                fs::read_to_string(dir.path().join("profile.toml")).unwrap(),
+                ""
+            );
+        }
     }
 
     #[test]
@@ -328,8 +381,9 @@ mod open {
         );
 
         assert_eq!(
-            ui.shown()[3..8],
+            ui.shown()[3..9],
             [
+                STEP,
                 EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
@@ -337,7 +391,7 @@ mod open {
                 "  answer 3"
             ]
         );
-        assert_eq!(client.requests().len(), 6, "a blank line is not a question");
+        assert_eq!(client.requests().len(), 5, "a blank line is not a question");
     }
 
     #[test]
@@ -348,8 +402,8 @@ mod open {
             [input("debug 1"), input("/quit"), input("/abort"), Step::Eof],
         );
 
-        assert_eq!(ui.shown()[5], format!("  Unknown command /quit. {HINT}"));
-        assert_eq!(client.requests().len(), 3);
+        assert_eq!(ui.shown()[6], format!("  Unknown command /quit. {HINT}"));
+        assert_eq!(client.requests().len(), 2);
     }
 
     #[test]
@@ -363,11 +417,11 @@ mod open {
         );
 
         assert!(
-            ui.shown()[3].starts_with("  Could not get the explanation: "),
+            ui.shown()[4].starts_with("  Could not get the explanation: "),
             "{:?}",
             ui.shown()
         );
-        assert_eq!(ui.shown()[5], "  answer");
+        assert_eq!(ui.shown()[6], "  answer");
     }
 
     #[test]
@@ -390,7 +444,7 @@ mod open {
         );
 
         assert_eq!(code, ExitCode::SUCCESS);
-        assert_eq!(ui.shown()[6..], [LEAVE, "Request withdrawn."]);
+        assert_eq!(ui.shown()[7..], [LEAVE, "Request withdrawn.", TAKEN]);
         assert_eq!(snapshot(dir.path()), before);
         assert!(cargo.calls().is_empty());
     }
@@ -418,8 +472,9 @@ mod open {
             ui.shown(),
             [
                 STOPPED,
-                "Tool calls in this turn: write_file (2)",
+                "Tool calls in this turn: write_file (1)",
                 ENTER,
+                STEP,
                 EXPLAINED,
                 HINT_SHOWN,
                 "  answer 1",
@@ -431,6 +486,7 @@ mod open {
                 "  answer 2",
                 LEAVE,
                 "Request withdrawn.",
+                TAKEN,
             ]
         );
         assert_eq!(
@@ -440,10 +496,10 @@ mod open {
         let requests = client.requests();
         assert_eq!(
             requests.len(),
-            5,
+            4,
             "no second explanation, and nothing sent while paused"
         );
-        let last = format!("{:?}", requests[4].messages);
+        let last = format!("{:?}", requests[3].messages);
         assert!(
             last.contains("q1") && last.contains("answer 1"),
             "the same side line: {last}"
@@ -484,8 +540,8 @@ mod open {
 
         assert_eq!(code, ExitCode::SUCCESS);
         assert_eq!(
-            ui.shown()[5..],
-            [LEAVE, PAUSED, "Request withdrawn.", "hello again"]
+            ui.shown()[6..],
+            [LEAVE, PAUSED, "Request withdrawn.", TAKEN, "hello again"]
         );
     }
 
@@ -528,10 +584,10 @@ mod open {
         };
         let mut side = agent.side_line(boundary);
         // The log the side line writes to, from here on: the turn before did not fail to write.
-        let agent = agent.with_log(SessionLog::unwritable_requests(&path));
+        let mut agent = agent.with_log(SessionLog::unwritable_requests(&path));
         let mut ui = ScriptedUi::new([input("why?"), Step::Eof]);
 
-        assert_eq!(super::run(&mut ui, &mut side, &agent), Left::Eof);
+        assert_eq!(super::run(&mut ui, &mut side, &mut agent), Left::Eof);
 
         let warning = format!("Could not write the session log {}: ", path.display());
         let shown = ui.shown();
@@ -577,19 +633,22 @@ mod open {
                 ui.shown()[2..],
                 [
                     ENTER,
+                    STEP,
                     LEAVE,
                     PAUSED,
                     ENTER,
+                    STEP,
                     EXPLAINED,
                     HINT_SHOWN,
                     LEAVE,
-                    "Request withdrawn."
+                    "Request withdrawn.",
+                    TAKEN
                 ]
             );
             assert_eq!(ui.asked(), ["molt> ", "molt> ", SUB, "molt> "]);
             let requests = client.requests();
-            assert_eq!(requests.len(), 4, "the explanation is asked for once more");
-            assert_eq!(requests[3], requests[2]);
+            assert_eq!(requests.len(), 3, "the explanation is asked for once more");
+            assert_eq!(requests[2], requests[1]);
         }
 
         #[test]
@@ -611,7 +670,7 @@ mod open {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
-                ui.shown()[5..],
+                ui.shown()[6..],
                 [
                     LEAVE,
                     PAUSED,
@@ -619,12 +678,13 @@ mod open {
                     HINT_SHOWN,
                     "  answer 2",
                     LEAVE,
-                    "Request withdrawn."
+                    "Request withdrawn.",
+                    TAKEN
                 ]
             );
             let requests = client.requests();
-            assert_eq!(requests.len(), 5);
-            let next = format!("{:?}", requests[4].messages);
+            assert_eq!(requests.len(), 4);
+            let next = format!("{:?}", requests[3].messages);
             assert!(next.contains("q2"), "{next}");
             assert!(!next.contains("q1"), "{next}");
         }
@@ -688,17 +748,18 @@ mod open {
 
             assert_eq!(code, ExitCode::SUCCESS);
             assert_eq!(
-                ui.shown()[5..],
+                ui.shown()[6..],
                 [
                     LEAVE,
                     PAUSED,
                     ENTER,
                     HINT_SHOWN,
                     LEAVE,
-                    "Request withdrawn."
+                    "Request withdrawn.",
+                    TAKEN
                 ]
             );
-            assert_eq!(client.requests().len(), 4, "nothing sent after the policy");
+            assert_eq!(client.requests().len(), 3, "nothing sent after the policy");
             assert_eq!(snapshot(dir.path()), before);
             assert!(cargo.calls().is_empty());
         }

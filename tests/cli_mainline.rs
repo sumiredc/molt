@@ -534,14 +534,13 @@ fn reply(text: &str) -> (u16, String) {
 #[test]
 fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout() {
     const KEY: &str = "sk-molt-session-test-4f9c2e";
-    // `dbg!` twice stops the first request at a boundary. The model writes the key back in the
-    // content of both, which the log records as the arguments of the tool call and the rejected
-    // content. The side line gets its explanation. The next request is refused by an endpoint
-    // that writes the key back in its body.
+    // `dbg!` is a step that stops the first request at a boundary. The model writes the key back
+    // in its content, which the log records as the arguments of the tool call. The side line gets
+    // its explanation. The next request is refused by an endpoint that writes the key back in its
+    // body.
     let with_dbg = format!("fn main() {{\n    dbg!(\"{KEY}\");\n}}\n");
     let (base_url, server) = serve(vec![
         write_main("first", &with_dbg),
-        write_main("second", &with_dbg),
         reply("dbg! prints a value."),
         (401, format!(r#"{{"error":"invalid api key {KEY}"}}"#)),
     ]);
@@ -568,9 +567,9 @@ fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout()
 
     // The key was in play: every request carried it.
     let authorizations = server.join().unwrap();
-    assert_eq!(authorizations, vec![Some(format!("Bearer {KEY}")); 4]);
+    assert_eq!(authorizations, vec![Some(format!("Bearer {KEY}")); 3]);
     let stdout = stdout(&output);
-    assert!(stdout.contains("Stopped at a boundary"), "{stdout}");
+    assert!(stdout.contains("Paused after a step"), "{stdout}");
     assert!(stdout.contains("HTTP 401"), "{stdout}");
     assert!(!stdout.contains(KEY), "{stdout}");
     assert!(!stderr(&output).contains(KEY));
@@ -580,11 +579,11 @@ fn the_api_key_appears_nowhere_in_the_session_log_the_request_bodies_or_stdout()
     assert!(names[0].ends_with(".jsonl") && !names[0].ends_with(".requests.jsonl"));
     assert!(names[1].ends_with(".requests.jsonl"), "{names:?}");
     let (events, requests) = (&files[0].1, &files[1].1);
-    assert!(events.contains(r#""event":"rejected""#), "{events}");
+    assert!(events.contains(r#""event":"step""#), "{events}");
     // What the model wrote back is in the log, with the key hidden.
-    assert!(events.contains(r#"dbg!(\"<redacted>\")"#), "{events}");
-    // The two writes, the side line's explanation and the next request.
-    assert_eq!(requests.lines().count(), 4, "{requests}");
+    assert!(events.contains(r#"dbg!(\\\"<redacted>\\\")"#), "{events}");
+    // The step, the side line's explanation and the next request.
+    assert_eq!(requests.lines().count(), 3, "{requests}");
     for (name, content) in &files {
         assert!(!content.contains(KEY), "{name}: {content}");
     }

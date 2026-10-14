@@ -1,8 +1,9 @@
-//! The explanation the user is shown on opening the side line (PRD UC3): the items of the bundle,
-//! each once, with their category (PRD §11), then the idea of the items, or for those the user has
-//! seen before a note that it is not explained again (PRD §7), then a comparison of the 2 ways to write it, the code the main line tried with the items and
-//! the code the `reason` model wrote without them, then where the reference repository uses the
-//! items, from the stock-taking `molt init` kept beside the profile.
+//! The explanation the user is shown on opening the side line (PRD UC3): the items of the step,
+//! each once, with their category (PRD §11), then what they do in the step's lines, or for those
+//! the user has seen before a note that their idea is not explained again (PRD §7), then a
+//! comparison of the 2 ways to write the lines, the step's lines with the items and the lines the
+//! `reason` model wrote without them, then where the reference repository uses the items, from
+//! the stock-taking `molt init` kept beside the profile.
 
 use std::fs;
 use std::io;
@@ -19,10 +20,6 @@ use crate::repo_scan::{self, MAX_PLACES, RepoScan};
 /// Shown in place of the code without the items when the reply has none.
 pub(crate) const HARD_WITHIN_PROFILE: &str =
     "Without them, within your profile: hard to write. The model found no good way to.";
-
-/// Shown in place of the comparison when the main line tried no code: there is nothing to compare.
-pub(crate) const NO_COMPARISON: &str =
-    "The main line showed no code for it, so there is no comparison of ways to write it.";
 
 /// The items of `items` the user has seen before: `seen` in `profile` (PRD §7). A crate is seen
 /// when an entry of any spelling the checker takes for it ([`crate_key`]) is.
@@ -49,7 +46,7 @@ pub(crate) fn seen_before(seen: &[ItemKey]) -> String {
 }
 
 /// The first line of the explanation: each item once, then their category, `crates` for crates.
-/// The items of one bundle share one category (PRD §11).
+/// The items of one step may span categories (PRD §2, §11).
 fn heading(items: &[ItemKey]) -> String {
     let mut once: Vec<ItemKey> = Vec::new();
     let mut categories: Vec<&str> = Vec::new();
@@ -88,11 +85,10 @@ pub(crate) fn allowed(profile: &Profile) -> Vec<ItemKey> {
 
 /// The explanation the user is shown, from the `reason` model's `reply` to the request for it:
 /// the items of `boundary` ([`heading`]), the note on those of them in `seen` ([`seen_before`]),
-/// the prose of the reply, then the code the main line tried at `boundary` and the first code block
-/// of the reply, the code without the items. When the reply has no code block, or an empty one,
-/// [`HARD_WITHIN_PROFILE`] stands in for it. When the main line tried no code, the model was not
-/// asked for any, and [`NO_COMPARISON`] follows the reply as it is. `similar`, where the reference
-/// repository uses the items ([`similar`]), comes last when there is one.
+/// the prose of the reply, then the step's lines at `boundary` and the first code block of the
+/// reply, the lines without the items. When the reply has no code block, or an empty one,
+/// [`HARD_WITHIN_PROFILE`] stands in for it. `similar`, where the reference repository uses the
+/// items ([`similar`]), comes last when there is one.
 pub(crate) fn assemble(
     boundary: &Boundary,
     seen: &[ItemKey],
@@ -181,14 +177,7 @@ pub(crate) fn similar(scan: &RepoScan, items: &[ItemKey]) -> Option<String> {
 
 /// The idea and the comparison of [`assemble`].
 fn compare(boundary: &Boundary, reply: &str) -> String {
-    let Some(attempted) = boundary.attempted_code() else {
-        let reply = reply.trim();
-        return if reply.is_empty() {
-            NO_COMPARISON.to_owned()
-        } else {
-            format!("{reply}\n\n{NO_COMPARISON}")
-        };
-    };
+    let attempted = boundary.attempted_code();
     let (prose, code) = split(reply);
     let mut text = String::new();
     if !prose.is_empty() {
@@ -196,7 +185,7 @@ fn compare(boundary: &Boundary, reply: &str) -> String {
         text.push_str("\n\n");
     }
     text.push_str(&format!(
-        "Two ways to write it\nWith {} (what the main line tried):\n{}\n",
+        "Two ways to write it\nWith {} (the step molt wrote):\n{}\n",
         names(&boundary.items),
         rust_block(attempted)
     ));
@@ -256,7 +245,7 @@ mod compare {
 
     use tempfile::TempDir;
 
-    use crate::agent::mainline::{Boundary, BoundaryCause};
+    use crate::agent::mainline::{Boundary, Step};
     use crate::agent::subline::SubLine;
     use crate::agent::tools::Tools;
     use crate::config::Config;
@@ -267,14 +256,14 @@ mod compare {
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
-    use super::{HARD_WITHIN_PROFILE, NO_COMPARISON};
+    use super::HARD_WITHIN_PROFILE;
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     const WITHOUT_DBG: &str = "fn main() {\n    eprintln!(\"{}\", 1);\n}";
     /// The words of the instruction for the comparison that the rule rests on.
-    pub(super) const REWRITE: &str = "rewrite the code the main line tried without these items";
+    pub(super) const REWRITE: &str = "rewrite these lines without these items";
     const ONLY_ALLOWED: &str =
-        "using only the syntax elements and crates the user's profile allows";
+        "using only the syntax elements and crates the user has written before";
     const NO_BLOCK: &str = "write no code block";
 
     pub(super) fn project() -> TempDir {
@@ -287,23 +276,18 @@ mod compare {
         dir
     }
 
-    pub(super) fn rejected_twice() -> Boundary {
+    pub(super) fn step_with_dbg() -> Boundary {
         Boundary {
             items: vec!["dbg_macro".parse().unwrap()],
-            cause: BoundaryCause::RejectedTwice {
-                path: "src/main.rs".to_owned(),
-                content: WITH_DBG.to_owned(),
-            },
+            step: Step::new("src/main.rs".to_owned(), None, WITH_DBG.to_owned()),
         }
     }
 
-    pub(super) fn requested(proposed_code: Option<&str>) -> Boundary {
+    /// A boundary on `dbg_macro` after a step that wrote `content` to a new `src/main.rs`.
+    pub(super) fn step_of(content: &str) -> Boundary {
         Boundary {
             items: vec!["dbg_macro".parse().unwrap()],
-            cause: BoundaryCause::Requested {
-                reason: "printing a value and returning it is what dbg! is for".to_owned(),
-                proposed_code: proposed_code.map(str::to_owned),
-            },
+            step: Step::new("src/main.rs".to_owned(), None, content.to_owned()),
         }
     }
 
@@ -381,7 +365,7 @@ mod compare {
 
     #[test]
     fn the_request_for_the_explanation_asks_to_rewrite_the_attempted_code_without_the_items() {
-        let (_, sent) = explain(rejected_twice(), "idea");
+        let (_, sent) = explain(step_with_dbg(), "idea");
 
         assert!(sent.contains("dbg!(1);"), "the attempted code: {sent}");
         let rewrite = sent.find(REWRITE);
@@ -401,7 +385,7 @@ mod compare {
         ]);
         let mut sent = String::new();
 
-        on_side_line(rejected_twice(), &profile, &[Some("idea")], |side| {
+        on_side_line(step_with_dbg(), &profile, &[Some("idea")], |side| {
             side.explain(&SessionLog::disabled()).unwrap();
         })
         .into_iter()
@@ -424,7 +408,7 @@ mod compare {
         ]);
         let mut sent = String::new();
 
-        on_side_line(rejected_twice(), &profile, &[Some("idea")], |side| {
+        on_side_line(step_with_dbg(), &profile, &[Some("idea")], |side| {
             side.explain(&SessionLog::disabled()).unwrap();
         })
         .into_iter()
@@ -435,18 +419,9 @@ mod compare {
     }
 
     #[test]
-    fn without_attempted_code_the_request_asks_for_no_code() {
-        let (_, sent) = explain(requested(None), "idea");
-
-        assert!(!sent.contains(REWRITE), "{sent}");
-        assert!(!sent.contains(ONLY_ALLOWED), "{sent}");
-        assert!(!sent.contains("code block"), "{sent}");
-    }
-
-    #[test]
     fn a_question_before_the_explanation_came_does_not_ask_for_the_comparison() {
         let sent = on_side_line(
-            rejected_twice(),
+            step_with_dbg(),
             &Profile::new(),
             &[None, Some("answer")],
             |side| {
@@ -464,7 +439,7 @@ mod compare {
     fn the_explanation_compares_the_attempted_code_with_the_code_of_the_reply_without_the_items() {
         let reply = format!("dbg! prints a value and returns it.\n\n```rust\n{WITHOUT_DBG}\n```\n");
 
-        let (explanation, _) = explain(rejected_twice(), &reply);
+        let (explanation, _) = explain(step_with_dbg(), &reply);
 
         let idea = explanation.find("dbg! prints a value and returns it.");
         let tried = explanation.find("    dbg!(1);");
@@ -480,7 +455,7 @@ mod compare {
 
     #[test]
     fn a_reply_without_code_says_it_is_hard_to_write_within_the_profile() {
-        let (explanation, _) = explain(rejected_twice(), "dbg! prints a value and returns it.");
+        let (explanation, _) = explain(step_with_dbg(), "dbg! prints a value and returns it.");
 
         assert!(
             explanation.starts_with("`dbg_macro` (macros)\n\ndbg! prints a value and returns it."),
@@ -492,31 +467,21 @@ mod compare {
 
     #[test]
     fn a_reply_with_an_empty_code_block_says_it_is_hard_to_write_within_the_profile() {
-        let (explanation, _) = explain(rejected_twice(), "dbg! prints a value.\n\n```rust\n```");
+        let (explanation, _) = explain(step_with_dbg(), "dbg! prints a value.\n\n```rust\n```");
 
         assert!(explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
     }
 
     #[test]
-    fn the_proposed_code_of_request_boundary_is_the_attempted_code() {
+    fn the_lines_of_the_step_are_the_attempted_code() {
         let (explanation, sent) = explain(
-            requested(Some("fn main() {\n    dbg!(2);\n}")),
+            step_of("fn main() {\n    dbg!(2);\n}"),
             "dbg! prints a value.",
         );
 
         assert!(sent.contains(REWRITE), "{sent}");
         assert!(explanation.contains("    dbg!(2);"), "{explanation}");
         assert!(explanation.contains(HARD_WITHIN_PROFILE), "{explanation}");
-    }
-
-    #[test]
-    fn without_attempted_code_the_explanation_says_there_is_no_comparison() {
-        let (explanation, _) = explain(requested(None), "dbg! prints a value.");
-
-        assert_eq!(
-            explanation,
-            format!("`dbg_macro` (macros)\n\ndbg! prints a value.\n\n{NO_COMPARISON}")
-        );
     }
 
     #[test]
@@ -536,7 +501,7 @@ mod compare {
             &client,
             Router::new(&Config::default()),
             &tools,
-            rejected_twice(),
+            step_with_dbg(),
             Some("debug 1"),
             &Profile::new(),
         );
@@ -563,7 +528,7 @@ mod similar {
     use serde_json::json;
     use tempfile::TempDir;
 
-    use crate::agent::mainline::{Boundary, BoundaryCause, MainLine, TurnEnd};
+    use crate::agent::mainline::{MainLine, TurnEnd};
     use crate::agent::tools::{ApprovalRequest, Approver, Tools};
     use crate::config::Config;
     use crate::llm::{ChatResponse, FakeChatClient, Router, ToolCall};
@@ -574,7 +539,7 @@ mod similar {
     use crate::workspace::cargo::FakeCargo;
     use crate::workspace::path::Root;
 
-    use super::{NO_COMPARISON, assemble, similar, similar_beside};
+    use super::{similar, similar_beside};
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     /// The heading of the part, which is there exactly when the part is.
@@ -646,7 +611,8 @@ mod similar {
             Profile::new(),
         )
         .with_profile_path(profile_path.to_owned());
-        for id in ["first", "second"] {
+        {
+            let id = "first";
             client.push_chat(Ok(ChatResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
@@ -773,7 +739,7 @@ mod similar {
     }
 
     #[test]
-    fn each_element_of_a_bundle_gets_its_own_places_once_in_the_order_of_the_boundary() {
+    fn each_element_of_a_step_gets_its_own_places_once_in_the_order_of_the_boundary() {
         let kept = scan(&[
             ("arc", places("src/a.rs", &[10])),
             ("mutex", places("src/m.rs", &[20, 21])),
@@ -808,54 +774,27 @@ mod similar {
 
         assert_eq!(similar(&kept, &items(&["crate:tokio"])), None);
     }
-
-    #[test]
-    fn without_attempted_code_the_part_follows_the_note_that_there_is_no_comparison() {
-        let boundary = Boundary {
-            items: items(&["dbg_macro"]),
-            cause: BoundaryCause::Requested {
-                reason: "dbg! is for it".to_owned(),
-                proposed_code: None,
-            },
-        };
-        let kept = scan(&[("dbg_macro", places("src/lib.rs", &[3]))]);
-        let part = similar(&kept, &boundary.items).unwrap();
-
-        let explanation = assemble(&boundary, &[], "dbg! prints a value.", Some(&part));
-
-        assert_eq!(
-            explanation,
-            format!("`dbg_macro` (macros)\n\ndbg! prints a value.\n\n{NO_COMPARISON}\n\n{part}")
-        );
-    }
 }
 
 /// Tests of the shorter explanation of items the user has seen before (PRD §7). Named so that
 /// `cargo test explain::short` selects them.
 #[cfg(test)]
 mod short {
-    use std::fs;
 
-    use crate::agent::mainline::{Boundary, BoundaryCause};
-    use crate::agent::subline::SubLine;
-    use crate::agent::tools::Tools;
-    use crate::config::Config;
-    use crate::llm::{FakeChatClient, Router};
+    use crate::agent::mainline::{Boundary, Step};
+
     use crate::profile::status::{ItemKey, Status};
-    use crate::profile::store::Timestamp;
-    use crate::repo_scan::{self, Place, RepoScan};
-    use crate::session::SessionLog;
-    use crate::workspace::cargo::FakeCargo;
-    use crate::workspace::path::Root;
 
-    use super::compare::{REWRITE, on_side_line, profile_with, project, rejected_twice, requested};
-    use super::{NO_COMPARISON, seen_before, similar};
+    use crate::session::SessionLog;
+
+    use super::compare::{REWRITE, on_side_line, profile_with, step_with_dbg};
+    use super::seen_before;
 
     const WITHOUT_DBG: &str = "```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```";
     /// The instruction for the idea of every item.
-    const IDEA: &str = "Explain the idea of these items in one paragraph.";
+    const IDEA: &str = "Explain these items as they are used in these lines: one short paragraph for the items of each category.";
     /// The words every instruction for an idea has.
-    const ANY_IDEA: &str = "Explain the idea";
+    const ANY_IDEA: &str = "Explain these items";
 
     fn dbg_macro() -> ItemKey {
         "dbg_macro".parse().unwrap()
@@ -877,11 +816,7 @@ mod short {
 
     #[test]
     fn the_request_for_a_seen_item_asks_for_no_idea_but_for_the_comparison() {
-        let (_, sent) = explain_with(
-            rejected_twice(),
-            &[("dbg_macro", Status::Seen)],
-            WITHOUT_DBG,
-        );
+        let (_, sent) = explain_with(step_with_dbg(), &[("dbg_macro", Status::Seen)], WITHOUT_DBG);
 
         let [sent] = &sent[..] else {
             panic!("not one request: {sent:?}")
@@ -895,11 +830,8 @@ mod short {
 
     #[test]
     fn the_explanation_of_a_seen_item_is_the_note_that_it_was_seen_then_the_comparison() {
-        let (explanation, _) = explain_with(
-            rejected_twice(),
-            &[("dbg_macro", Status::Seen)],
-            WITHOUT_DBG,
-        );
+        let (explanation, _) =
+            explain_with(step_with_dbg(), &[("dbg_macro", Status::Seen)], WITHOUT_DBG);
 
         let note = seen_before(&[dbg_macro()]);
         assert!(
@@ -917,7 +849,7 @@ mod short {
     #[test]
     fn an_item_not_seen_is_asked_for_its_idea_and_has_no_note() {
         let (explanation, sent) = explain_with(
-            rejected_twice(),
+            step_with_dbg(),
             &[("dbg_macro", Status::Unknown)],
             "dbg! prints a value.",
         );
@@ -927,13 +859,10 @@ mod short {
     }
 
     #[test]
-    fn in_a_bundle_only_the_idea_of_the_seen_item_is_left_out() {
+    fn in_a_step_with_two_items_only_the_idea_of_the_seen_item_is_left_out() {
         let boundary = Boundary {
             items: vec!["arc".parse().unwrap(), "mutex".parse().unwrap()],
-            cause: BoundaryCause::RejectedTwice {
-                path: "src/main.rs".to_owned(),
-                content: "fn main() {}\n".to_owned(),
-            },
+            step: Step::new("src/main.rs".to_owned(), None, "fn main() {}\n".to_owned()),
         };
 
         let (explanation, sent) = explain_with(boundary, &[("arc", Status::Seen)], "Mutex locks.");
@@ -941,7 +870,8 @@ mod short {
         assert!(
             sent[0].contains(
                 "The user has seen `arc` before: do not explain the idea of those items again. \
-                 Explain the idea of the other items in one paragraph."
+                 Explain the other items as they are used in these lines: one short paragraph for \
+                 the items of each category."
             ),
             "{}",
             sent[0]
@@ -957,61 +887,10 @@ mod short {
     }
 
     #[test]
-    fn seen_items_without_attempted_code_ask_the_model_nothing() {
-        let mut explanation = String::new();
-        let mut explained = false;
-
-        let sent = on_side_line(
-            requested(None),
-            &profile_with(&[("dbg_macro", Status::Seen)]),
-            &[],
-            |side| {
-                explanation = side.explain(&SessionLog::disabled()).unwrap();
-                explained = side.explained();
-            },
-        );
-
-        assert!(sent.is_empty(), "{sent:?}");
-        assert_eq!(
-            explanation,
-            format!(
-                "`dbg_macro` (macros)\n\n{}\n\n{NO_COMPARISON}",
-                seen_before(&[dbg_macro()])
-            )
-        );
-        assert!(explained);
-    }
-
-    #[test]
-    fn after_an_explanation_that_asked_nothing_the_first_question_goes_with_the_boundary() {
-        let sent = on_side_line(
-            requested(None),
-            &profile_with(&[("dbg_macro", Status::Seen)]),
-            &[Some("answer")],
-            |side| {
-                side.explain(&SessionLog::disabled()).unwrap();
-                side.ask("what is it?", &SessionLog::disabled()).unwrap();
-            },
-        );
-
-        let [sent] = &sent[..] else {
-            panic!("not one request: {sent:?}")
-        };
-        assert!(
-            sent.contains("- `dbg_macro` (macros, seen before)"),
-            "{sent}"
-        );
-        assert!(sent.ends_with("what is it?"), "{sent}");
-    }
-
-    #[test]
     fn a_crate_seen_in_the_other_spelling_is_not_asked_for_its_idea() {
         let boundary = Boundary {
             items: vec!["crate:serde-json".parse().unwrap()],
-            cause: BoundaryCause::Requested {
-                reason: "parsing JSON".to_owned(),
-                proposed_code: Some("fn main() {}".to_owned()),
-            },
+            step: Step::new("src/main.rs".to_owned(), None, "fn main() {}".to_owned()),
         };
 
         let (explanation, sent) =
@@ -1031,10 +910,7 @@ mod short {
     fn a_crate_seen_in_the_spelling_with_a_hyphen_is_not_asked_for_its_idea() {
         let boundary = Boundary {
             items: vec!["crate:serde_json".parse().unwrap()],
-            cause: BoundaryCause::Requested {
-                reason: "parsing JSON".to_owned(),
-                proposed_code: Some("fn main() {}".to_owned()),
-            },
+            step: Step::new("src/main.rs".to_owned(), None, "fn main() {}".to_owned()),
         };
 
         let (explanation, sent) =
@@ -1046,61 +922,9 @@ mod short {
             "{explanation}"
         );
     }
-
-    #[test]
-    fn an_explanation_that_asked_nothing_still_ends_with_where_the_reference_repository_uses_them()
-    {
-        let dir = project();
-        let cargo = FakeCargo::new();
-        let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
-        let client = FakeChatClient::new();
-        let profile_dir = tempfile::tempdir().unwrap();
-        let kept = RepoScan {
-            repo: "/no/such/reference".to_owned(),
-            at: Timestamp::from_unix_seconds(0),
-            crates: Vec::new(),
-            skipped: Vec::new(),
-            elements: [(
-                "dbg_macro".to_owned(),
-                vec![Place {
-                    path: "src/lib.rs".to_owned(),
-                    line: 3,
-                }],
-            )]
-            .into_iter()
-            .collect(),
-        };
-        fs::write(
-            profile_dir.path().join(repo_scan::FILE_NAME),
-            toml::to_string(&kept).unwrap(),
-        )
-        .unwrap();
-        let boundary = requested(None);
-        let part = similar(&kept, &boundary.items).unwrap();
-        let mut side = SubLine::open(
-            &client,
-            Router::new(&Config::default()),
-            &tools,
-            boundary,
-            Some("debug 1"),
-            &profile_with(&[("dbg_macro", Status::Seen)]),
-        )
-        .with_scan_beside(Some(&profile_dir.path().join("profile.toml")));
-
-        let explanation = side.explain(&SessionLog::disabled()).unwrap();
-
-        assert!(client.requests().is_empty());
-        assert_eq!(
-            explanation,
-            format!(
-                "`dbg_macro` (macros)\n\n{}\n\n{NO_COMPARISON}\n\n{part}",
-                seen_before(&[dbg_macro()])
-            )
-        );
-    }
 }
 
-/// Tests of one explanation for the items of one category bundled into a side line (PRD §11).
+/// Tests of one explanation for the items of one step on its side line (PRD §11, UC3).
 /// Named so that `cargo test explain::merge` selects them.
 #[cfg(test)]
 mod merge {
@@ -1108,10 +932,10 @@ mod merge {
 
     use serde_json::json;
 
-    use crate::agent::mainline::{Boundary, BoundaryCause, MainLine, TurnEnd};
+    use crate::agent::mainline::{Boundary, MainLine, Step, TurnEnd};
     use crate::agent::tools::{ApprovalRequest, Approver, Tools};
     use crate::config::Config;
-    use crate::llm::{ChatResponse, FakeChatClient, Message, Router, ToolCall};
+    use crate::llm::{ChatResponse, FakeChatClient, Router, ToolCall};
     use crate::profile::store::Profile;
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
@@ -1149,7 +973,8 @@ mod merge {
             tools,
             Profile::new(),
         );
-        for id in ["first", "second"] {
+        {
+            let id = "first";
             client.push_chat(Ok(ChatResponse {
                 content: None,
                 tool_calls: vec![ToolCall {
@@ -1163,17 +988,11 @@ mod merge {
             TurnEnd::Boundary(boundary) => boundary,
             end => panic!("the turn did not stop at a boundary: {end:?}"),
         };
-        let rejection = client.requests()[1]
-            .messages
-            .iter()
-            .find_map(|message| match message {
-                Message::Tool { content, .. } => Some(content.clone()),
-                _ => None,
-            })
-            .unwrap();
-        assert!(
-            rejection.matches(": arc (smart_pointers)").count() > 1,
-            "arc on several lines: {rejection}"
+        let names: Vec<String> = boundary.items.iter().map(ToString::to_string).collect();
+        assert_eq!(
+            names,
+            ["arc", "mutex"],
+            "each once, though arc is on several lines"
         );
         let before = client.requests().len();
         let mut side = main_line.side_line(boundary);
@@ -1205,10 +1024,7 @@ mod merge {
                 "arc".parse().unwrap(),
                 "mutex".parse().unwrap(),
             ],
-            cause: BoundaryCause::Requested {
-                reason: "threads share it".to_owned(),
-                proposed_code: None,
-            },
+            step: Step::new("src/main.rs".to_owned(), None, "fn main() {}\n".to_owned()),
         };
 
         let explanation = assemble(&boundary, &[], "idea", None);
@@ -1226,10 +1042,7 @@ mod merge {
                 "crate:tokio".parse().unwrap(),
                 "crate:serde".parse().unwrap(),
             ],
-            cause: BoundaryCause::Requested {
-                reason: "async".to_owned(),
-                proposed_code: None,
-            },
+            step: Step::new("src/main.rs".to_owned(), None, "fn main() {}\n".to_owned()),
         };
 
         let explanation = assemble(&boundary, &[], "idea", None);

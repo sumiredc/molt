@@ -87,20 +87,24 @@ impl MainLine<'_> {
         None
     }
 
-    /// Withdraws the request of the turn held at a boundary (UC3's `/abort`): nothing more is
-    /// changed and nothing goes to the model, but what was written before the boundary is
-    /// checked with `cargo check` and handed back to be shown (PRD §3 Verification). It stays on
-    /// disk, so it joins the uncommitted files (UC4). Empty when no turn is held, or the held turn
-    /// changed nothing.
+    /// Withdraws the request of the turn held at a boundary (UC3's `/abort`): the step is taken
+    /// back, unless ③ did before, nothing more is changed and nothing goes to the model, but what
+    /// was written before the boundary is checked with `cargo check` and handed back to be shown
+    /// (PRD §3 Verification). It stays on disk, so it joins the uncommitted files (UC4). No changes
+    /// and no check when no turn is held, or the held turn changed nothing that stays.
     pub fn withdraw(&mut self) -> Withdrawal {
+        let taken_back = self.take_back();
         let Some(mut held) = self.held.take() else {
             return Withdrawal {
+                taken_back,
                 changes: Vec::new(),
                 check: None,
             };
         };
-        if held.changes.is_empty() && !held.progress.unchecked {
+        // Nothing the turn wrote stays, once the step is taken back.
+        if held.changes.is_empty() && !held.progress.crate_added {
             return Withdrawal {
+                taken_back,
                 changes: Vec::new(),
                 check: None,
             };
@@ -109,13 +113,15 @@ impl MainLine<'_> {
         self.update_changes(&mut held.changes, &held.progress);
         self.absorb(&held.changes, &held.progress.committed);
         Withdrawal {
+            taken_back,
             changes: held.changes,
             check: Some(check),
         }
     }
 
     /// Asks the user to `cargo add` each crate the files written in this turn use that the
-    /// profile allows but `Cargo.toml` does not declare (UC2), unless it was already asked about
+    /// profile has as `known`, or that were chosen ④ at a boundary, but `Cargo.toml` does not
+    /// declare (UC2), unless it was already asked about
     /// in this turn and not added: the user said no, or `cargo add` failed. Returns notes for the
     /// model on the crates that were not added.
     fn add_crates(
@@ -125,9 +131,9 @@ impl MainLine<'_> {
         approver: &mut dyn Approver,
     ) -> Vec<String> {
         let mut notes = Vec::new();
-        for name in self
-            .tools
-            .undeclared_known_crates(&turn.written, &self.profile)
+        for name in
+            self.tools
+                .undeclared_known_crates(&turn.written, &self.profile, &self.introduced)
         {
             let key = name.replace('-', "_");
             if let Some(note) = progress.not_added.get(&key) {

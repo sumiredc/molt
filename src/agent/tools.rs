@@ -7,7 +7,7 @@
 
 mod args;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::fmt;
 use std::fs;
@@ -20,6 +20,7 @@ use serde_json::{Map, Value};
 use crate::agent::mainline::CommitProposal;
 use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
+use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::workspace::approve;
 use crate::workspace::cargo::{
@@ -127,8 +128,8 @@ pub enum WriteOutcome {
     /// Every item is `known`, and the content was written.
     Written,
     /// The content uses items that are not `known` (in line order, never
-    /// empty). Nothing was written. `change` is handed back for what was tried, which a boundary
-    /// carries (UC3).
+    /// empty). Nothing was written yet. `change` is handed back, for the main line to write it as
+    /// a step or send it back to be split (PRD §8.4).
     OutOfProfile {
         findings: Vec<Finding>,
         change: FileChange,
@@ -248,12 +249,29 @@ impl<'a> Tools<'a> {
                 return Ok(WriteOutcome::ParseError(error));
             }
         }
+        self.write_step(&change)?;
+        Ok(WriteOutcome::Written)
+    }
+
+    /// Writes `change` without checking it: a step, whose items the user is shown at the
+    /// boundary that follows (PRD §2, UC2). Only for content [`Tools::write`] handed back.
+    pub(crate) fn write_step(&self, change: &FileChange) -> Result<(), ToolError> {
         if let Some(parent) = change.resolved.parent() {
             fs::create_dir_all(parent).map_err(|source| io_error(&change.path, source))?;
         }
         fs::write(&change.resolved, &change.new_content)
-            .map_err(|source| io_error(&change.path, source))?;
-        Ok(WriteOutcome::Written)
+            .map_err(|source| io_error(&change.path, source))
+    }
+
+    /// Puts `path` back as it was before a step (PRD UC3): writes `content`, or removes the file
+    /// when the step created it (`None`).
+    pub(crate) fn restore(&self, path: &str, content: Option<&str>) -> Result<(), ToolError> {
+        let resolved = self.root.resolve_write(path).map_err(ToolError::Path)?;
+        match content {
+            Some(content) => fs::write(&resolved, content),
+            None => fs::remove_file(&resolved),
+        }
+        .map_err(|source| io_error(path, source))
     }
 
     /// Checks the lines of `path` changed from `old` to `new` against `profile`, as a write is
@@ -305,13 +323,15 @@ impl<'a> Tools<'a> {
         Ok(self.cargo.add(crate_name, approve())?)
     }
 
-    /// The crates the Rust files `paths` use that `profile` allows but the `Cargo.toml` at the
-    /// root does not declare (PRD UC2), each once, in the order first used. Files that cannot be
-    /// read, and files that are not Rust, use none.
+    /// The crates the Rust files `paths` use that `profile` allows, or that are among
+    /// `introduced` (chosen ④ at a boundary, as `crate:<name>` with `_`), but the `Cargo.toml` at
+    /// the root does not declare (PRD UC2), each once, in the order first used. Files that cannot
+    /// be read, and files that are not Rust, use none.
     pub(crate) fn undeclared_known_crates(
         &self,
         paths: &[String],
         profile: &Profile,
+        introduced: &BTreeSet<ItemKey>,
     ) -> Vec<String> {
         let manifest = self.read("Cargo.toml").unwrap_or_default();
         let mut names: Vec<String> = Vec::new();
@@ -330,7 +350,7 @@ impl<'a> Tools<'a> {
                 profile,
                 own_modules: &own_modules,
             };
-            for name in checker::undeclared_known_crates(&source, &manifest, &ctx) {
+            for name in checker::undeclared_known_crates(&source, &manifest, &ctx, introduced) {
                 if !names.contains(&name) {
                     names.push(name);
                 }

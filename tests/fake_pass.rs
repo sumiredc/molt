@@ -1,5 +1,5 @@
 //! One pass through molt without a model (PRD §10, the end of the dependency graph): a request →
-//! a rejection → a boundary → the side line → ① → a write → `cargo check` → an approved commit.
+//! a step → a boundary → the explanation → ① → `cargo check` → an approved commit.
 //!
 //! The binary runs as a user runs it, with the model's side from `--fake` and the user's side
 //! from `--ui-script` (`examples/fake/one_pass.toml` and `tests/fixtures/fake_pass/ui.toml`).
@@ -18,8 +18,8 @@ use common::{assert_in_order, commit_count, git, in_repository, molt, molt_home,
 /// The package name of the project in the tempdir.
 const CRATE: &str = "molt_fake_pass_probe";
 
-/// The `event` of each line of the session logs in `sessions`, with `boundary` for a rejection
-/// and `status` for `cargo check`, in order.
+/// The `event` of each line of the session logs in `sessions`, with `status` for `cargo check`
+/// and `name` for a tool call, in order.
 fn logged_events(sessions: &Path) -> Vec<String> {
     let mut logs = fs::read_dir(sessions)
         .unwrap()
@@ -35,7 +35,6 @@ fn logged_events(sessions: &Path) -> Vec<String> {
                 .collect::<Vec<_>>()
         })
         .map(|event| match event["event"].as_str().unwrap() {
-            "rejected" => format!("rejected (boundary: {})", event["boundary"]),
             "cargo_check" => format!("cargo_check ({})", event["status"].as_str().unwrap()),
             "tool_call" => format!("tool_call ({})", event["name"].as_str().unwrap()),
             other => other.to_owned(),
@@ -73,13 +72,16 @@ fn one_pass_from_a_request_through_a_boundary_and_unlock_ends_in_one_approved_co
         &stdout,
         &[
             "molt> Print 1 to stderr with dbg! in src/main.rs.",
-            "Stopped at a boundary: the request needs dbg_macro (macros)",
+            "Paused after a step: molt wrote ",
+            " to src/main.rs with dbg_macro (macros), which you have not written yet.",
             "── side line: dbg_macro ────",
+            "  The step molt wrote to src/main.rs:",
+            "2 |     dbg!(1);",
             "  `dbg!` prints the value of an expression",
             "molt [sub: dbg_macro]> /choose",
             "\n> 1\n",
             "── back to the main line ────",
-            "Your profile allows dbg_macro now (known).",
+            "Your profile has dbg_macro as known now.",
             "Printed 1 with `dbg!`.",
             "+    dbg!(1);",
             "cargo check passed.",
@@ -90,13 +92,12 @@ fn one_pass_from_a_request_through_a_boundary_and_unlock_ends_in_one_approved_co
             "molt> /quit",
         ],
     );
-    // The first write was rejected and the rewrite was too, which made the boundary; the write
-    // after ① passed, and molt's own `cargo check` at the end of the turn passed.
+    // The write was a step, which made the boundary; after ① the step stayed, and molt's own
+    // `cargo check` at the end of the turn passed.
     let events = logged_events(&home.join("sessions"));
     let wanted = [
-        "rejected (boundary: false)",
-        "rejected (boundary: true)",
         "tool_call (write_file)",
+        "step",
         "tool_call (finish)",
         "cargo_check (passed)",
     ];

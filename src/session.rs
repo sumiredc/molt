@@ -35,22 +35,33 @@ pub fn request_bodies_enabled(var: impl Fn(&str) -> Option<OsString>) -> bool {
 pub enum Event {
     /// The check found items outside the profile in content the model tried to write.
     Detected { path: String, items: Vec<Detected> },
-    /// Content the model generated was rejected and not written. `boundary` is true when the
-    /// rejection stopped the turn at a boundary: the same item was rejected before in the turn.
+    /// Content the model generated was rejected and not written, for `reason`: it is too large
+    /// to be a step (PRD §2, §8.4), or it does not parse. `items` are those not `known` in it.
     Rejected {
         path: String,
+        reason: Rejection,
         items: Vec<String>,
         content: String,
-        boundary: bool,
     },
+    /// molt wrote a step (PRD §2): content with `items` that are not `known`, whose changed
+    /// `lines` (1-based) the user is shown at the boundary that follows.
+    Step {
+        path: String,
+        items: Vec<String>,
+        lines: Vec<usize>,
+    },
+    /// molt took the step at `path` back (PRD UC3): ②, ③, a withdrawn request, or the end of
+    /// molt at a boundary. `restored` is false when the file had changed since the step and was
+    /// left as it was.
+    TakenBack { path: String, restored: bool },
     /// The model called a tool. `arguments` are as the model sent them.
     ToolCall { name: String, arguments: String },
     /// molt ran `cargo check` at the end of a turn, when a request was withdrawn, or before a
     /// `git_commit` after a write (UC4). The model's
     /// own `run_cargo` calls are recorded as [`Event::ToolCall`] only.
     CargoCheck(CargoCheck),
-    /// The user's choice at a boundary on the side line (PRD UC3) stands: ① or ② was chosen, or
-    /// ③'s `/done` passed. `items` are those the side line was opened for, `policy` is the
+    /// The user's choice at a boundary on the side line (PRD UC3) stands: ①, ② or ④ was chosen,
+    /// or ③'s `/done` passed. `items` are those the side line was opened for, `policy` is the
     /// one-line policy of ②, and `files` are those the user changed in ③.
     Choice {
         choice: String,
@@ -76,6 +87,8 @@ impl Event {
             Event::Choice { .. } | Event::ProfileChange { .. } => Some(SUB),
             Event::Detected { .. }
             | Event::Rejected { .. }
+            | Event::Step { .. }
+            | Event::TakenBack { .. }
             | Event::ToolCall { .. }
             | Event::CargoCheck(_) => None,
         }
@@ -84,6 +97,16 @@ impl Event {
 
 /// The `line` of what happened on the side line, in the events and in the request bodies.
 const SUB: &str = "sub";
+
+/// Why content was not written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Rejection {
+    /// Over the step limit: the model is asked to split it.
+    OverStepLimit,
+    /// It does not parse: the model is asked to fix it.
+    ParseError,
+}
 
 /// An item the check detected.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]

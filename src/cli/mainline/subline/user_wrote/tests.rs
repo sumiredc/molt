@@ -37,7 +37,6 @@ fn write_main(id: &str) -> ChatResponse {
 fn stops_at_a_boundary_then(then: Vec<Result<ChatResponse, ChatError>>) -> FakeChatClient {
     let client = FakeChatClient::new();
     client.push_chat(Ok(write_main("first")));
-    client.push_chat(Ok(write_main("second")));
     client.push_chat(Ok(reply("explanation")));
     for response in then {
         client.push_chat(response);
@@ -92,11 +91,14 @@ fn project_with_a_profile() -> TempDir {
     dir
 }
 
+/// An error of `cargo check` on line 2 of `src/main.rs`, where the user writes in these tests.
+const IN_MAIN: &str = "error[E0425]: x\n --> src/main.rs:2:10";
+
 fn check(passed: bool) -> CargoOutput {
     CargoOutput {
         success: passed,
         stdout: String::new(),
-        stderr: if passed { "" } else { "error[E0425]: x" }.to_owned(),
+        stderr: if passed { "" } else { IN_MAIN }.to_owned(),
     }
 }
 
@@ -201,7 +203,7 @@ fn choosing_3_guides_and_done_saves_the_items_as_written_and_the_main_line_goes_
     assert_eq!(ui.shown()[passed + 1], "  Good use of dbg!.");
     let known = shown_at(
         &ui,
-        "Your profile allows dbg_macro now (known: you wrote it).",
+        "Your profile has dbg_macro as known now (you wrote it).",
     );
     assert_eq!(ui.shown()[known + 1], "Read it; the request is done.");
     assert!(
@@ -244,7 +246,10 @@ fn a_failed_check_on_done_is_shown_and_the_user_can_send_done_again() {
     );
 
     assert_eq!(code, ExitCode::SUCCESS);
-    let failed = shown_at(&ui, "  cargo check failed:\n  error[E0425]: x");
+    let failed = shown_at(
+        &ui,
+        "  cargo check found errors in your lines:\n  error[E0425]: x\n   --> src/main.rs:2:10",
+    );
     assert_eq!(
         ui.shown()[failed + 1],
         "  Your profile is unchanged. Fix it and type /done again, or /choose another way."
@@ -329,7 +334,9 @@ fn done_without_writing_reports_no_change_and_the_user_chooses_again() {
     assert_eq!(code, ExitCode::SUCCESS);
     shown_at(
         &ui,
-        &format!("  No change: no .rs file or Cargo.toml was written since the boundary. {HINT}"),
+        &format!(
+            "  No change: no .rs file or Cargo.toml was written since molt took the step back. {HINT}"
+        ),
     );
     assert_eq!(saved(&dir), Some((Status::Known, Provenance::SideLine)));
 }
@@ -519,7 +526,7 @@ fn lines_with_no_item_new_to_the_profile_say_so_and_the_main_line_goes_on() {
     assert_eq!(code, ExitCode::SUCCESS);
     let said = shown_at(
         &ui,
-        "Your lines use nothing your profile did not allow already.",
+        "Your lines use nothing your profile did not have as known already.",
     );
     assert_eq!(ui.shown()[said + 1], "done");
     assert_eq!(saved(&dir), None);

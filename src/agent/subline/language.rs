@@ -85,7 +85,6 @@ fn reply(text: &str) -> ChatResponse {
 /// Runs a turn on [`REQUEST`] that the model's two `dbg!` writes stop at a boundary.
 fn stop_at_a_boundary(client: &FakeChatClient, main_line: &mut MainLine) -> Boundary {
     client.push_chat(Ok(write_main("first")));
-    client.push_chat(Ok(write_main("second")));
     match main_line.turn(REQUEST, &mut Refuse).end {
         TurnEnd::Boundary(boundary) => boundary,
         end => panic!("the turn did not stop at a boundary: {end:?}"),
@@ -123,9 +122,12 @@ fn side_line_requests() -> Vec<ChatRequest> {
     side.ask("what is it?", &log).unwrap();
     side.explain(&log).unwrap();
     side.ask("where does it print?", &log).unwrap();
-    side.resolve(Choice::Rewrite, &log).unwrap();
+    side.resolve(Choice::Rewrite, main_line.tools(), &log)
+        .unwrap();
 
     let mut side = main_line.side_line(boundary);
+    main_line.take_back();
+    side.start_writing(main_line.tools());
     client.push_chat(Ok(reply("guidance")));
     client.push_chat(Ok(reply("review")));
     side.guide(&log).unwrap();
@@ -178,13 +180,10 @@ fn a_side_line_opened_after_rewrite_in_the_same_turn_quotes_the_request_the_user
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("third")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
     };

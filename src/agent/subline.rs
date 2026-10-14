@@ -1,10 +1,9 @@
-//! The side line (PRD UC3): where the user, with the main line paused at a boundary, gets the idea
-//! of the items explained and asks about them as much as they like.
+//! The side line (PRD UC3): where the user, with the main line paused at a boundary right after a
+//! step, gets the step's lines explained and asks about them as much as they like.
 //!
 //! The side line has a message list of its own (PRD §8.1). Nothing said on it reaches the main
 //! line's message list: the main line only hands it the boundary and the user's request.
 
-pub(crate) mod bundle;
 mod explain;
 mod user_wrote;
 
@@ -24,13 +23,17 @@ use crate::session::SessionLog;
 /// What the user chose on the side line (PRD UC3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Choice {
-    /// ① Understand, then delegate: the items become `known`, and the main line uses them.
+    /// ① Understood: the items become `known`, the step stays, and the main line uses them.
     Unlock,
-    /// ② Use a construct I know: the items become `seen`, and the main line rewrites without them.
+    /// ② Write it without them: the step is taken back, the items become `seen`, and the main
+    /// line writes that part again without them.
     Rewrite,
-    /// ③ Write it myself: the items in the user's lines become `known`, and the main line re-reads
-    /// the files the user changed.
+    /// ③ Write it myself: the step is taken back, the items in the user's lines become `known`,
+    /// and the main line re-reads the files the user changed.
     UserWrote,
+    /// ④ Next: the step stays, `unknown` items become `seen`, and the next step with them stops
+    /// again.
+    Next,
 }
 
 impl Choice {
@@ -40,12 +43,14 @@ impl Choice {
             Choice::Unlock => "unlock",
             Choice::Rewrite => "rewrite",
             Choice::UserWrote => "user_wrote",
+            Choice::Next => "next",
         }
     }
 }
 
 /// The outcome of the side line that goes back to the main line (PRD §8.5): the choice, the items,
-/// for ② the one-line coding policy, and for ③ the files the user changed.
+/// for ② the one-line coding policy, for ③ the files the user changed, and for ① or ② after ③
+/// the files the user changed so far.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolution {
     choice: Choice,
@@ -54,6 +59,8 @@ pub struct Resolution {
     items: Vec<ItemKey>,
     policy: Option<String>,
     files: Vec<Change>,
+    /// For ① or ② after ③ took the step back: the files the user changed since, by path.
+    after_user_wrote: Option<Vec<String>>,
 }
 
 impl Resolution {
@@ -61,8 +68,8 @@ impl Resolution {
         self.choice
     }
 
-    /// The items the profile changes for: those of the boundary for ① and ②, and those detected
-    /// in the user's lines for ③.
+    /// The items the profile changes for: those of the boundary for ①, ② and ④, and those
+    /// detected in the user's lines for ③.
     pub fn items(&self) -> &[ItemKey] {
         &self.items
     }
@@ -95,10 +102,19 @@ impl Resolution {
                     .map(|file| file.path.as_str())
                     .filter(|path| *path != LOCK)
                     .collect();
-                prompts::user_wrote_resolved(&self.items, &paths)
+                prompts::user_wrote_resolved(&self.answers, &self.items, &paths)
             }
             _ => {
-                prompts::boundary_resolved(self.choice.name(), &self.items, self.policy.as_deref())
+                let after: Option<Vec<&str>> = self
+                    .after_user_wrote
+                    .as_ref()
+                    .map(|paths| paths.iter().map(String::as_str).collect());
+                prompts::boundary_resolved(
+                    self.choice.name(),
+                    &self.items,
+                    self.policy.as_deref(),
+                    after.as_deref(),
+                )
             }
         }
     }
@@ -124,15 +140,20 @@ pub struct SubLine<'a> {
     writing: bool,
     /// Whether the boundary recurred after ② in the same turn (PRD UC3), so ② is not offered.
     recurred: bool,
-    baseline: BTreeMap<String, String>,
-    /// The `Cargo.lock` at the root when the side line opened, if there was one. `cargo check`
-    /// on ③'s `/done` changes it after the user adds a crate.
+    /// Whether ③ was chosen, which took the step back: ④ is not offered any more, and ① and ②
+    /// tell the main line about the user's files.
+    taken_back: bool,
+    /// The `.rs` files and `Cargo.toml`s under the root right after ③ took the step back, with
+    /// their content, by path relative to the root: what the user's lines are told apart from.
+    snapshot: BTreeMap<String, String>,
+    /// The `Cargo.lock` at the root right after ③ took the step back, if there was one. `cargo
+    /// check` on ③'s `/done` changes it after the user adds a crate.
     lock: Option<String>,
     /// What the model is told about the boundary, sent as the first user message.
     context: String,
-    /// What the model is asked for the comparison with the explanation, when the main line tried
-    /// some code: written when the side line opened, from the profile then.
-    compare: Option<String>,
+    /// What the model is asked for the comparison with the explanation: written when the side
+    /// line opened, from the profile then.
+    compare: String,
     /// Where the reference repository uses the items, from the stock-taking beside the profile,
     /// shown after the comparison. `None` when there is no stock-taking.
     similar: Option<String>,
@@ -151,8 +172,7 @@ const LOCK: &str = "Cargo.lock";
 
 impl<'a> SubLine<'a> {
     /// Opens the side line at `boundary`. `request` is the user's latest request on the main line,
-    /// and `profile` the user's profile, whose allowed items the comparison is to use. The files the checker can check are read from the disk under the root of `tools` now, as
-    /// they were when the main line stopped, to tell later what the user changed (UC3 ③).
+    /// and `profile` the user's profile, whose `known` items the comparison is to use.
     pub fn open(
         client: &'a dyn ChatClient,
         router: Router,
@@ -164,18 +184,17 @@ impl<'a> SubLine<'a> {
         let seen = explain::seen(profile, &boundary.items);
         let context = prompts::side_line_context(&boundary, request, &seen);
         let idea = boundary.items.iter().any(|item| !seen.contains(item));
-        let compare = boundary
-            .attempted_code()
-            .map(|_| prompts::compare_request(&explain::allowed(profile), idea));
+        let compare = prompts::compare_request(&explain::allowed(profile), idea);
         Self {
             client,
             router,
-            baseline: tools.checkable_files(),
+            snapshot: tools.checkable_files(),
             lock: tools.read(LOCK),
             boundary,
             request: request.map(str::to_owned),
             writing: false,
             recurred: false,
+            taken_back: false,
             context,
             compare,
             similar: None,
@@ -214,39 +233,66 @@ impl<'a> SubLine<'a> {
         self.recurred
     }
 
-    /// The choices the user has, in order.
-    pub fn choices(&self) -> &'static [Choice] {
-        if self.recurred {
-            &[Choice::Unlock, Choice::UserWrote]
-        } else {
-            &[Choice::Unlock, Choice::Rewrite, Choice::UserWrote]
-        }
+    /// The choices the user has, in order: ② not after it recurred, ④ not after ③ took the step
+    /// back (PRD UC3).
+    pub fn choices(&self) -> Vec<Choice> {
+        [
+            Choice::Unlock,
+            Choice::Rewrite,
+            Choice::UserWrote,
+            Choice::Next,
+        ]
+        .into_iter()
+        .filter(|choice| match choice {
+            Choice::Rewrite => !self.recurred,
+            Choice::Next => !self.taken_back,
+            Choice::Unlock | Choice::UserWrote => true,
+        })
+        .collect()
     }
 
-    /// The outcome of ① or ② to hand back to the main line (PRD §8.5). ③'s outcome only
+    /// Whether ③ was chosen, which took the step back.
+    pub fn is_taken_back(&self) -> bool {
+        self.taken_back
+    }
+
+    /// The outcome of ①, ② or ④ to hand back to the main line (PRD §8.5). ③'s outcome only
     /// [`SubLine::done`] makes, so ③ is not offered here. For ② the `light` model makes the
     /// one-line policy from the side line's message list; when it cannot, a fixed policy stands
     /// in, so ② fails only when the user interrupts the wait for the policy. That request body
-    /// goes to `log` (PRD §8.8).
-    pub fn resolve(&self, choice: Choice, log: &SessionLog) -> Result<Resolution, Unresolved> {
+    /// goes to `log` (PRD §8.8). After ③ took the step back, ① and ② carry the files the user
+    /// changed on the project of `tools` since, for the main line to re-read.
+    pub fn resolve(
+        &self,
+        choice: Choice,
+        tools: &Tools,
+        log: &SessionLog,
+    ) -> Result<Resolution, Unresolved> {
         if !self.choices().contains(&choice) {
             return Err(Unresolved::NotOffered);
         }
         let items = self.boundary.items.clone();
         let policy = match choice {
-            Choice::Unlock => None,
+            Choice::Unlock | Choice::Next => None,
             Choice::Rewrite => Some(
                 self.policy(log)?
                     .unwrap_or_else(|| prompts::fixed_policy(&items)),
             ),
             Choice::UserWrote => return Err(Unresolved::NotOffered),
         };
+        let after_user_wrote = self.taken_back.then(|| {
+            self.user_files(tools)
+                .into_iter()
+                .map(|file| file.path)
+                .collect()
+        });
         Ok(Resolution {
             choice,
             answers: items.clone(),
             items,
             policy,
             files: Vec::new(),
+            after_user_wrote,
         })
     }
 
@@ -277,10 +323,11 @@ impl<'a> SubLine<'a> {
         }))
     }
 
-    /// The `.rs` files and `Cargo.toml`s under the root when the side line opened, with their
-    /// content, by path relative to the root.
-    pub fn baseline(&self) -> &BTreeMap<String, String> {
-        &self.baseline
+    /// The `.rs` files and `Cargo.toml`s under the root that the user's lines are told apart
+    /// from: as they were when the side line opened, and from ③ on as they were right after it
+    /// took the step back.
+    pub fn snapshot(&self) -> &BTreeMap<String, String> {
+        &self.snapshot
     }
 
     /// Whether the explanation has come, or a question before it was answered: either way it is
@@ -297,30 +344,11 @@ impl<'a> SubLine<'a> {
 
     /// Asks the `reason` model to explain the idea of the items, and returns the explanation. When
     /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]). The
-    /// request body goes to `log` (PRD §8.8). When the user has seen every item before and the
-    /// main line tried no code, there is neither an idea nor a comparison to ask for, so nothing
-    /// is asked, and the model is told about the boundary with the first question instead.
+    /// request body goes to `log` (PRD §8.8).
     pub fn explain(&mut self, log: &SessionLog) -> Result<String, ChatError> {
-        let idea = self
-            .boundary
-            .items
-            .iter()
-            .any(|item| !self.seen.contains(item));
-        if !idea && self.compare.is_none() {
-            self.explained = true;
-            return Ok(explain::assemble(
-                &self.boundary,
-                &self.seen,
-                "",
-                self.similar.as_deref(),
-            ));
-        }
         // Only the explanation asks for the comparison: a question or the policy of ② asked
         // before it came goes with the context alone.
-        let content = match &self.compare {
-            Some(compare) => format!("{} {compare}", self.context),
-            None => self.context.clone(),
-        };
+        let content = format!("{} {}", self.context, self.compare);
         let user = Message::User { content };
         let answer = self.send(user.clone(), log)?;
         let explanation =
@@ -460,7 +488,6 @@ mod open {
     /// boundary, and returns the boundary.
     fn stop_at_a_boundary(client: &FakeChatClient, main_line: &mut MainLine) -> Boundary {
         client.push_chat(Ok(write_main("first")));
-        client.push_chat(Ok(write_main("second")));
         match main_line.turn("debug 1", &mut Refuse).end {
             TurnEnd::Boundary(boundary) => boundary,
             end => panic!("the turn did not stop at a boundary: {end:?}"),
@@ -500,10 +527,10 @@ mod open {
         main_line.turn("print 1 instead", &mut Refuse);
 
         let requests = client.requests();
-        assert_eq!(requests.len(), 5);
+        assert_eq!(requests.len(), 4);
         let generate = Config::default().models.generate;
         let main: Vec<&ChatRequest> = requests.iter().filter(|r| r.model == generate).collect();
-        assert_eq!(main.len(), 3, "the two writes and the next request");
+        assert_eq!(main.len(), 2, "the step and the next request");
         for request in main {
             for text in texts(request) {
                 for said in ["EXPLANATION", "QUESTION", "ANSWER"] {
@@ -672,7 +699,7 @@ mod open {
     }
 
     #[test]
-    fn the_baseline_is_the_checkable_files_as_they_were_when_the_side_line_opened() {
+    fn the_snapshot_is_the_checkable_files_as_they_were_when_the_side_line_opened() {
         let dir = project();
         fs::write(dir.path().join("README.md"), "# demo\n").unwrap();
         fs::create_dir_all(dir.path().join("target/debug")).unwrap();
@@ -686,17 +713,18 @@ mod open {
         fs::write(dir.path().join("src/main.rs"), "fn main() { todo!() }\n").unwrap();
         fs::write(dir.path().join("src/lib.rs"), "pub fn f() {}\n").unwrap();
 
-        let baseline: Vec<(&str, &str)> = side
-            .baseline()
+        let snapshot: Vec<(&str, &str)> = side
+            .snapshot()
             .iter()
             .map(|(path, content)| (path.as_str(), content.as_str()))
             .collect();
         assert_eq!(
-            baseline,
+            snapshot,
             [
                 ("Cargo.toml", "[package]\nname = \"demo\"\n"),
-                ("src/main.rs", "fn main() {}\n"),
-            ]
+                ("src/main.rs", "fn main() {\n    dbg!(1);\n}\n"),
+            ],
+            "with the step on disk"
         );
         assert_eq!(side.boundary(), &boundary);
     }

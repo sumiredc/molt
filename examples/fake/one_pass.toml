@@ -1,7 +1,7 @@
 # An example script for molt --fake. In place of the model, it answers the requests molt sends,
 # one response each, from the top.
-# It takes one pass: request -> rejection -> boundary -> side line -> ① -> write -> cargo check
-# -> commit approval. It does not read the request, so whatever you ask, src/main.rs is rewritten
+# It takes one pass: request -> step -> boundary -> side line -> ① -> cargo check -> commit
+# approval. It does not read the request, so whatever you ask, src/main.rs is rewritten
 # as scripted here.
 #
 # The profile to go with it is profile.toml in this directory (dbg_macro not known).
@@ -10,28 +10,18 @@
 # tests/fake_pass.rs takes one pass with this script, and tests/fake_example.rs with copies of
 # this script and profile.toml. If you change the responses, fix the tests too.
 
-# Main line: with a profile where dbg_macro is not known, dbg! is not allowed, so molt rejects this write.
+# Main line: with a profile where dbg_macro is not known, this write is a step. molt writes it,
+# and the turn stops at a boundary right after it.
 [[responses]]
 tool_calls = [
   { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
 ]
 
-# The rewrite uses dbg! too. At the second rejection, the turn stops at a boundary.
-[[responses]]
-tool_calls = [
-  { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    let _ = dbg!(1);\n}\n" } },
-]
-
-# The explanation of dbg_macro on the side line.
+# The explanation of the step's lines on the side line.
 [[responses]]
 content = "`dbg!` prints the value of an expression with its file and line to stderr, and returns the value."
 
-# After ①, the same turn goes on. dbg! is known now, so the write goes through.
-[[responses]]
-tool_calls = [
-  { name = "write_file", arguments = { path = "src/main.rs", content = "fn main() {\n    dbg!(1);\n}\n" } },
-]
-
+# After ①, the step stays and the same turn goes on. dbg! is known now.
 [[responses]]
 tool_calls = [{ name = "finish", arguments = { summary = "Printed 1 with `dbg!`." } }]
 

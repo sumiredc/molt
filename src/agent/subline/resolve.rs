@@ -77,13 +77,17 @@ fn write_main(id: &str, content: &str) -> ChatResponse {
     }
 }
 
-fn request_boundary(id: &str) -> ChatResponse {
+/// `Cargo.toml` of the project with `serde-json` among its dependencies.
+const WITH_SERDE_JSON_DEPENDENCY: &str =
+    "[package]\nname = \"demo\"\n\n[dependencies]\nserde-json = \"1\"\n";
+
+fn write_manifest(id: &str, content: &str) -> ChatResponse {
     ChatResponse {
         content: None,
         tool_calls: vec![ToolCall {
             id: id.to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["dbg_macro"], "reason": "it prints" }).to_string(),
+            name: "write_file".to_owned(),
+            arguments: json!({ "path": "Cargo.toml", "content": content }).to_string(),
         }],
     }
 }
@@ -98,7 +102,6 @@ fn reply(text: &str) -> ChatResponse {
 /// Runs a turn on "debug 1" that the model's two `dbg!` writes stop at a boundary.
 fn stop_at_a_boundary(client: &FakeChatClient, main_line: &mut MainLine) -> Boundary {
     client.push_chat(Ok(write_main("first", WITH_DBG)));
-    client.push_chat(Ok(write_main("second", WITH_DBG)));
     match main_line.turn("debug 1", &mut Refuse).end {
         TurnEnd::Boundary(boundary) => boundary,
         end => panic!("the turn did not stop at a boundary: {end:?}"),
@@ -135,14 +138,11 @@ fn unlock_makes_the_items_known_with_the_side_line_as_the_provenance() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let entry = main_line.profile().entry(&dbg_macro()).unwrap();
     assert_eq!(entry.status(), Status::Known);
@@ -158,14 +158,11 @@ fn unlock_hands_the_main_line_one_message_with_unlock_and_the_item_names() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let requests = generate_requests(&client);
     let after = requests.last().unwrap();
@@ -194,18 +191,15 @@ fn after_unlock_the_same_turn_goes_on_and_writes_the_items() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("third", WITH_DBG)));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(matches!(resumed.turn.end, TurnEnd::Finished));
-    assert_eq!(resumed.turn.tool_calls, ["write_file"; 3]);
+    assert_eq!(resumed.turn.tool_calls, ["write_file"; 2]);
     assert_eq!(
         fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
         WITH_DBG
@@ -222,14 +216,11 @@ fn the_profile_changed_by_a_choice_is_saved_to_the_profile_path() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(resumed.saved.is_ok());
     let saved = Profile::load(&saved_to).unwrap();
@@ -246,14 +237,11 @@ fn a_profile_that_cannot_be_saved_is_reported_and_the_choice_still_holds_in_the_
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(resumed.saved.is_err());
     assert_eq!(main_line.profile().status(&dbg_macro()), Status::Known);
@@ -268,14 +256,10 @@ fn after_unlock_the_item_is_not_a_boundary_again_in_the_session() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
-    client.push_chat(Ok(request_boundary("asked")));
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
     client.push_chat(Ok(write_main("w1", WITH_DBG)));
     client.push_chat(Ok(write_main("w2", WITH_DBG)));
     client.push_chat(Ok(reply("done")));
@@ -296,14 +280,11 @@ fn rewrite_makes_the_items_seen_with_the_side_line_as_the_provenance() {
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("Print with println! instead.")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let entry = main_line.profile().entry(&dbg_macro()).unwrap();
     assert_eq!(entry.status(), Status::Seen);
@@ -320,15 +301,12 @@ fn rewrite_hands_the_main_line_the_rewrite_message_with_the_item_names_and_the_p
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("Print with println! instead.")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("third", WITHOUT_DBG)));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(matches!(resumed.turn.end, TurnEnd::Finished));
     let requests = generate_requests(&client);
@@ -360,7 +338,7 @@ fn the_policy_of_rewrite_is_asked_of_the_light_model_with_the_side_line_transcri
     side.ask("QUESTION", &SessionLog::disabled()).unwrap();
 
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
 
     assert_eq!(resolution.policy(), Some("Print with println! instead."));
@@ -391,7 +369,7 @@ fn the_policy_of_rewrite_is_the_fixed_one_when_the_light_model_fails_or_says_not
         client.push_chat(answer);
 
         let resolution = side
-            .resolve(Choice::Rewrite, &SessionLog::disabled())
+            .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
             .unwrap();
 
         assert_eq!(
@@ -415,14 +393,11 @@ fn the_side_line_transcript_does_not_reach_the_main_line_after_a_choice() {
     side.explain(&SessionLog::disabled()).unwrap();
     side.ask("QUESTION", &SessionLog::disabled()).unwrap();
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let said = format!("{:?}", generate_requests(&client).last().unwrap().messages);
     for text in ["EXPLANATION", "QUESTION", "ANSWER"] {
@@ -431,7 +406,7 @@ fn the_side_line_transcript_does_not_reach_the_main_line_after_a_choice() {
 }
 
 #[test]
-fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_stops_at_once_and_offers_unlock_only() {
+fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_does_not_offer_rewrite() {
     let dir = project();
     let client = FakeChatClient::new();
     let cargo = cargo();
@@ -440,14 +415,11 @@ fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_stops_at_once_and_offer
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("third", WITH_DBG)));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
@@ -455,36 +427,14 @@ fn a_boundary_that_recurs_after_rewrite_in_the_same_turn_stops_at_once_and_offer
     assert_eq!(again.items, [dbg_macro()]);
     let side = main_line.side_line(again);
     assert!(side.is_recurrence());
-    assert_eq!(side.choices(), [Choice::Unlock, Choice::UserWrote]);
     assert_eq!(
-        side.resolve(Choice::Rewrite, &SessionLog::disabled()),
+        side.choices(),
+        [Choice::Unlock, Choice::UserWrote, Choice::Next]
+    );
+    assert_eq!(
+        side.resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled()),
         Err(Unresolved::NotOffered)
     );
-}
-
-#[test]
-fn a_boundary_requested_again_after_rewrite_in_the_same_turn_is_a_recurrence_too() {
-    let dir = project();
-    let client = FakeChatClient::new();
-    let cargo = cargo();
-    let mut main_line = main_line(&client, &cargo, &dir);
-    let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let side = main_line.side_line(boundary);
-    client.push_chat(Ok(reply("policy")));
-    let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
-        .unwrap();
-    client.push_chat(Ok(request_boundary("again")));
-
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
-
-    let TurnEnd::Boundary(again) = resumed.turn.end else {
-        panic!("the turn did not stop again: {:?}", resumed.turn.end);
-    };
-    assert!(main_line.side_line(again).is_recurrence());
 }
 
 #[test]
@@ -497,13 +447,10 @@ fn the_same_boundary_in_a_later_turn_after_rewrite_is_not_a_recurrence() {
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let boundary = stop_at_a_boundary(&client, &mut main_line);
 
@@ -511,7 +458,12 @@ fn the_same_boundary_in_a_later_turn_after_rewrite_is_not_a_recurrence() {
     assert!(!side.is_recurrence());
     assert_eq!(
         side.choices(),
-        [Choice::Unlock, Choice::Rewrite, Choice::UserWrote]
+        [
+            Choice::Unlock,
+            Choice::Rewrite,
+            Choice::UserWrote,
+            Choice::Next
+        ]
     );
 }
 
@@ -524,7 +476,7 @@ fn nothing_is_resolved_when_no_turn_is_held_at_a_boundary() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     main_line.withdraw();
 
@@ -542,23 +494,14 @@ fn a_boundary_after_rewrite_that_names_a_rewritten_item_with_a_new_one_is_a_recu
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "both".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments:
-                json!({ "items": ["matches_macro", "dbg_macro"], "reason": "matched and printed" })
-                    .to_string(),
-        }],
-    }));
+    client.push_chat(Ok(write_main(
+        "both",
+        "fn main() {\n    dbg!(matches!(1, 1));\n}\n",
+    )));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
@@ -566,7 +509,7 @@ fn a_boundary_after_rewrite_that_names_a_rewritten_item_with_a_new_one_is_a_recu
     assert_eq!(again.items.len(), 2);
     assert_eq!(
         main_line.side_line(again).choices(),
-        [Choice::Unlock, Choice::UserWrote]
+        [Choice::Unlock, Choice::UserWrote, Choice::Next]
     );
 }
 
@@ -591,14 +534,11 @@ fn rewrite_leaves_an_item_already_seen_as_it_is_and_adds_no_history() {
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let entry = main_line.profile().entry(&dbg_macro()).unwrap();
     assert_eq!(entry.status(), Status::Seen);
@@ -625,22 +565,18 @@ fn unlock_of_a_crate_unlocks_its_other_spelling_too_so_the_boundary_does_not_com
     let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
     let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
     client.push_chat(Ok(write_main("first", WITH_SERDE_JSON)));
-    client.push_chat(Ok(write_main("second", WITH_SERDE_JSON)));
     let TurnEnd::Boundary(boundary) = main_line.turn("use serde_json", &mut Refuse).end else {
         panic!("the turn did not stop at a boundary");
     };
     assert_eq!(boundary.items, ["crate:serde_json".parse().unwrap()]);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("third", WITH_SERDE_JSON)));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(
         matches!(resumed.turn.end, TurnEnd::Finished),
@@ -654,7 +590,7 @@ fn unlock_of_a_crate_unlocks_its_other_spelling_too_so_the_boundary_does_not_com
 }
 
 #[test]
-fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too() {
+fn unlock_of_a_crate_unlocks_its_spelling_with_a_hyphen_in_the_profile_too() {
     const WITH_SERDE_JSON: &str = "fn f(_: serde_json::Value) {}\n\nfn main() {}\n";
     let dir = project();
     let client = FakeChatClient::new();
@@ -662,7 +598,7 @@ fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too
     let mut profile = Profile::new();
     profile
         .transition(
-            "crate:serde_json".parse().unwrap(),
+            "crate:serde-json".parse().unwrap(),
             Status::Seen,
             Provenance::SelfReport,
             crate::profile::store::Timestamp::now(),
@@ -671,31 +607,19 @@ fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too
         .unwrap();
     let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
     let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, profile);
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "asked".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["crate:serde-json"], "reason": "it parses JSON" })
-                .to_string(),
-        }],
-    }));
+    client.push_chat(Ok(write_manifest("asked", WITH_SERDE_JSON_DEPENDENCY)));
     let TurnEnd::Boundary(boundary) = main_line.turn("parse JSON", &mut Refuse).end else {
         panic!("the turn did not stop at a boundary");
     };
-    assert_eq!(boundary.items, ["crate:serde-json".parse().unwrap()]);
+    assert_eq!(boundary.items, ["crate:serde_json".parse().unwrap()]);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write_main("w1", WITH_SERDE_JSON)));
-    client.push_chat(Ok(write_main("w2", WITH_SERDE_JSON)));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(
         matches!(resumed.turn.end, TurnEnd::Finished),
@@ -709,14 +633,13 @@ fn unlock_of_a_crate_requested_with_a_hyphen_unlocks_its_underscore_spelling_too
 }
 
 #[test]
-fn a_crate_requested_with_a_hyphen_after_rewrite_of_its_underscore_spelling_is_a_recurrence() {
+fn a_crate_in_cargo_toml_with_a_hyphen_after_rewrite_of_its_use_in_code_is_a_recurrence() {
     const WITH_SERDE_JSON: &str = "fn f(_: serde_json::Value) {}\n\nfn main() {}\n";
     let dir = project();
     let client = FakeChatClient::new();
     let cargo = cargo();
     let mut main_line = main_line(&client, &cargo, &dir);
     client.push_chat(Ok(write_main("first", WITH_SERDE_JSON)));
-    client.push_chat(Ok(write_main("second", WITH_SERDE_JSON)));
     let TurnEnd::Boundary(boundary) = main_line.turn("use serde_json", &mut Refuse).end else {
         panic!("the turn did not stop at a boundary");
     };
@@ -724,22 +647,11 @@ fn a_crate_requested_with_a_hyphen_after_rewrite_of_its_underscore_spelling_is_a
     let side = main_line.side_line(boundary);
     client.push_chat(Ok(reply("policy")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "asked".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["crate:serde-json"], "reason": "it parses JSON" })
-                .to_string(),
-        }],
-    }));
+    client.push_chat(Ok(write_manifest("asked", WITH_SERDE_JSON_DEPENDENCY)));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
@@ -767,16 +679,169 @@ fn unlock_makes_an_item_already_seen_known() {
     let boundary = stop_at_a_boundary(&client, &mut main_line);
     let side = main_line.side_line(boundary);
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let entry = main_line.profile().entry(&dbg_macro()).unwrap();
     assert_eq!(entry.status(), Status::Known);
     assert_eq!(entry.provenance(), Provenance::SideLine);
+}
+
+#[test]
+fn after_rewrite_the_file_is_back_and_the_end_of_the_turn_checks_though_nothing_more_was_written() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line = main_line(&client, &cargo, &dir);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("policy")));
+    let resolution = side
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(reply("I will leave it as it was.")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        "fn main() {}\n",
+        "the step is taken back"
+    );
+    assert!(resumed.taken_back.is_some_and(|taken| taken.restored));
+    assert!(
+        resumed.turn.check.is_some(),
+        "PRD §8.4: a step taken back counts"
+    );
+}
+
+#[test]
+fn next_leaves_a_seen_item_as_it_is_and_logs_no_change_of_it() {
+    let dir = project();
+    let logs = tempfile::tempdir().unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut profile = Profile::new();
+    profile
+        .transition(
+            dbg_macro(),
+            Status::Seen,
+            Provenance::SelfReport,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
+    let log = SessionLog::create(logs.path(), false).unwrap();
+    let path = log.path().unwrap().to_owned();
+    let mut main_line =
+        MainLine::new(&client, Router::new(&Config::default()), tools, profile).with_log(log);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    let resolution = side
+        .resolve(Choice::Next, main_line.tools(), &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(reply("done")));
+
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    let entry = main_line.profile().entry(&dbg_macro()).unwrap();
+    assert_eq!(
+        (entry.status(), entry.provenance()),
+        (Status::Seen, Provenance::SelfReport)
+    );
+    let log = fs::read_to_string(path).unwrap();
+    assert!(log.contains(r#""choice":"next""#), "{log}");
+    assert!(!log.contains("profile_change"), "{log}");
+}
+
+#[test]
+fn a_crate_unlocked_may_be_added_and_one_chosen_rewrite_may_not() {
+    for (choice, asked) in [(Choice::Unlock, true), (Choice::Rewrite, false)] {
+        let dir = project();
+        let client = FakeChatClient::new();
+        let cargo = cargo();
+        let mut main_line = main_line(&client, &cargo, &dir);
+        client.push_chat(Ok(write_main(
+            "step",
+            "fn main() {\n    let _ = serde::VALUE;\n}\n",
+        )));
+        let TurnEnd::Boundary(boundary) = main_line.turn("use serde", &mut Refuse).end else {
+            panic!("the turn did not stop at a boundary");
+        };
+        let side = main_line.side_line(boundary);
+        if choice == Choice::Rewrite {
+            client.push_chat(Ok(reply("policy")));
+        }
+        let resolution = side
+            .resolve(choice, main_line.tools(), &SessionLog::disabled())
+            .unwrap();
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "add".to_owned(),
+                name: "run_cargo".to_owned(),
+                arguments: json!({ "subcommand": "add", "args": ["serde"] }).to_string(),
+            }],
+        }));
+        client.push_chat(Ok(reply("done")));
+
+        main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+        let result = generate_requests(&client)
+            .last()
+            .unwrap()
+            .messages
+            .iter()
+            .find_map(|message| match message {
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } if tool_call_id == "add" => Some(content.clone()),
+                _ => None,
+            })
+            .unwrap();
+        // Asked and refused by the user, or refused before asking.
+        assert_eq!(
+            result == crate::agent::prompts::crate_add_before_step("serde"),
+            !asked,
+            "{choice:?}: {result}"
+        );
+    }
+}
+
+#[test]
+fn a_step_that_could_not_be_taken_back_is_noted_in_the_message_of_rewrite() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = cargo();
+    let mut main_line = main_line(&client, &cargo, &dir);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    fs::write(dir.path().join("src/main.rs"), "// changed while paused\n").unwrap();
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("policy")));
+    let resolution = side
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(reply("done")));
+
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
+
+    assert!(resumed.taken_back.is_some_and(|taken| !taken.restored));
+    let message = user_messages(generate_requests(&client).last().unwrap())
+        .pop()
+        .unwrap();
+    assert!(
+        message.contains("could not be taken back")
+            && !message.contains(" was taken back")
+            && message.contains("`src/main.rs`"),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        "// changed while paused\n"
+    );
 }

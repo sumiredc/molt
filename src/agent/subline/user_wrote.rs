@@ -1,12 +1,14 @@
-//! ③ on the side line (PRD UC3): the user writes the code themselves. The side line tells them
-//! where to write what, and on `/done` takes the user's lines from what changed on the disk since
-//! the side line opened, detects the items in them, runs `cargo check`, and has the `generate`
-//! model review them.
+//! ③ on the side line (PRD UC3): molt takes the step back, and the user writes that code
+//! themselves. The side line tells them where to write what, and on `/done` takes the user's lines
+//! from what changed on the disk since the step was taken back, detects the items in them, runs
+//! `cargo check`, and has the `generate` model review them. `/done` fails only on errors in the
+//! user's lines: the steps before may not build yet.
 
 use super::{Choice, LOCK, Resolution, SubLine};
 use crate::agent::mainline::Change;
 use crate::agent::prompts;
 use crate::agent::tools::Tools;
+use crate::checker::diff;
 use crate::checker::{CheckReport, ParseError};
 use crate::llm::{ChatError, Message, Role};
 use crate::profile::status::ItemKey;
@@ -17,16 +19,18 @@ use crate::workspace::cargo::{CargoError, CargoOutput};
 /// What `/done` found (UC3 ③).
 #[derive(Debug)]
 pub enum Done {
-    /// No file the checker can check was written since the side line opened. The user chooses
-    /// again.
+    /// No file the checker can check was written since the step was taken back. The user
+    /// chooses again.
     NoChange,
-    /// The user's lines do not parse, or `cargo check` did not pass. The profile is not changed:
-    /// the user can fix it and send `/done` again, or choose another way.
+    /// The user's lines do not parse, `cargo check` found an error in them, or could not run. The
+    /// profile is not changed: the user can fix it and send `/done` again, or choose another way.
     Failed(Failure),
-    /// `cargo check` passed. `resolution` goes back to the main line; `review` is for the user.
+    /// `cargo check` found no error in the user's lines. `resolution` goes back to the main line;
+    /// `review` is for the user; `check` is the `cargo check`, shown when it failed elsewhere.
     Passed {
         resolution: Resolution,
         review: Result<String, ChatError>,
+        check: Result<CargoOutput, CargoError>,
     },
     /// The user interrupted the wait for the review (Ctrl-C). The profile is not changed, and the
     /// side line is still writing.
@@ -38,9 +42,45 @@ pub enum Done {
 pub struct Failure {
     /// Each file of the user's that does not parse, by path relative to the root, with where.
     pub parse_errors: Vec<(String, ParseError)>,
-    /// The `cargo check` run on the project. It did not pass, or could not run, unless only
-    /// `parse_errors` failed.
+    /// The `cargo check` run on the project. It found an error in the user's lines, or could not
+    /// run, unless only `parse_errors` failed.
     pub check: Result<CargoOutput, CargoError>,
+}
+
+/// The places `cargo check` reports its errors at in `output`, as path relative to the project
+/// root and 1-based line: for each `error` line, the first `--> path:line:column` after it,
+/// which is the error's own place. The places of the notes under it, and of warnings, are left
+/// out. An error with no place (cargo's own, such as a dependency it cannot find) is `None`.
+pub(crate) fn error_places(output: &CargoOutput) -> Vec<Option<(String, usize)>> {
+    let mut places = Vec::new();
+    let mut open = false;
+    for line in output.stderr.lines().chain(output.stdout.lines()) {
+        if line.starts_with("error") {
+            if open {
+                places.push(None);
+            }
+            // `error: aborting due to …` and `error: could not compile …` sum up the others.
+            open = !line.starts_with("error: aborting")
+                && !line.starts_with("error: could not compile");
+        } else if line.starts_with("warning") {
+            if open {
+                places.push(None);
+            }
+            open = false;
+        } else if open && let Some(place) = line.trim_start().strip_prefix("--> ") {
+            open = false;
+            let mut parts = place.rsplitn(3, ':');
+            let (_column, line, path) = (parts.next(), parts.next(), parts.next());
+            places.push(match (path, line.and_then(|l| l.parse().ok())) {
+                (Some(path), Some(line)) => Some((path.trim_start_matches("./").to_owned(), line)),
+                _ => None,
+            });
+        }
+    }
+    if open {
+        places.push(None);
+    }
+    places
 }
 
 impl SubLine<'_> {
@@ -49,9 +89,20 @@ impl SubLine<'_> {
         self.writing
     }
 
-    /// Starts ③: asks the `reason` model where the user is to write what, and returns its
-    /// guidance. The side line is writing from now on, even when the request fails, unless the
-    /// user interrupted the wait for it (Ctrl-C). The request body goes to `log` (PRD §8.8).
+    /// Starts ③, once the main line took the step back (PRD UC3): the user's lines are told apart
+    /// from the files of `tools` as they are now, and ④ is no longer offered. Only the first call
+    /// does anything.
+    pub fn start_writing(&mut self, tools: &Tools) {
+        if !self.taken_back {
+            self.taken_back = true;
+            self.snapshot = tools.checkable_files();
+            self.lock = tools.read(LOCK);
+        }
+    }
+
+    /// Asks the `reason` model where the user is to write what in ③, and returns its guidance.
+    /// The side line is writing from now on, even when the request fails, unless the user
+    /// interrupted the wait for it (Ctrl-C). The request body goes to `log` (PRD §8.8).
     pub fn guide(&mut self, log: &SessionLog) -> Result<String, ChatError> {
         let instruction = prompts::guidance_request(&self.boundary.items);
         let content = if self.told() {
@@ -66,25 +117,32 @@ impl SubLine<'_> {
         guidance
     }
 
-    /// `/done` of ③ on the project of `tools`. The user's lines are those of the `.rs` files and
-    /// `Cargo.toml`s that differ from when the side line opened (a file that is new counts as all
-    /// lines; a file removed is not seen). When it passes, the outcome also carries the
-    /// `Cargo.lock` at the root if it differs from then. Every item in them that `profile` does not allow is detected as a write would be,
-    /// then `cargo check` runs; only when the lines parse and the check passes is the outcome a
-    /// resolution, and the `generate` model reviews the lines. When nothing changed, the side
-    /// line is no longer writing, so the user chooses again. A review that fails otherwise than by
-    /// the user's interrupt does not stop the resolution. Request bodies go to `log` (PRD §8.8).
-    pub(crate) fn done(&mut self, tools: &Tools, profile: &Profile, log: &SessionLog) -> Done {
-        let files: Vec<Change> = tools
+    /// The `.rs` files and `Cargo.toml`s of the project of `tools` that differ from the snapshot
+    /// (a file that is new counts as all lines; a file removed is not seen), from their content
+    /// then.
+    pub(super) fn user_files(&self, tools: &Tools) -> Vec<Change> {
+        tools
             .checkable_files()
             .into_iter()
-            .filter(|(path, now)| self.baseline.get(path) != Some(now))
+            .filter(|(path, now)| self.snapshot.get(path) != Some(now))
             .map(|(path, after)| Change {
-                before: self.baseline.get(&path).cloned(),
+                before: self.snapshot.get(&path).cloned(),
                 path,
                 after,
             })
-            .collect();
+            .collect()
+    }
+
+    /// `/done` of ③ on the project of `tools`. The user's lines are those of
+    /// [`SubLine::user_files`]. When it passes, the outcome also carries the `Cargo.lock` at the
+    /// root if it differs from the snapshot. Every item in them that `profile` does not have as
+    /// `known` is detected as a write would be, then `cargo check` runs; the outcome is a
+    /// resolution when the lines parse and the check finds no error in a line the user changed
+    /// (PRD UC3), and the `generate` model reviews the lines. When nothing changed, the side line
+    /// is no longer writing, so the user chooses again. A review that fails otherwise than by the
+    /// user's interrupt does not stop the resolution. Request bodies go to `log` (PRD §8.8).
+    pub(crate) fn done(&mut self, tools: &Tools, profile: &Profile, log: &SessionLog) -> Done {
+        let files = self.user_files(tools);
         if files.is_empty() {
             self.writing = false;
             return Done::NoChange;
@@ -109,7 +167,25 @@ impl SubLine<'_> {
         }
         let reviewed = files.len();
         let check = tools.cargo_check();
-        let passed = matches!(&check, Ok(output) if output.success);
+        // An error without a place may come of a crate the user added to `Cargo.toml` that cannot
+        // be found, so it counts as theirs when they changed a `Cargo.toml`.
+        let changed_manifest = files
+            .iter()
+            .any(|file| file.path.rsplit('/').next() == Some("Cargo.toml"));
+        let in_user_lines = |output: &CargoOutput| {
+            error_places(output).iter().any(|place| match place {
+                None => changed_manifest,
+                Some((path, line)) => files.iter().any(|file| {
+                    tools.same_file(&file.path, path)
+                        && diff::changed_lines(file.before.as_deref().unwrap_or(""), &file.after)
+                            .contains(*line)
+                }),
+            })
+        };
+        let passed = match &check {
+            Ok(output) => output.success || !in_user_lines(output),
+            Err(_) => false,
+        };
         if !passed || !parse_errors.is_empty() {
             return Done::Failed(Failure {
                 parse_errors,
@@ -140,8 +216,10 @@ impl SubLine<'_> {
                 items,
                 policy: None,
                 files,
+                after_user_wrote: None,
             },
             review,
+            check,
         }
     }
 

@@ -3,7 +3,7 @@
 steps = [
   { input = "Print 1 to stderr with dbg! in src/main.rs." }, # the request, which stops at a boundary
   { input = "/choose" },                                     # on the side line
-  { select = 1 },                                            # ①: understand, then delegate
+  { select = 1 },                                            # ①: understood
   { confirm = true },                                        # "Commit with this message?"
   { input = "/quit" },
 ]

@@ -50,15 +50,18 @@ fn the_example_script_and_profile_copied_out_take_one_pass_to_an_approved_commit
         "stdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    // The example profile does not allow `dbg!`, so the pass goes through the boundary and ①.
+    // The example profile does not have `dbg!` as known, so the write is a step, and the pass
+    // goes through its boundary and ①.
     // The message is the script's last response: without it molt would propose one of its own,
     // and a script that ran out early would still end in a commit.
     assert_in_order(
         &stdout,
         &[
-            "Stopped at a boundary: the request needs dbg_macro (macros)",
+            "Paused after a step: molt wrote ",
             "── side line: dbg_macro ────",
-            "Your profile allows dbg_macro now (known).",
+            "  The step molt wrote to src/main.rs:",
+            "2 |     dbg!(1);",
+            "Your profile has dbg_macro as known now.",
             "cargo check passed.",
             "Message:\n  Print 1 with dbg!",
             "Commit with this message? [y/n] yes",

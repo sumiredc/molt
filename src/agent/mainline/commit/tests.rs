@@ -518,7 +518,18 @@ fn the_commit_after_an_approved_cargo_add_has_cargo_toml_and_cargo_lock() {
         dir: dir.path().to_owned(),
         calls: RefCell::new(Vec::new()),
     };
-    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let mut serde = Profile::new();
+    serde
+        .transition(
+            "crate:serde".parse().unwrap(),
+            crate::profile::status::Status::Known,
+            crate::profile::status::Provenance::Manual,
+            crate::profile::store::Timestamp::now(),
+            None,
+        )
+        .unwrap();
+    let tools = Tools::with_git(Root::new(dir.path()).unwrap(), &cargo, git);
+    let mut main_line = MainLine::new(&client, Router::new(&Config::default()), tools, serde);
     client.push_chat(Ok(call(
         "add",
         "run_cargo",
@@ -967,11 +978,7 @@ fn what_molt_wrote_before_a_withdrawn_boundary_is_proposed_with_the_next_commit(
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
-    client.push_chat(Ok(call(
-        "boundary",
-        "request_boundary",
-        json!({ "items": ["dbg_macro"], "reason": "needed" }),
-    )));
+    client.push_chat(Ok(write("step", "src/main.rs", WITH_DBG)));
     let turn = main_line.turn("add one and debug it", &mut Answer::no());
     assert!(matches!(turn.end, TurnEnd::Boundary(_)), "{:?}", turn.end);
     main_line.withdraw();
@@ -985,15 +992,15 @@ fn what_molt_wrote_before_a_withdrawn_boundary_is_proposed_with_the_next_commit(
 
 // The two cases #58 left open: ③ (UC3) and the files molt changed
 
-/// Stops a turn at a boundary on `dbg_macro` that the model asks for, without writing.
+/// Stops a turn at a boundary on `dbg_macro`: the model writes it to `src/main.rs` as a step.
 fn stop_at_a_boundary(
     client: &FakeChatClient,
     main_line: &mut MainLine,
 ) -> crate::agent::mainline::Boundary {
     client.push_chat(Ok(call(
-        "boundary",
-        "request_boundary",
-        json!({ "items": ["dbg_macro"], "reason": "needed" }),
+        "step",
+        "write_file",
+        json!({ "path": "src/main.rs", "content": WITH_DBG }),
     )));
     match main_line.turn("debug 1", &mut Answer::no()).end {
         TurnEnd::Boundary(boundary) => boundary,
@@ -1001,25 +1008,33 @@ fn stop_at_a_boundary(
     }
 }
 
+/// The side line at `boundary` once ③ was chosen: the step taken back, the user about to write.
+fn writing<'a>(
+    main_line: &mut MainLine<'a>,
+    boundary: crate::agent::mainline::Boundary,
+) -> crate::agent::subline::SubLine<'a> {
+    let mut side = main_line.side_line(boundary);
+    main_line.take_back();
+    side.start_writing(main_line.tools());
+    side
+}
+
 #[test]
 fn a_turn_whose_only_change_is_what_the_user_wrote_in_3_gets_a_proposal_of_it() {
     let (dir, git) = repository();
     let client = FakeChatClient::new();
-    // The check of `/done`.
-    let cargo = cargo(&[true]);
+    // The check of `/done`, and the one at the end of the turn.
+    let cargo = cargo(&[true, true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     client.push_chat(Ok(reply("review")));
     let Done::Passed { resolution, .. } = main_line.done(&mut side) else {
         panic!("/done did not pass");
     };
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Answer::no())
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
     assert!(resumed.turn.written.is_empty(), "molt wrote nothing");
     client.push_chat(Ok(reply("Debug 1")));
     let mut answer = Answer::yes();
@@ -1041,18 +1056,15 @@ fn a_file_the_user_wrote_in_3_without_passing_done_is_not_among_the_files_molt_c
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let side = main_line.side_line(boundary);
+    let side = writing(&mut main_line, boundary);
     // The user starts ③ in src/main.rs, then switches to ①.
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Answer::no())
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
     client.push_chat(Ok(reply("Add one")));
     let mut answer = Answer::yes();
 
@@ -1075,10 +1087,10 @@ fn lines_the_user_wrote_in_3_without_passing_done_come_along_when_molt_changes_t
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let side = main_line.side_line(boundary);
+    let side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     let resolution = side
-        .resolve(Choice::Unlock, &SessionLog::disabled())
+        .resolve(Choice::Unlock, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(call(
         "edit",
@@ -1086,10 +1098,7 @@ fn lines_the_user_wrote_in_3_without_passing_done_come_along_when_molt_changes_t
         json!({ "path": "src/main.rs", "old_string": "fn main() {", "new_string": "fn main() {\n    let _ = 1;" }),
     )));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Answer::no())
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
     client.push_chat(Ok(reply("Print 1")));
     let mut answer = Answer::no();
 
@@ -1113,19 +1122,16 @@ fn a_file_the_user_wrote_in_3_before_switching_to_2_is_not_among_the_files_molt_
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let side = main_line.side_line(boundary);
+    let side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     // The policy of ② from the light model.
     client.push_chat(Ok(reply("Print the value with println! instead.")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Answer::no())
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
     client.push_chat(Ok(reply("Add one")));
     let mut answer = Answer::no();
 
@@ -1146,7 +1152,7 @@ fn a_file_the_user_wrote_in_3_before_withdrawing_the_request_is_not_among_the_fi
     let cargo = FakeCargo::new();
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let _side = main_line.side_line(boundary);
+    let _side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     main_line.withdraw();
     client.push_chat(Ok(git_commit("commit", "Debug 1")));
@@ -1193,17 +1199,14 @@ fn commit_message_request_after_rewrite() -> ChatRequest {
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, git);
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let side = main_line.side_line(boundary);
+    let side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("Print it instead.")));
     let resolution = side
-        .resolve(Choice::Rewrite, &SessionLog::disabled())
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();
     client.push_chat(Ok(write("write", "src/main.rs", PRINTS)));
     client.push_chat(Ok(reply("done")));
-    let resumed = main_line
-        .resolve(&resolution, &mut Answer::no())
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
     client.push_chat(Ok(reply("Print 1")));
 
     main_line.offer_commit(&resumed.turn, &mut Answer::no());
@@ -1246,5 +1249,43 @@ fn only_the_system_prompt_of_the_commit_message_request_speaks_of_the_language()
     assert!(
         system.contains("Answer in the language of the user's"),
         "{system}"
+    );
+}
+
+#[test]
+fn a_file_whose_only_change_by_molt_was_a_step_taken_back_is_not_among_the_files_molt_changed() {
+    let (dir, git) = repository();
+    // The user's own change, not committed, before the request.
+    let mine = "fn main() {\n    let _mine = 1;\n}\n";
+    fs::write(dir.path().join("src/main.rs"), mine).unwrap();
+    let client = FakeChatClient::new();
+    let cargo = cargo(&[true]);
+    let mut main_line = main_line(&client, &cargo, &dir, git);
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let side = main_line.side_line(boundary);
+    client.push_chat(Ok(reply("Print the value with println! instead.")));
+    let resolution = side
+        .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
+        .unwrap();
+    client.push_chat(Ok(write("write", "src/lib.rs", "pub fn one() {}\n")));
+    client.push_chat(Ok(reply("done")));
+    let resumed = main_line.resolve(&resolution, &mut Answer::no()).unwrap();
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        mine
+    );
+    client.push_chat(Ok(reply("Add one")));
+    let mut answer = Answer::no();
+
+    main_line.offer_commit(&resumed.turn, &mut answer);
+
+    let [proposal] = &answer.proposals()[..] else {
+        panic!("{:?}", answer.asked);
+    };
+    assert_eq!(proposal.files, ["src/lib.rs"]);
+    assert_eq!(
+        proposal.others,
+        ["src/main.rs"],
+        "the user's change stays theirs"
     );
 }

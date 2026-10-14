@@ -750,7 +750,7 @@ fn a_change_shows_the_file_as_it_is_at_the_end_of_the_turn() {
 }
 
 #[test]
-fn a_rejection_before_a_finish_still_counts_in_the_fix_after_a_failed_check() {
+fn a_step_before_a_finish_in_the_same_response_stops_the_turn_at_its_boundary() {
     let dir = project();
     let (client, cargo) = (FakeChatClient::new(), FakeCargo::new());
     let with_dbg = "fn main() {\n    dbg!(1);\n}\n";
@@ -775,15 +775,19 @@ fn a_rejection_before_a_finish_still_counts_in_the_fix_after_a_failed_check() {
             tool_call("f", "finish", json!({})),
         ],
     }));
-    cargo.push(failed(MISMATCH));
-    client.push_chat(Ok(write_file("d2", "src/main.rs", with_dbg)));
     client.push_chat(Ok(reply("never sent")));
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
 
     let turn = main_line.turn("debug 1", &mut Answer::no());
 
     assert!(matches!(turn.end, TurnEnd::Boundary(_)), "{:?}", turn.end);
-    assert_eq!(client.requests().len(), 2);
+    assert_eq!(client.requests().len(), 1);
+    assert_eq!(
+        turn.tool_calls,
+        ["write_file", "write_file"],
+        "finish is not run"
+    );
+    assert!(cargo.calls().is_empty(), "no check at a boundary");
 }
 
 #[test]
@@ -800,7 +804,7 @@ fn a_crate_the_model_added_is_checked_at_the_end_of_the_turn_and_shown_among_the
         json!({ "subcommand": "add", "args": ["serde_json"] }),
     )));
     client.push_chat(Ok(reply("added")));
-    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let mut main_line = main_line(&client, &cargo, &dir, known_crate("serde_json"));
 
     let turn = main_line.turn("add serde_json", &mut Answer::yes());
 
@@ -879,13 +883,12 @@ fn the_reply_before_a_failed_check_is_not_the_reply_of_the_turn() {
     assert_eq!(turn.reply, None);
 }
 
-/// A model that writes `src/lib.rs`, then tries `dbg!` twice, which stops the turn at a
-/// boundary.
+/// A model that writes `src/lib.rs`, then `dbg!` to `src/main.rs`, a step that stops the turn
+/// at a boundary.
 fn wrote_then_boundary(client: &FakeChatClient) {
     let with_dbg = "fn main() {\n    dbg!(1);\n}\n";
     client.push_chat(Ok(write_file("w", "src/lib.rs", "pub fn f() {}\n")));
     client.push_chat(Ok(write_file("d1", "src/main.rs", with_dbg)));
-    client.push_chat(Ok(write_file("d2", "src/main.rs", with_dbg)));
 }
 
 #[test]
@@ -916,16 +919,27 @@ fn withdrawing_a_request_held_at_a_boundary_checks_what_was_written_before_it() 
         messages_before,
         "nothing goes to the model"
     );
-    assert_eq!(client.requests().len(), 3);
+    assert_eq!(client.requests().len(), 2);
+    assert_eq!(
+        withdrawal.taken_back,
+        Some(crate::agent::mainline::TakenBack {
+            path: "src/main.rs".to_owned(),
+            restored: true,
+        })
+    );
+    assert_eq!(
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        "fn main() {}\n",
+        "the step is taken back"
+    );
 }
 
 #[test]
-fn withdrawing_a_request_that_wrote_nothing_runs_no_check() {
+fn withdrawing_a_request_that_wrote_nothing_but_its_step_runs_no_check() {
     let dir = project();
     let (client, cargo) = (FakeChatClient::new(), FakeCargo::new());
     let with_dbg = "fn main() {\n    dbg!(1);\n}\n";
     client.push_chat(Ok(write_file("d1", "src/main.rs", with_dbg)));
-    client.push_chat(Ok(write_file("d2", "src/main.rs", with_dbg)));
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     main_line.turn("debug 1", &mut Answer::no());
 
@@ -1003,4 +1017,32 @@ fn after_a_reply_without_tool_calls_molt_check_joins_that_reply() {
         )),
         "{sent:?}"
     );
+}
+
+#[test]
+fn cargo_add_of_a_crate_the_user_has_not_met_in_a_step_is_refused_without_asking() {
+    let dir = project();
+    let (client, cargo) = (FakeChatClient::new(), FakeCargo::new());
+    client.push_chat(Ok(call(
+        "a",
+        "run_cargo",
+        json!({ "subcommand": "add", "args": ["serde_json"] }),
+    )));
+    client.push_chat(Ok(reply("ok")));
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+
+    main_line.turn("add serde_json", &mut Answer::yes());
+
+    assert!(cargo.calls().is_empty(), "{:?}", cargo.calls());
+    let result = main_line
+        .messages()
+        .iter()
+        .find_map(|message| match message {
+            Message::Tool {
+                tool_call_id,
+                content,
+            } if tool_call_id == "a" => Some(content.clone()),
+            _ => None,
+        });
+    assert_eq!(result, Some(prompts::crate_add_before_step("serde_json")));
 }

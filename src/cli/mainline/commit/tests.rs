@@ -397,13 +397,11 @@ fn after_the_user_wrote_it_in_3_molt_proposes_the_commit_once_the_turn_goes_on_a
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
     let (dir, git) = repository(init);
     let client = FakeChatClient::new();
-    for id in ["first", "second"] {
-        client.push_chat(Ok(call(
-            id,
-            "write_file",
-            json!({ "path": "src/main.rs", "content": WITH_DBG }),
-        )));
-    }
+    client.push_chat(Ok(call(
+        "first",
+        "write_file",
+        json!({ "path": "src/main.rs", "content": WITH_DBG }),
+    )));
     for text in [
         "explanation",
         "Write dbg!(1) in main.",
@@ -413,7 +411,8 @@ fn after_the_user_wrote_it_in_3_molt_proposes_the_commit_once_the_turn_goes_on_a
     ] {
         client.push_chat(Ok(reply(text)));
     }
-    let cargo = cargo(&[true]);
+    // The check of `/done`, and the one at the end of the turn.
+    let cargo = cargo(&[true, true]);
     let tools = Tools::with_git(Root::new(dir.path()).unwrap(), &cargo, git);
     let mut agent = MainLine::new(
         &client,
