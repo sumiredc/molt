@@ -49,10 +49,13 @@ fn output(success: bool, stderr: &str) -> CargoOutput {
 }
 
 /// A cargo whose `cargo check` gives each of `passes` in turn.
+/// An error of `cargo check` on line 2 of `src/main.rs`, where the user writes in these tests.
+const IN_MAIN: &str = "error[E0425]: cannot find value `x` in this scope\n --> src/main.rs:2:10\n";
+
 fn cargo(passes: &[bool]) -> FakeCargo {
     let cargo = FakeCargo::new();
     for &passed in passes {
-        cargo.push(Ok(output(passed, if passed { "" } else { "error[E0425]" })));
+        cargo.push(Ok(output(passed, if passed { "" } else { IN_MAIN })));
     }
     cargo
 }
@@ -88,21 +91,24 @@ fn reply(text: &str) -> ChatResponse {
 /// Runs a turn on "debug 1" that the model's two `dbg!` writes stop at a boundary.
 fn stop_at_a_boundary(client: &FakeChatClient, main_line: &mut MainLine) -> Boundary {
     client.push_chat(Ok(write_main("first", WITH_DBG)));
-    client.push_chat(Ok(write_main("second", WITH_DBG)));
     stop(client, main_line)
 }
 
-/// Runs a turn on "debug 1" that the model stops at a boundary on `items` with `request_boundary`.
-fn request_boundary(client: &FakeChatClient, main_line: &mut MainLine, items: &[&str]) -> Boundary {
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "boundary".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": items, "reason": "needed" }).to_string(),
-        }],
-    }));
+/// Runs a turn on "debug 1" that the model's write using the crate `name` stops at a boundary.
+fn crate_step(client: &FakeChatClient, main_line: &mut MainLine, name: &str) -> Boundary {
+    client.push_chat(Ok(write_main(
+        "step",
+        &format!("fn main() {{\n    let _ = {name}::VALUE;\n}}\n"),
+    )));
     stop(client, main_line)
+}
+
+/// The side line at `boundary` once ③ was chosen: the step taken back, the user about to write.
+fn writing<'a>(main_line: &mut MainLine<'a>, boundary: Boundary) -> SubLine<'a> {
+    let mut side = main_line.side_line(boundary);
+    main_line.take_back();
+    side.start_writing(main_line.tools());
+    side
 }
 
 fn stop(_client: &FakeChatClient, main_line: &mut MainLine) -> Boundary {
@@ -155,16 +161,13 @@ fn user_wrote_makes_the_items_in_the_users_lines_known_with_wrote_it_as_the_prov
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(resolution.choice(), Choice::UserWrote);
     assert_eq!(resolution.items(), [key("dbg_macro")]);
@@ -181,7 +184,7 @@ fn user_wrote_hands_the_main_line_one_message_with_user_wrote_the_item_names_and
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("GUIDANCE: write it in main")));
     side.guide(&SessionLog::disabled()).unwrap();
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
@@ -190,10 +193,7 @@ fn user_wrote_hands_the_main_line_one_message_with_user_wrote_the_item_names_and
     client.push_chat(Ok(reply("done")));
     let before = user_messages(generate_requests(&client).last().unwrap());
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let after = user_messages(generate_requests(&client).last().unwrap());
     assert_eq!(after.len(), before.len() + 1, "{after:?}");
@@ -222,8 +222,8 @@ fn at_a_crate_boundary_the_crate_the_user_added_to_cargo_toml_becomes_known() {
     let client = FakeChatClient::new();
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
-    let boundary = request_boundary(&client, &mut main_line, &["crate:serde"]);
-    let mut side = main_line.side_line(boundary);
+    let boundary = crate_step(&client, &mut main_line, "serde");
+    let mut side = writing(&mut main_line, boundary);
     fs::write(
         dir.path().join("Cargo.toml"),
         format!("{MANIFEST}\n[dependencies]\nserde = \"1\"\n"),
@@ -233,10 +233,7 @@ fn at_a_crate_boundary_the_crate_the_user_added_to_cargo_toml_becomes_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     let entry = main_line.profile().entry(&key("crate:serde")).unwrap();
     assert_eq!(entry.status(), Status::Known);
@@ -259,8 +256,8 @@ fn a_crate_the_user_wrote_unlocks_its_other_spelling_in_the_profile_too() {
         )
         .unwrap();
     let mut main_line = main_line(&client, &cargo, &dir, profile);
-    let boundary = request_boundary(&client, &mut main_line, &["crate:serde_json"]);
-    let mut side = main_line.side_line(boundary);
+    let boundary = crate_step(&client, &mut main_line, "serde_json");
+    let mut side = writing(&mut main_line, boundary);
     fs::write(
         dir.path().join("Cargo.toml"),
         format!("{MANIFEST}\n[dependencies]\nserde_json = \"1\"\n"),
@@ -270,10 +267,7 @@ fn a_crate_the_user_wrote_unlocks_its_other_spelling_in_the_profile_too() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     for spelling in ["crate:serde_json", "crate:serde-json"] {
         assert_eq!(
@@ -293,7 +287,7 @@ fn an_item_on_a_line_the_user_did_not_change_does_not_become_known() {
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(
         dir.path().join("src/lib.rs"),
         format!("{lib}\npub fn debug() {{\n    dbg!(1);\n}}\n"),
@@ -303,10 +297,7 @@ fn an_item_on_a_line_the_user_did_not_change_does_not_become_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(resolution.items(), [key("dbg_macro")]);
     assert_eq!(main_line.profile().status(&key("arc")), Status::Unknown);
@@ -319,7 +310,7 @@ fn a_failed_cargo_check_leaves_the_profile_unchanged_and_done_can_be_sent_again(
     let cargo = cargo(&[false, true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     side.writing = true;
     fs::write(
         dir.path().join("src/main.rs"),
@@ -330,7 +321,7 @@ fn a_failed_cargo_check_leaves_the_profile_unchanged_and_done_can_be_sent_again(
     let failure = failed(main_line.done(&mut side));
 
     assert!(
-        matches!(&failure.check, Ok(output) if output.stderr == "error[E0425]"),
+        matches!(&failure.check, Ok(output) if output.stderr == IN_MAIN),
         "{failure:?}"
     );
     assert!(side.is_writing());
@@ -345,10 +336,7 @@ fn a_failed_cargo_check_leaves_the_profile_unchanged_and_done_can_be_sent_again(
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(main_line.profile().status(&key("dbg_macro")), Status::Known);
 }
@@ -361,20 +349,38 @@ fn after_a_failed_cargo_check_the_user_can_switch_to_unlock_or_rewrite() {
         let cargo = cargo(&[false]);
         let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
         let boundary = stop_at_a_boundary(&client, &mut main_line);
-        let mut side = main_line.side_line(boundary);
+        let mut side = writing(&mut main_line, boundary);
         fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
         failed(main_line.done(&mut side));
         client.push_chat(Ok(reply("policy")));
 
-        let resolution = side.resolve(choice, &SessionLog::disabled()).unwrap();
+        let resolution = side
+            .resolve(choice, main_line.tools(), &SessionLog::disabled())
+            .unwrap();
         client.push_chat(Ok(reply("done")));
-        main_line
-            .resolve(&resolution, &mut Refuse)
-            .unwrap()
-            .resumed();
+        main_line.resolve(&resolution, &mut Refuse).unwrap();
 
         let entry = main_line.profile().entry(&key("dbg_macro")).unwrap();
         assert_eq!(entry.provenance(), Provenance::SideLine, "{choice:?}");
+        // ③ took the step back, so the main line writes it again, after reading what the user
+        // left in their file.
+        let message = user_messages(client.requests().last().unwrap())
+            .pop()
+            .unwrap();
+        assert!(
+            message.contains("The step was taken back"),
+            "{choice:?}: {message}"
+        );
+        assert!(
+            message.contains("Re-read these files first") && message.contains("`src/main.rs`"),
+            "{choice:?}: {message}"
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+            WITH_DBG,
+            "the user's lines stay"
+        );
+        assert!(!side.choices().contains(&Choice::Next), "no ④ after ③");
     }
 }
 
@@ -385,7 +391,7 @@ fn lines_that_do_not_parse_fail_done_and_leave_the_profile_unchanged() {
     let cargo = cargo(&[false]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), "fn main() {\n    dbg!(1)\n").unwrap();
 
     let failure = failed(main_line.done(&mut side));
@@ -408,7 +414,7 @@ fn a_cargo_check_that_cannot_run_fails_done() {
     cargo.push(Err(CargoError::FakeExhausted));
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
 
     let failure = failed(main_line.done(&mut side));
@@ -424,7 +430,7 @@ fn done_without_writing_anything_reports_no_change_and_the_user_chooses_again() 
     let cargo = FakeCargo::new();
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("guidance")));
     side.guide(&SessionLog::disabled()).unwrap();
     fs::write(dir.path().join("README.md"), "# not checkable\n").unwrap();
@@ -446,7 +452,7 @@ fn the_review_is_asked_of_the_generate_model_with_the_users_lines_and_the_reques
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     client.push_chat(Ok(reply("Looks fine.")));
 
@@ -482,10 +488,13 @@ fn a_failed_review_still_passes_done() {
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
 
-    let Done::Passed { resolution, review } = main_line.done(&mut side) else {
+    let Done::Passed {
+        resolution, review, ..
+    } = main_line.done(&mut side)
+    else {
         panic!("/done did not pass");
     };
 
@@ -500,7 +509,7 @@ fn the_guidance_is_asked_of_the_reason_model_and_the_side_line_is_writing_from_t
     let cargo = FakeCargo::new();
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("explanation")));
     side.explain(&SessionLog::disabled()).unwrap();
     assert!(!side.is_writing());
@@ -525,17 +534,14 @@ fn the_files_the_user_wrote_join_the_changes_of_the_turn_with_their_content_from
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     fs::write(dir.path().join("src/debug.rs"), "pub fn f() {}\n").unwrap();
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(resumed.turn.user_written, ["src/debug.rs", "src/main.rs"]);
     let changes: Vec<(&str, Option<&str>, &str)> = resumed
@@ -563,7 +569,11 @@ fn choosing_user_wrote_is_not_resolved_without_done() {
     let side = main_line.side_line(boundary);
 
     assert_eq!(
-        side.resolve(Choice::UserWrote, &SessionLog::disabled()),
+        side.resolve(
+            Choice::UserWrote,
+            main_line.tools(),
+            &SessionLog::disabled()
+        ),
         Err(Unresolved::NotOffered)
     );
 }
@@ -575,7 +585,7 @@ fn ctrl_c_while_waiting_for_the_review_changes_nothing_and_the_side_line_is_stil
     let cargo = cargo(&[true, true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     client.push_chat(Ok(reply("guidance")));
     side.guide(&SessionLog::disabled()).unwrap();
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
@@ -599,7 +609,7 @@ fn ctrl_c_while_waiting_for_the_guidance_does_not_start_writing() {
     let cargo = FakeCargo::new();
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     client.push_chat(Err(ChatError::Interrupted));
 
     assert!(matches!(
@@ -617,8 +627,8 @@ fn the_cargo_lock_that_changed_with_the_users_crate_joins_their_files_but_not_th
     let client = FakeChatClient::new();
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
-    let boundary = request_boundary(&client, &mut main_line, &["crate:serde"]);
-    let mut side = main_line.side_line(boundary);
+    let boundary = crate_step(&client, &mut main_line, "serde");
+    let mut side = writing(&mut main_line, boundary);
     fs::write(
         dir.path().join("Cargo.toml"),
         format!("{MANIFEST}\n[dependencies]\nserde = \"1\"\n"),
@@ -657,7 +667,7 @@ fn lines_with_no_item_new_to_the_profile_pass_and_make_nothing_known() {
     let cargo = cargo(&[true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(
         dir.path().join("src/main.rs"),
         "fn main() {\n    let _x = 1;\n}\n",
@@ -667,10 +677,7 @@ fn lines_with_no_item_new_to_the_profile_pass_and_make_nothing_known() {
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert!(resolution.items().is_empty());
     assert!(
@@ -701,17 +708,14 @@ fn a_file_molt_wrote_before_the_boundary_and_the_user_changed_keeps_its_content_
         }],
     }));
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     let users = "pub fn f() {}\n\npub fn g() {\n    dbg!(1);\n}\n";
     fs::write(dir.path().join("src/lib.rs"), users).unwrap();
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(resumed.turn.user_written, ["src/lib.rs"]);
     let lib: Vec<(Option<&str>, &str)> = resumed
@@ -731,36 +735,26 @@ fn a_file_the_user_wrote_at_two_boundaries_of_a_turn_is_listed_once() {
     let cargo = cargo(&[true, true]);
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
     let boundary = stop_at_a_boundary(&client, &mut main_line);
-    let mut side = main_line.side_line(boundary);
+    let mut side = writing(&mut main_line, boundary);
     fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "again".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["arc"], "reason": "shared" }).to_string(),
-        }],
-    }));
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    client.push_chat(Ok(write_main(
+        "again",
+        "use std::sync::Arc;\n\nfn main() {\n    dbg!(Arc::new(2));\n}\n",
+    )));
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
     let TurnEnd::Boundary(again) = resumed.turn.end else {
         panic!("the turn did not stop again: {:?}", resumed.turn.end);
     };
-    let mut side = main_line.side_line(again);
+    let mut side = writing(&mut main_line, again);
     let shared = "use std::sync::Arc;\n\nfn main() {\n    dbg!(Arc::new(1));\n}\n";
     fs::write(dir.path().join("src/main.rs"), shared).unwrap();
     client.push_chat(Ok(reply("review")));
     let resolution = passed(main_line.done(&mut side));
     client.push_chat(Ok(reply("done")));
 
-    let resumed = main_line
-        .resolve(&resolution, &mut Refuse)
-        .unwrap()
-        .resumed();
+    let resumed = main_line.resolve(&resolution, &mut Refuse).unwrap();
 
     assert_eq!(resumed.turn.user_written, ["src/main.rs"]);
     let main: Vec<(Option<&str>, &str)> = resumed
@@ -771,4 +765,41 @@ fn a_file_the_user_wrote_at_two_boundaries_of_a_turn_is_listed_once() {
         .collect();
     assert_eq!(main, [(Some("fn main() {}\n"), shared)]);
     assert_eq!(main_line.profile().status(&key("arc")), Status::Known);
+}
+
+#[test]
+fn an_error_only_outside_the_users_lines_does_not_fail_done_and_comes_with_it() {
+    let dir = project();
+    let client = FakeChatClient::new();
+    let cargo = FakeCargo::new();
+    let elsewhere = "error[E0308]: mismatched types\n --> src/lib.rs:7:5\n";
+    cargo.push(Ok(output(false, elsewhere)));
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+    let boundary = stop_at_a_boundary(&client, &mut main_line);
+    let mut side = writing(&mut main_line, boundary);
+    fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+    client.push_chat(Ok(reply("review")));
+
+    let Done::Passed { check, .. } = main_line.done(&mut side) else {
+        panic!("/done did not pass");
+    };
+
+    assert!(
+        matches!(&check, Ok(output) if output.stderr == elsewhere),
+        "{check:?}"
+    );
+}
+
+#[test]
+fn error_places_reads_the_path_and_line_of_each_error_and_not_of_warnings() {
+    let output = CargoOutput {
+        success: false,
+        stdout: String::new(),
+        stderr: "warning: unused\n --> src/a.rs:1:1\nerror[E0425]: x\n  --> src/main.rs:12:5\n   |\nerror: aborting\n".to_owned(),
+    };
+
+    assert_eq!(
+        crate::agent::subline::user_wrote::error_places(&output),
+        [("src/main.rs".to_owned(), 12)]
+    );
 }

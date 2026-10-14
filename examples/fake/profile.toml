@@ -1,5 +1,5 @@
 # An example comprehension profile to go with one_pass.toml: no items yet, as when just starting.
-# dbg_macro is not known, so the write in one_pass.toml is rejected and the turn stops at a boundary.
+# dbg_macro is not known, so the write in one_pass.toml is a step, and the turn stops at a boundary.
 #
 # Copy it elsewhere before passing it to molt --profile. When ① makes dbg_macro known, molt
 # rewrites this file (dropping these comments), so passing the example itself changes the checkout.

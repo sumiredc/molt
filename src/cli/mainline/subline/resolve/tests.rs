@@ -38,7 +38,6 @@ fn write_main(id: &str, content: &str) -> ChatResponse {
 fn stops_at_a_boundary_then(then: Vec<ChatResponse>) -> FakeChatClient {
     let client = FakeChatClient::new();
     client.push_chat(Ok(write_main("first", WITH_DBG)));
-    client.push_chat(Ok(write_main("second", WITH_DBG)));
     client.push_chat(Ok(reply("explanation")));
     for response in then {
         client.push_chat(Ok(response));
@@ -131,7 +130,7 @@ fn choosing_1_saves_the_item_as_known_and_the_main_line_goes_on_with_the_unlock_
     let shown = ui.shown();
     let at = shown
         .iter()
-        .position(|text| text == "Your profile allows dbg_macro now (known).")
+        .position(|text| text == "Your profile has dbg_macro as known now.")
         .unwrap_or_else(|| panic!("{shown:?}"));
     assert_eq!(shown[at + 1], "done with dbg!");
     assert!(last_main_line_input(&client).starts_with("BOUNDARY RESOLVED: unlock\n"));
@@ -164,7 +163,7 @@ fn choosing_2_saves_the_item_as_seen_and_the_main_line_rewrites_with_the_policy(
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(saved_status(&dir), Status::Seen);
     assert!(ui.shown().contains(
-        &"Your profile marks dbg_macro as seen, and molt rewrites without them. Policy: Print with println! instead."
+        &"Your profile marks dbg_macro as seen, and molt writes it without them. Policy: Print with println! instead."
             .to_owned()
     ));
     let message = last_main_line_input(&client);
@@ -312,10 +311,11 @@ fn offered(recurred: bool) -> Vec<String> {
     let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
     let boundary = crate::agent::mainline::Boundary {
         items: vec!["dbg_macro".parse().unwrap()],
-        cause: crate::agent::mainline::BoundaryCause::Requested {
-            reason: "it prints".to_owned(),
-            proposed_code: None,
-        },
+        step: crate::agent::mainline::Step::new(
+            "src/main.rs".to_owned(),
+            None,
+            "fn main() {\n    dbg!(1);\n}\n".to_owned(),
+        ),
     };
     let side = SubLine::open(
         &client,
@@ -332,43 +332,39 @@ fn offered(recurred: bool) -> Vec<String> {
 }
 
 #[test]
-fn choose_offers_1_2_and_3_by_number_in_that_order() {
+fn choose_offers_1_2_3_and_4_by_number_in_that_order() {
     assert_eq!(
         offered(false),
         [
-            "Understand, then delegate: molt may use dbg_macro from now on",
-            "Use a construct I know: molt rewrites without dbg_macro",
-            "Write it myself: molt shows where, and checks what I wrote when I type /done",
+            "Understood: the step stays, and molt uses dbg_macro from now on",
+            "Write it without them: molt takes the step back and writes it without dbg_macro",
+            "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done",
+            "Next: the step stays, and molt explains dbg_macro again when it uses them",
         ]
     );
 }
 
 #[test]
-fn choose_offers_1_and_3_only_at_a_boundary_recurring_after_2() {
+fn choose_offers_no_2_at_a_boundary_recurring_after_2() {
     assert_eq!(
         offered(true),
         [
-            "Understand, then delegate: molt may use dbg_macro from now on",
-            "Write it myself: molt shows where, and checks what I wrote when I type /done",
+            "Understood: the step stays, and molt uses dbg_macro from now on",
+            "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done",
+            "Next: the step stays, and molt explains dbg_macro again when it uses them",
         ]
     );
 }
 
 #[test]
-fn a_boundary_on_two_categories_asks_on_one_side_line_each_before_the_main_line_goes_on() {
+fn a_step_with_items_of_two_categories_gets_one_side_line_and_one_choice_for_all() {
     let dir = project_with_a_profile();
     let client = FakeChatClient::new();
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "boundary".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["arc", "dbg_macro", "mutex"], "reason": "needed" })
-                .to_string(),
-        }],
-    }));
-    client.push_chat(Ok(reply("explanation of arc and mutex")));
-    client.push_chat(Ok(reply("explanation of dbg!")));
+    client.push_chat(Ok(write_main(
+        "step",
+        "use std::sync::Arc;\n\nfn main() {\n    dbg!(Arc::new(1));\n}\n",
+    )));
+    client.push_chat(Ok(reply("explanation of arc and dbg!")));
     client.push_chat(Ok(reply("done")));
 
     let (code, ui) = run_in(
@@ -378,8 +374,6 @@ fn a_boundary_on_two_categories_asks_on_one_side_line_each_before_the_main_line_
             input("share it"),
             input("/choose"),
             Step::Select(1),
-            input("/choose"),
-            Step::Select(1),
             input("/quit"),
         ],
     );
@@ -389,89 +383,50 @@ fn a_boundary_on_two_categories_asks_on_one_side_line_each_before_the_main_line_
         ui.asked(),
         [
             "molt> ",
-            "molt [sub: arc, mutex]> ",
-            "How do you want to go on?",
-            SUB,
+            "molt [sub: arc, dbg_macro]> ",
             "How do you want to go on?",
             "molt> "
         ]
     );
-    let shown = ui.shown();
-    let pending = shown
-        .iter()
-        .position(|text| {
-            text == "Chosen for arc, mutex: understand, then delegate. The main line goes on once there is a choice for dbg_macro too."
-        })
-        .unwrap_or_else(|| panic!("{shown:?}"));
-    assert_eq!(
-        shown[pending + 1],
-        "── side line: dbg_macro ────────────────────────────────────"
+    assert!(
+        ui.shown()
+            .contains(&"Your profile has arc, dbg_macro as known now.".to_owned()),
+        "{:?}",
+        ui.shown()
     );
-    let allowed = shown
-        .iter()
-        .position(|text| text == "Your profile allows arc, mutex now (known).")
-        .unwrap_or_else(|| panic!("{shown:?}"));
-    assert_eq!(
-        shown[allowed + 1],
-        "Your profile allows dbg_macro now (known)."
-    );
-    assert_eq!(shown[allowed + 2], "done");
     assert_eq!(saved_status(&dir), Status::Known);
     let message = last_main_line_input(&client);
-    assert_eq!(
-        message.matches("BOUNDARY RESOLVED: unlock").count(),
-        2,
-        "{message}"
-    );
+    assert_eq!(message.matches("BOUNDARY RESOLVED: unlock").count(), 1);
 }
 
 #[test]
-fn ctrl_c_on_the_side_line_of_the_next_category_comes_back_to_it_and_abort_drops_the_choice_before()
-{
+fn choosing_4_keeps_the_step_marks_the_item_seen_and_the_main_line_goes_on() {
     let dir = project_with_a_profile();
-    let client = FakeChatClient::new();
-    client.push_chat(Ok(ChatResponse {
-        content: None,
-        tool_calls: vec![ToolCall {
-            id: "boundary".to_owned(),
-            name: "request_boundary".to_owned(),
-            arguments: json!({ "items": ["arc", "dbg_macro"], "reason": "needed" }).to_string(),
-        }],
-    }));
-    client.push_chat(Ok(reply("explanation of arc")));
-    client.push_chat(Ok(reply("explanation of dbg!")));
+    let client = stops_at_a_boundary_then(vec![reply("done with dbg!")]);
 
     let (code, ui) = run_in(
         &dir,
         &client,
         [
-            input("share it"),
+            input("debug 1"),
             input("/choose"),
-            Step::Select(1),
-            Step::Interrupt,
-            input("/side"),
-            input("/abort"),
+            Step::Select(4),
             input("/quit"),
         ],
     );
 
     assert_eq!(code, ExitCode::SUCCESS);
+    assert_eq!(saved_status(&dir), Status::Seen);
     assert_eq!(
-        ui.asked(),
-        [
-            "molt> ",
-            "molt [sub: arc]> ",
-            "How do you want to go on?",
-            SUB,
-            "molt> ",
-            SUB,
-            "molt> "
-        ]
+        fs::read_to_string(dir.path().join("src/main.rs")).unwrap(),
+        WITH_DBG,
+        "the step stays"
     );
-    assert!(ui.shown().iter().any(|text| text == "Request withdrawn."));
-    assert_eq!(client.requests().len(), 3, "no request after the choice");
-    assert_eq!(
-        fs::read_to_string(dir.path().join("profile.toml")).unwrap(),
-        ""
+    assert!(
+        ui.shown().contains(
+            &"Your profile marks dbg_macro as seen; molt explains them again when it uses them."
+                .to_owned()
+        )
     );
+    assert!(last_main_line_input(&client).starts_with("BOUNDARY RESOLVED: next\n"));
 }

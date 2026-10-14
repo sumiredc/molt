@@ -134,10 +134,10 @@ const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side 
 
 #[test]
 fn interrupt_on_the_side_line_pauses_the_main_line_at_the_boundary_and_changes_nothing() {
-    // `dbg!` twice stops the request at a boundary, and the side line gets its explanation.
+    // `dbg!` is a step that stops the request at a boundary, and the side line gets its
+    // explanation.
     let (base_url, server) = serve(vec![
         write_dbg("first"),
-        write_dbg("second"),
         reply("dbg! prints a value and returns it."),
     ]);
     let dir = TempDir::new().unwrap();
@@ -185,13 +185,14 @@ fn interrupt_on_the_side_line_pauses_the_main_line_at_the_boundary_and_changes_n
             PAUSED,
             "molt> /abort",
             "Request withdrawn.",
+            "molt took the step back: src/main.rs is as it was before it.",
             "molt> /quit",
         ],
     );
     let requests = server.join().unwrap();
     assert_eq!(
         requests.len(),
-        3,
+        2,
         "the side line was opened again without a request"
     );
     assert_eq!(
@@ -217,7 +218,6 @@ fn sigint_while_waiting_for_the_explanation_pauses_the_main_line_at_the_boundary
         let mut held = Vec::new();
         let bodies = [
             Some(write_dbg("first")),
-            Some(write_dbg("second")),
             None,
             Some(reply("dbg! prints a value and returns it.")),
         ];
@@ -286,12 +286,13 @@ fn sigint_while_waiting_for_the_explanation_pauses_the_main_line_at_the_boundary
             "  dbg! prints a value and returns it.",
             "molt [sub: dbg_macro]> /abort",
             "Request withdrawn.",
+            "molt took the step back: src/main.rs is as it was before it.",
             "molt> /quit",
         ],
     );
     let requests = server.join().unwrap();
-    assert_eq!(requests.len(), 4, "the explanation is asked for again");
-    assert_eq!(requests[3], requests[2]);
+    assert_eq!(requests.len(), 3, "the explanation is asked for again");
+    assert_eq!(requests[2], requests[1]);
     assert_eq!(
         fs::read_to_string(project.join("src/main.rs")).unwrap(),
         "fn main() {}\n"
@@ -322,6 +323,7 @@ fn write_main(id: &str, content: &str) -> String {
 
 const WITH_MATCHES: &str = "fn main() {\n    let _ = matches!(1, 1);\n}\n";
 const WITH_CLONE: &str = "fn main() {\n    let s = String::new();\n    let _t = s.clone();\n}\n";
+const WITH_BOX: &str = "fn main() {\n    let _b = Box::new(1);\n}\n";
 
 /// The lines of the session log in `dir`, or of its request bodies when `requests` is true.
 fn session_log(dir: &std::path::Path, requests: bool) -> Vec<serde_json::Value> {
@@ -340,11 +342,12 @@ fn session_log(dir: &std::path::Path, requests: bool) -> Vec<serde_json::Value> 
         .collect()
 }
 
-/// Three boundaries in a session, with ① ② ③ chosen at them in that order through `--ui-script`:
-/// the §8.5 message of each enters the main line, the profile changes as each choice says, and
-/// the session log has the choice and the profile change of each with `line: "sub"`.
+/// Four boundaries in a session, with ① ② ③ ④ chosen at them in that order through
+/// `--ui-script`: the §8.5 message of each enters the main line, the profile changes as each
+/// choice says, and the session log has the choice and the profile change of each with
+/// `line: "sub"`.
 #[test]
-fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_their_message() {
+fn unlock_rewrite_user_wrote_and_next_at_four_boundaries_each_hand_the_main_line_their_message() {
     let dir = TempDir::new().unwrap();
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -352,28 +355,28 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
     let main_rs = project.join("src/main.rs");
     // Each answer, and with ③'s guidance, what the user writes before typing `/done`.
     let answers: Vec<(String, Option<&str>)> = vec![
-        // ① at `dbg_macro`.
+        // ① at `dbg_macro`: the step stays.
         (write_dbg("d1"), None),
-        (write_dbg("d2"), None),
         (reply("dbg! prints a value and returns it."), None),
-        (write_dbg("d3"), None),
         (reply("Printed 1 with dbg!."), None),
-        // ② at `matches_macro`.
+        // ② at `matches_macro`: the step is taken back.
         (write_main("m1", WITH_MATCHES), None),
-        (write_main("m2", WITH_MATCHES), None),
         (
             reply("matches! tells whether a value fits a pattern."),
             None,
         ),
         (reply("Compare with == instead."), None),
         (reply("Rewrote it with ==."), None),
-        // ③ at `clone`.
+        // ③ at `clone`: the step is taken back, and the user writes it.
         (write_main("c1", WITH_CLONE), None),
-        (write_main("c2", WITH_CLONE), None),
         (reply("clone() copies a value."), None),
         (reply("Write the copy in src/main.rs."), Some(WITH_CLONE)),
         (reply("The copy is right."), None),
         (reply("Kept your copy."), None),
+        // ④ at `box`: the step stays.
+        (write_main("b1", WITH_BOX), None),
+        (reply("Box puts the value on the heap."), None),
+        (reply("Kept the box."), None),
     ];
     let server = thread::spawn(move || {
         let mut requests = Vec::new();
@@ -394,6 +397,7 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
   { input = "debug 1" }, { input = "/choose" }, { select = 1 },
   { input = "match 1" }, { input = "/choose" }, { select = 2 },
   { input = "copy a string" }, { input = "/choose" }, { select = 3 }, { input = "/done" },
+  { input = "box it" }, { input = "/choose" }, { select = 4 },
   { input = "/quit" },
 ]"#,
     )
@@ -425,21 +429,27 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
             "molt> debug 1",
             "── side line: dbg_macro ────",
             "molt [sub: dbg_macro]> /choose",
-            "Your profile allows dbg_macro now (known).",
+            "Your profile has dbg_macro as known now.",
             "Printed 1 with dbg!.",
             "molt> match 1",
             "── side line: matches_macro ────",
             "molt [sub: matches_macro]> /choose",
-            "Your profile marks matches_macro as seen, and molt rewrites without them. Policy: Compare with == instead.",
+            "molt took the step back: src/main.rs is as it was before it.",
+            "Your profile marks matches_macro as seen, and molt writes it without them. Policy: Compare with == instead.",
             "Rewrote it with ==.",
             "molt> copy a string",
             "── side line: clone ────",
             "molt [sub: clone]> /choose",
+            "  molt took the step back: src/main.rs is as it was before it.",
             "  Write the copy in src/main.rs.",
             "molt [sub: clone]> /done",
             "  The copy is right.",
-            "Your profile allows clone now (known: you wrote it).",
+            "Your profile has clone as known now (you wrote it).",
             "Kept your copy.",
+            "molt> box it",
+            "── side line: ",
+            "Your profile marks ",
+            "Kept the box.",
             "molt> /quit",
         ],
     );
@@ -463,13 +473,13 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
             .unwrap()
             .to_owned()
     };
-    let unlock = last_user(3);
+    let unlock = last_user(2);
     assert!(
         unlock.starts_with("BOUNDARY RESOLVED: unlock\n"),
         "{unlock}"
     );
     assert!(unlock.contains("`dbg_macro`"), "{unlock}");
-    let rewrite = last_user(9);
+    let rewrite = last_user(6);
     assert!(
         rewrite.starts_with("BOUNDARY RESOLVED: rewrite\n"),
         "{rewrite}"
@@ -479,19 +489,23 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
         rewrite.contains("Policy: Compare with == instead."),
         "{rewrite}"
     );
-    let user_wrote = last_user(15);
+    let user_wrote = last_user(11);
     assert!(
         user_wrote.starts_with("BOUNDARY RESOLVED: user_wrote\n"),
         "{user_wrote}"
     );
     assert!(user_wrote.contains("`clone`"), "{user_wrote}");
     assert!(user_wrote.contains("`src/main.rs`"), "{user_wrote}");
+    let next = last_user(14);
+    assert!(next.starts_with("BOUNDARY RESOLVED: next\n"), "{next}");
+    assert!(next.contains("`box`"), "{next}");
 
     let profile = Profile::load(&profile).unwrap();
     for (item, status, provenance) in [
         ("dbg_macro", Status::Known, Provenance::SideLine),
         ("matches_macro", Status::Seen, Provenance::SideLine),
         ("clone", Status::Known, Provenance::WroteIt),
+        ("box", Status::Seen, Provenance::SideLine),
     ] {
         let entry = profile.entry(&item.parse().unwrap()).unwrap();
         assert_eq!(
@@ -521,24 +535,26 @@ fn unlock_rewrite_and_user_wrote_at_three_boundaries_each_hand_the_main_line_the
             ("profile_change", "matches_macro"),
             ("choice", "user_wrote"),
             ("profile_change", "clone"),
+            ("choice", "next"),
+            ("profile_change", "box"),
         ]
     );
     for event in events.iter().filter(|event| event.get("line").is_none()) {
         let kind = event["event"].as_str().unwrap();
         assert!(
-            ["tool_call", "detected", "rejected", "cargo_check"].contains(&kind),
+            ["tool_call", "detected", "step", "taken_back", "cargo_check"].contains(&kind),
             "{event}"
         );
     }
     // The request bodies: those of the side line carry `line: "sub"` too.
     let bodies = session_log(&sessions, true);
-    assert_eq!(bodies.len(), 16);
+    assert_eq!(bodies.len(), 15);
     let side: Vec<usize> = (0..bodies.len())
         .filter(|&at| bodies[at].get("line").is_some_and(|line| line == "sub"))
         .collect();
     assert_eq!(
         side,
-        [2, 7, 8, 12, 13, 14],
+        [1, 4, 5, 8, 9, 10, 13],
         "the explanations, the policy of ②, the guidance and the review of ③"
     );
 }

@@ -4,8 +4,9 @@
 //! A turn ends when the model calls `finish` or answers without calling a tool, when it asks
 //! for more tool calls than the budget (PRD §8.4), when its arguments still do not parse after
 //! the one resend (PRD §11), when the chat API fails (UC2's exception flow), at a boundary
-//! (the write path, in `write`), or when the code still does not build after the compile fixes
-//! of the budget. If anything was written, the turn ends with `cargo check` (`turn_end`).
+//! (molt wrote a step, in `write`), when the model keeps writing more than a step holds, or when
+//! the code still does not build after the compile fixes of the budget. If anything was written,
+//! the turn ends with `cargo check` (`turn_end`).
 //!
 //! The main line also keeps the files molt changed in the session and not committed yet, and
 //! commits them with the user's approval (UC4, `commit`).
@@ -21,7 +22,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::prompts;
-use super::subline::{Choice, Done, Resolution, SubLine, bundle};
+use super::subline::{Choice, Done, Resolution, SubLine};
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
@@ -35,9 +36,22 @@ use crate::workspace::cargo::{CargoError, CargoOutput};
 
 pub use commit::{CommitOutcome, CommitProposal};
 
-/// Tool calls per turn (PRD §8.4). Every call counts, `finish` too, so that no call the model
-/// repeats can keep a turn going.
+/// Tool calls between boundaries (PRD §8.4): a boundary starts the count again, since a turn of
+/// a user new to Rust can hold many steps. Every call counts, `finish` too, so that no call the
+/// model repeats can keep a turn going.
 pub const TOOL_CALL_BUDGET: usize = 40;
+
+/// Split requests in a row (PRD §8.4): writes over the step limit sent back to the model to be
+/// split. A write within the limit starts the count again; the next one after these stops the
+/// turn.
+pub const SPLIT_BUDGET: usize = 3;
+
+/// The step limit (PRD §2): at most this many distinct items that are not `known`...
+pub const STEP_ITEMS: usize = 3;
+
+/// ...and at most this many changed lines. A write that changes a single line is a step however
+/// many items it holds.
+pub const STEP_LINES: usize = 30;
 
 /// Compile fixes per turn (PRD §8.4): how many times the model is asked to fix content that does
 /// not parse or a project that `cargo check` fails on.
@@ -49,9 +63,6 @@ const FINISH: &str = "finish";
 /// The tools that write a file. The loop checks their content before [`Tools`] writes it.
 const WRITE_FILE: &str = "write_file";
 const EDIT_FILE: &str = "edit_file";
-
-/// The tool with which the model stops at a boundary itself. It is handled by the loop.
-const REQUEST_BOUNDARY: &str = "request_boundary";
 
 /// The manifest at the project root, which `cargo add` changes.
 const MANIFEST: &str = "Cargo.toml";
@@ -84,6 +95,10 @@ pub struct MainLine<'a> {
     log: SessionLog,
     /// Where the profile is saved when the user's choice on the side line changes it.
     profile_path: Option<PathBuf>,
+    /// The crates that are not `known` but went through a boundary the user chose ④ (next) at,
+    /// as [`checked_key`] spells them: `cargo add` may add them (PRD UC2). Crates chosen ① are
+    /// `known`, which is enough.
+    introduced: BTreeSet<ItemKey>,
     /// The files molt changed in the session and has not committed, in the order first changed,
     /// each with its content from before molt first changed it (or from its last commit): those
     /// of the turns that ended and of the requests withdrawn (UC4).
@@ -108,49 +123,41 @@ struct Held {
     progress: Progress,
     /// The items the user chose ② for in this turn (PRD UC3), as [`checked_key`] spells them.
     rewritten: BTreeSet<ItemKey>,
-    /// The boundary the turn stopped at, with all its items.
+    /// The boundary the turn stopped at.
     boundary: Boundary,
-    /// The choices made so far on the side lines of `boundary`, in order. Nothing of them applies
-    /// until every item of `boundary` has a choice (PRD UC3).
-    chosen: Vec<Resolution>,
+    /// Whether the step of `boundary` was taken back (③, before the user writes).
+    taken_back: bool,
 }
 
-/// What a choice on the side line came to.
-#[derive(Debug)]
-pub enum Resolved {
-    /// Items of the boundary still wait for a choice: these, for the next side line. Nothing has
-    /// changed yet: neither the profile nor the main line.
-    Pending(Boundary),
-    /// Every item of the boundary has a choice, and the turn went on.
-    Resumed(Box<Resumed>),
-}
-
-impl Resolved {
-    /// The resumed turn. Panics when items still wait for a choice.
-    #[cfg(test)]
-    pub(crate) fn resumed(self) -> Resumed {
-        match self {
-            Resolved::Resumed(resumed) => *resumed,
-            Resolved::Pending(boundary) => panic!("items still wait for a choice: {boundary:?}"),
-        }
-    }
-}
-
-/// How the turn held at a boundary went on after the user's choices on the side lines.
+/// How the turn held at a boundary went on after the user's choice on the side line.
 #[derive(Debug)]
 pub struct Resumed {
-    /// The choices that went into the turn, in the order made.
-    pub chosen: Vec<Resolution>,
-    /// Saving the profile changed by the choices, when the main line has a path to save it to.
+    /// The choice that went into the turn.
+    pub chosen: Resolution,
+    /// Taking the step back for ②, unless ③ did before. `None` when nothing was taken back now.
+    pub taken_back: Option<TakenBack>,
+    /// Saving the profile changed by the choice, when the main line has a path to save it to.
     pub saved: Result<(), StoreError>,
     /// The turn, from its start: the tool calls, files and changes before the boundary count.
     pub turn: Turn,
+}
+
+/// What taking a step back did (PRD UC3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TakenBack {
+    /// The file of the step, as the model named it.
+    pub path: String,
+    /// Whether the file is back as it was before the step: false when it had changed since the
+    /// step, and was left as it was.
+    pub restored: bool,
 }
 
 /// What withdrawing a request held at a boundary showed: the files the turn changed before the
 /// boundary and the `cargo check` molt ran on them, when there were any.
 #[derive(Debug)]
 pub struct Withdrawal {
+    /// Taking the step of the boundary back, unless ③ did before.
+    pub taken_back: Option<TakenBack>,
     pub changes: Vec<Change>,
     pub check: Option<Result<CargoOutput, CargoError>>,
 }
@@ -199,7 +206,7 @@ pub struct Change {
     pub after: String,
 }
 
-/// A crate the content written uses that the profile allows (`known`) but the project's
+/// A crate the content written uses that may be added (`known`, or chosen ④) but the project's
 /// `Cargo.toml` does not declare, and what came of asking the user to add it.
 #[derive(Debug)]
 pub struct CrateAdd {
@@ -218,37 +225,60 @@ pub enum AddOutcome {
     Failed(String),
 }
 
-/// Where the main line stopped because the request needs items the profile does not allow
-/// (PRD UC2). Nothing was written for it. The user chooses how to go on (UC3).
+/// Where the main line stopped: right after it wrote a step, content with items that are not
+/// `known` (PRD §2, UC2). The user chooses how to go on (UC3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Boundary {
-    /// The items the request needs, each once.
+    /// The items of the step that are not `known`, each once, in line order.
     pub items: Vec<ItemKey>,
-    pub cause: BoundaryCause,
+    pub step: Step,
 }
 
 impl Boundary {
-    /// The code the main line tried with the items: what was rejected again, or what
-    /// `request_boundary` proposed, if it proposed any.
-    pub fn attempted_code(&self) -> Option<&str> {
-        match &self.cause {
-            BoundaryCause::RejectedTwice { content, .. } => Some(content),
-            BoundaryCause::Requested { proposed_code, .. } => proposed_code.as_deref(),
-        }
+    /// The code the main line wrote with the items: the step's changed lines.
+    pub fn attempted_code(&self) -> &str {
+        &self.step.code
     }
 }
 
-/// What made the boundary.
+/// A write molt made as a step (PRD §2), and what it takes to take it back.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BoundaryCause {
-    /// Content using `items` was rejected again after the model had seen their rejection in the
-    /// same turn. `content` is what the model tried to write to `path`.
-    RejectedTwice { path: String, content: String },
-    /// The model called `request_boundary`.
-    Requested {
-        reason: String,
-        proposed_code: Option<String>,
-    },
+pub struct Step {
+    /// The file, as the model named it.
+    pub path: String,
+    /// The content before the step, or `None` when the step created the file.
+    pub before: Option<String>,
+    /// The content the step wrote.
+    pub after: String,
+    /// The changed lines, 1-based, with their text.
+    pub lines: Vec<(usize, String)>,
+    /// The changed lines' text, one per line, as the code the step wrote.
+    pub code: String,
+}
+
+impl Step {
+    /// The step that wrote `after` over `before` at `path`.
+    pub(crate) fn new(path: String, before: Option<String>, after: String) -> Step {
+        let changed = crate::checker::diff::changed_lines(before.as_deref().unwrap_or(""), &after);
+        let text: Vec<&str> = after.lines().collect();
+        let lines: Vec<(usize, String)> = changed
+            .numbers()
+            .into_iter()
+            .filter_map(|line| text.get(line - 1).map(|t| (line, (*t).to_owned())))
+            .collect();
+        let code = lines
+            .iter()
+            .map(|(_, text)| text.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        Step {
+            path,
+            before,
+            after,
+            lines,
+            code,
+        }
+    }
 }
 
 /// Why a turn ended.
@@ -263,8 +293,11 @@ pub enum TurnEnd {
     InvalidArguments(InvalidArguments),
     /// The chat API failed: authentication, rate limit, network, and so on.
     ApiFailed(ChatError),
-    /// The request needs items the profile does not allow.
+    /// molt wrote a step, and the turn is held for the user's choice (UC3).
     Boundary(Boundary),
+    /// The model wrote more than a step holds once more after [`SPLIT_BUDGET`] split requests in
+    /// a row. It was not asked again.
+    SplitsExhausted,
     /// The content did not parse, or `cargo check` failed, once more after the model had been
     /// asked for [`COMPILE_FIX_BUDGET`] fixes. It was not asked again.
     CompileFixesExhausted,
@@ -273,6 +306,9 @@ pub enum TurnEnd {
 /// What to do after one tool call.
 enum Next {
     Continue,
+    /// Go on with the turn, but not with the rest of this response's tool calls: the model is to
+    /// see this result first.
+    SkipRest,
     Stop(TurnEnd),
 }
 
@@ -283,15 +319,17 @@ struct Progress {
     resend_asked: bool,
     /// Whether this response has broken arguments the model is asked to resend.
     broken: bool,
-    /// The items rejected in earlier responses of this turn, in any file. The model has seen
-    /// those rejections, so writing one of these items again means it could not avoid it.
-    rejected: BTreeSet<ItemKey>,
-    /// The items rejected in the response being run. Calls in one response are made before the
-    /// model sees any of their results, so these count only from the next response on.
-    rejected_now: BTreeSet<ItemKey>,
+    /// The split requests in a row so far (PRD §8.4).
+    splits: usize,
+    /// The tool calls of the turn when its last boundary was resolved: the budget counts those
+    /// after it.
+    calls_before: usize,
     /// Whether something was written, or a crate added, since the last `cargo check` at the end
     /// of the turn.
     unchecked: bool,
+    /// Whether `cargo add` ran in this turn, which may have changed `Cargo.toml` outside the
+    /// turn's changes.
+    crate_added: bool,
     /// The project's `Cargo.toml` when the turn started, to show what `cargo add` changed.
     manifest_before: Option<String>,
     /// The project's `Cargo.lock` when the turn started, to show and commit what cargo changed
@@ -328,6 +366,7 @@ impl<'a> MainLine<'a> {
             held: None,
             log: SessionLog::disabled(),
             profile_path: None,
+            introduced: BTreeSet::new(),
             uncommitted: Vec::new(),
             last_check: None,
             request: None,
@@ -352,13 +391,15 @@ impl<'a> MainLine<'a> {
         &self.log
     }
 
-    /// Opens the side line (PRD UC3) at `boundary`, where this main line stopped, for the items of
-    /// the category of its first item ([`bundle::first`]): the items of the other categories get
-    /// side lines of their own after it ([`MainLine::resolve`]). It gets those items, the cause of
-    /// the boundary and the user's latest request, and nothing else of the main line's message
-    /// list; what is said on it does not come back here.
+    /// The tools on the main line's project.
+    pub(crate) fn tools(&self) -> &Tools<'a> {
+        &self.tools
+    }
+
+    /// Opens the side line (PRD UC3) at `boundary`, where this main line stopped. It gets the
+    /// boundary, with its step, and the user's latest request, and nothing else of the main line's
+    /// message list; what is said on it does not come back here.
     pub fn side_line(&self, boundary: Boundary) -> SubLine<'a> {
-        let boundary = bundle::first(boundary);
         let request = self.latest_request();
         // ② was chosen in this turn for an item of the side line: the boundary recurred.
         let recurred = self.held.as_ref().is_some_and(|held| {
@@ -397,67 +438,99 @@ impl<'a> MainLine<'a> {
         &self.profile
     }
 
-    /// Takes the user's choice on a side line of the boundary the turn is held at (PRD UC3,
-    /// §8.5). While items of the boundary still wait for a choice, the choice is kept, nothing
-    /// changes, and those items come back for the next side line ([`Resolved::Pending`]). Once
-    /// every item has one, each choice in turn changes the profile (① `known` and ② `seen` with
-    /// provenance `side_line`, ③ `known` with `wrote_it`), which is saved, their messages go into
-    /// the message list as one message, the only thing from the side lines, and the same turn
-    /// goes on. The files the user changed in ③ join the turn's changes. An item counts as chosen
-    /// for when a choice was made on a side line opened for it, or when the user's lines of ③
-    /// used it, since it becomes `known` then. Once the choices stand, each of them, and each
-    /// change of the profile it made, goes to the session log with `line: "sub"` (PRD §8.8); a
-    /// choice dropped by withdrawing the request does not. `None` when no turn is held at a
-    /// boundary.
+    /// Takes the step of the boundary the turn is held at back (PRD UC3): writes back the content
+    /// the file had before it, or removes the file the step created. A file that changed since
+    /// the step is left as it is. The turn's changes and written files no longer count the step.
+    /// `None` when no turn is held, or its step was taken back already.
+    pub fn take_back(&mut self) -> Option<TakenBack> {
+        let held = self.held.as_mut()?;
+        if held.taken_back {
+            return None;
+        }
+        held.taken_back = true;
+        let step = &held.boundary.step;
+        let restored = self.tools.read(&step.path).as_deref() == Some(step.after.as_str())
+            && self
+                .tools
+                .restore(&step.path, step.before.as_deref())
+                .is_ok();
+        if restored {
+            let tools = &self.tools;
+            if let Some(at) = held
+                .changes
+                .iter()
+                .position(|c| tools.same_file(&c.path, &step.path))
+            {
+                let change = &mut held.changes[at];
+                match &step.before {
+                    Some(before) => change.after = before.clone(),
+                    None => change.after = String::new(),
+                }
+                // Back as the turn found it: the turn did not change the file after all.
+                if change.before.as_deref() == step.before.as_deref() {
+                    held.changes.remove(at);
+                    held.written
+                        .retain(|path| !tools.same_file(path, &step.path));
+                }
+            }
+            // Nothing the turn wrote is left to check.
+            if held.changes.is_empty() && !held.progress.crate_added {
+                held.progress.unchecked = false;
+            }
+        }
+        let taken = TakenBack {
+            path: step.path.clone(),
+            restored,
+        };
+        self.log.record(&Event::TakenBack {
+            path: taken.path.clone(),
+            restored,
+        });
+        Some(taken)
+    }
+
+    /// Takes the user's choice on the side line of the boundary the turn is held at (PRD UC3,
+    /// §8.5). The choice changes the profile (① `known` and ② ④ `seen` with provenance
+    /// `side_line`, ③ `known` with `wrote_it`), which is saved; ② takes the step back, unless ③
+    /// did before; the message of the choice goes into the message list, the only thing from the
+    /// side line; and the same turn goes on. The files the user changed in ③ join the turn's
+    /// changes. The choice, and each change of the profile it made, go to the session log with
+    /// `line: "sub"` (PRD §8.8). `None` when no turn is held at a boundary.
     pub fn resolve(
         &mut self,
         resolution: &Resolution,
         approver: &mut dyn Approver,
-    ) -> Option<Resolved> {
-        let held = self.held.as_mut()?;
-        held.chosen.push(resolution.clone());
-        let chosen: BTreeSet<ItemKey> = held
-            .chosen
-            .iter()
-            .flat_map(|resolution| {
-                let wrote = match resolution.choice() {
-                    Choice::UserWrote => resolution.items(),
-                    Choice::Unlock | Choice::Rewrite => &[],
-                };
-                resolution.answers().iter().chain(wrote).map(checked_key)
-            })
-            .collect();
-        let pending: Vec<ItemKey> = held
-            .boundary
-            .items
-            .iter()
-            .filter(|item| !chosen.contains(&checked_key(item)))
-            .cloned()
-            .collect();
-        if !pending.is_empty() {
-            return Some(Resolved::Pending(Boundary {
-                items: pending,
-                cause: held.boundary.cause.clone(),
-            }));
-        }
+    ) -> Option<Box<Resumed>> {
+        self.held.as_ref()?;
+        let taken_back = match resolution.choice() {
+            Choice::Rewrite => self.take_back(),
+            Choice::Unlock | Choice::UserWrote | Choice::Next => None,
+        };
         let held = self.held.take()?;
         let at = Timestamp::now();
-        for resolution in &held.chosen {
-            self.log.record(&Event::Choice {
-                choice: resolution.choice().name().to_owned(),
-                items: resolution
-                    .answers()
+        self.log.record(&Event::Choice {
+            choice: resolution.choice().name().to_owned(),
+            items: resolution
+                .answers()
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            policy: resolution.policy().map(str::to_owned),
+            files: resolution
+                .files()
+                .iter()
+                .map(|file| file.path.clone())
+                .collect(),
+        });
+        self.apply(resolution, at);
+        if resolution.choice() == Choice::Next {
+            self.introduced.extend(
+                resolution
+                    .items()
                     .iter()
-                    .map(ToString::to_string)
-                    .collect(),
-                policy: resolution.policy().map(str::to_owned),
-                files: resolution
-                    .files()
-                    .iter()
-                    .map(|file| file.path.clone())
-                    .collect(),
-            });
-            self.apply(resolution, at);
+                    .filter(|item| matches!(item, ItemKey::Crate(_)))
+                    .map(checked_key),
+            );
         }
         let saved = match &self.profile_path {
             Some(path) => self.profile.save(path),
@@ -466,35 +539,28 @@ impl<'a> MainLine<'a> {
         let mut rewritten = held.rewritten;
         let mut changes = held.changes;
         let mut user_written = held.user_written;
-        for resolution in &held.chosen {
-            if resolution.choice() == Choice::Rewrite {
-                rewritten.extend(resolution.items().iter().map(checked_key));
+        if resolution.choice() == Choice::Rewrite {
+            rewritten.extend(resolution.items().iter().map(checked_key));
+        }
+        for file in resolution.files() {
+            let tools = &self.tools;
+            if !user_written
+                .iter()
+                .any(|path| tools.same_file(path, &file.path))
+            {
+                user_written.push(file.path.clone());
             }
-            for file in resolution.files() {
-                let tools = &self.tools;
-                if !user_written
-                    .iter()
-                    .any(|path| tools.same_file(path, &file.path))
-                {
-                    user_written.push(file.path.clone());
-                }
-                // A file molt changed earlier in the turn keeps its content from before that.
-                match changes
-                    .iter_mut()
-                    .find(|c| tools.same_file(&c.path, &file.path))
-                {
-                    Some(change) => change.after = file.after.clone(),
-                    None => changes.push(file.clone()),
-                }
+            // A file molt changed earlier in the turn keeps its content from before that.
+            match changes
+                .iter_mut()
+                .find(|c| tools.same_file(&c.path, &file.path))
+            {
+                Some(change) => change.after = file.after.clone(),
+                None => changes.push(file.clone()),
             }
         }
         self.messages.push(Message::User {
-            content: held
-                .chosen
-                .iter()
-                .map(Resolution::message)
-                .collect::<Vec<_>>()
-                .join("\n\n"),
+            content: resolution.message(),
         });
         let turn = Turn {
             end: TurnEnd::Finished,
@@ -513,28 +579,26 @@ impl<'a> MainLine<'a> {
             broken: false,
             ..held.progress
         };
-        let wrote = |resolution: &Resolution| resolution.choice() == Choice::UserWrote;
-        if held.chosen.last().is_some_and(wrote) {
-            // `/done` passes only when `cargo check` passes, and it was the last thing done.
-            self.last_check = Some(true);
-        } else if held.chosen.iter().any(wrote) {
-            // A later side line came after the `/done` that passed, and a `/done` there may have
-            // failed on what is on the disk now: the end of the turn checks the build again.
+        progress.calls_before = turn.tool_calls.len();
+        if resolution.choice() == Choice::UserWrote {
+            // `/done` ran `cargo check` last; it may have passed with errors outside the user's
+            // lines (UC3), so the end of the turn checks the build again.
             progress.unchecked = true;
         }
         let turn = self.run(turn, progress, rewritten, approver);
-        Some(Resolved::Resumed(Box::new(Resumed {
-            chosen: held.chosen,
+        Some(Box::new(Resumed {
+            chosen: resolution.clone(),
+            taken_back,
             saved,
             turn,
-        })))
+        }))
     }
 
     /// Changes the profile as `resolution` chose, at `at`, and records each change.
     fn apply(&mut self, resolution: &Resolution, at: Timestamp) {
         let (to, provenance) = match resolution.choice() {
             Choice::Unlock => (Status::Known, Provenance::SideLine),
-            Choice::Rewrite => (Status::Seen, Provenance::SideLine),
+            Choice::Rewrite | Choice::Next => (Status::Seen, Provenance::SideLine),
             Choice::UserWrote => (Status::Known, Provenance::WroteIt),
         };
         let mut items: Vec<ItemKey> = resolution.items().to_vec();
@@ -558,7 +622,7 @@ impl<'a> MainLine<'a> {
         for item in &items {
             // Only these are changes, and PRD §7 allows each with `side_line` and `wrote_it`, so
             // none is refused.
-            // ② leaves a `seen` item as it is, and ① a `known` one.
+            // ② and ④ leave a `seen` item as it is, and ① a `known` one.
             let from = self.profile.status(item);
             if matches!(
                 (from, to),
@@ -638,7 +702,7 @@ impl<'a> MainLine<'a> {
                         progress,
                         rewritten,
                         boundary: boundary.clone(),
-                        chosen: Vec::new(),
+                        taken_back: false,
                     });
                 } else {
                     self.absorb(&turn.changes, &progress.committed);
@@ -676,14 +740,19 @@ impl<'a> MainLine<'a> {
             }
 
             let mut stop = None;
+            let mut skip = false;
             progress.broken = false;
             for call in &response.tool_calls {
                 let result = if stop.is_some() {
                     prompts::NOT_RUN.to_owned()
+                } else if skip {
+                    prompts::NOT_RUN_AFTER_SPLIT.to_owned()
                 } else {
                     let (result, next) = self.run_call(call, turn, progress, approver);
-                    if let Next::Stop(end) = next {
-                        stop = Some(end);
+                    match next {
+                        Next::Continue => {}
+                        Next::SkipRest => skip = true,
+                        Next::Stop(end) => stop = Some(end),
                     }
                     result
                 };
@@ -694,8 +763,6 @@ impl<'a> MainLine<'a> {
             }
             // Carried over before a stop too: after `finish`, a failed check goes on with the turn.
             progress.resend_asked = progress.broken;
-            let rejected_now = std::mem::take(&mut progress.rejected_now);
-            progress.rejected.extend(rejected_now);
             if let Some(end) = stop {
                 return end;
             }
@@ -711,7 +778,7 @@ impl<'a> MainLine<'a> {
         progress: &mut Progress,
         approver: &mut dyn Approver,
     ) -> (String, Next) {
-        if turn.tool_calls.len() == TOOL_CALL_BUDGET {
+        if turn.tool_calls.len() - progress.calls_before == TOOL_CALL_BUDGET {
             return (
                 prompts::over_budget(TOOL_CALL_BUDGET),
                 Next::Stop(TurnEnd::OverBudget),
@@ -738,7 +805,6 @@ impl<'a> MainLine<'a> {
         };
         match call.name.as_str() {
             WRITE_FILE | EDIT_FILE => return self.write(&call.name, arguments, turn, progress),
-            REQUEST_BOUNDARY => return write::request_boundary(&self.profile, arguments),
             GIT_COMMIT => return self.commit_tool(arguments, turn, progress, approver),
             _ => {}
         }
@@ -756,6 +822,14 @@ impl<'a> MainLine<'a> {
                 ),
             };
         }
+        if call.name == RUN_CARGO
+            && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+            && subcommand == "add"
+            && let [name] = &args[..]
+            && !self.may_add(name)
+        {
+            return (prompts::crate_add_before_step(name), Next::Continue);
+        }
         let result = match self.tools.dispatch(&call.name, &arguments, approver) {
             Ok(output) => {
                 if call.name == RUN_CARGO
@@ -766,6 +840,7 @@ impl<'a> MainLine<'a> {
                     // `cargo add` may have changed `Cargo.toml`, so the build is to be checked
                     // again. A crate it failed on is not asked about again at the end of the turn.
                     progress.unchecked = true;
+                    progress.crate_added = true;
                     if output.starts_with("failed") {
                         progress.not_added.insert(
                             name.replace('-', "_"),
@@ -790,6 +865,14 @@ impl<'a> MainLine<'a> {
             }
         };
         (result, Next::Continue)
+    }
+
+    /// Whether `cargo add` may add the crate `name` (PRD UC2): it is `known`, or went through a
+    /// boundary the user chose ④ at. Otherwise the user would approve a crate before its
+    /// explanation.
+    fn may_add(&self, name: &str) -> bool {
+        let key = ItemKey::Crate(name.to_owned());
+        crate::checker::allows(&self.profile, &key) || self.introduced.contains(&checked_key(&key))
     }
 
     fn request(&self) -> ChatRequest {
@@ -838,8 +921,7 @@ struct FinishArgs {
 }
 
 /// The function calling schema (PRD §8.4): the tools [`Tools::dispatch`] runs, and the ones the
-/// loop runs itself: `write_file` and `edit_file` through the check, `request_boundary` and
-/// `finish`.
+/// loop runs itself: `write_file` and `edit_file` through the check, and `finish`.
 fn tool_definitions() -> Vec<ToolDefinition> {
     let tool =
         |name: &str, description: &str, properties: Value, required: &[&str]| ToolDefinition {
@@ -913,23 +995,6 @@ fn tool_definitions() -> Vec<ToolDefinition> {
             prompts::GIT_COMMIT,
             json!({ "message": { "type": "string", "description": prompts::GIT_COMMIT_MESSAGE } }),
             &["message"],
-        ),
-        tool(
-            REQUEST_BOUNDARY,
-            prompts::REQUEST_BOUNDARY,
-            json!({
-                "items": {
-                    "type": "array",
-                    "items": { "type": "string" },
-                    "description": prompts::REQUEST_BOUNDARY_ITEMS,
-                },
-                "reason": { "type": "string", "description": prompts::REQUEST_BOUNDARY_REASON },
-                "proposed_code": {
-                    "type": "string",
-                    "description": prompts::REQUEST_BOUNDARY_PROPOSED_CODE,
-                },
-            }),
-            &["items", "reason"],
         ),
         tool(
             FINISH,
@@ -1347,7 +1412,6 @@ mod turn {
             "git_status",
             "git_diff",
             "git_commit",
-            "request_boundary",
             "finish",
         ] {
             assert!(result.contains(name), "{result}");
@@ -1468,7 +1532,6 @@ mod turn {
                 "git_status",
                 "git_diff",
                 "git_commit",
-                "request_boundary",
                 "finish"
             ]
         );
@@ -1482,9 +1545,7 @@ mod turn {
         let cargo = FakeCargo::new();
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
         for definition in tool_definitions() {
-            if [FINISH, WRITE_FILE, EDIT_FILE, REQUEST_BOUNDARY, GIT_COMMIT]
-                .contains(&definition.name.as_str())
-            {
+            if [FINISH, WRITE_FILE, EDIT_FILE, GIT_COMMIT].contains(&definition.name.as_str()) {
                 continue;
             }
             let result = tools.dispatch(&definition.name, &Map::new(), &mut Refuse);

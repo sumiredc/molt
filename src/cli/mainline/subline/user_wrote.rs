@@ -1,21 +1,26 @@
-//! ③ on the side line on the terminal (PRD UC3): the guidance on where to write what, then
-//! `/done`, which checks what the user wrote and shows how it went.
+//! ③ on the side line on the terminal (PRD UC3): molt takes the step back, guides where to write
+//! what, then `/done` checks what the user wrote and shows how it went.
 
 use super::{HINT, Left, indent};
 use crate::agent::mainline::MainLine;
 use crate::agent::subline::{Done, Failure, SubLine};
 use crate::cli::mainline::show_error_of;
 use crate::llm::ChatError;
-use crate::session::SessionLog;
 use crate::ui::Ui;
 
 /// What the user can do while they write in ③.
 pub(super) const WRITING: &str = "Write it in your editor, then type /done to have molt check it. \
      You can still ask questions, /choose another way, or /abort to withdraw the request.";
 
-/// Starts ③ on `side`: shows where to write what, as the model tells it, and what to do next.
-/// [`Left::Interrupted`] when the user interrupted the wait for the guidance.
-pub(super) fn guide(ui: &mut dyn Ui, side: &mut SubLine, log: &SessionLog) -> Option<Left> {
+/// Starts ③ on `side`, the side line of `agent`: takes the step back, says so, then shows where to
+/// write what, as the model tells it, and what to do next. [`Left::Interrupted`] when the user
+/// interrupted the wait for the guidance.
+pub(super) fn guide(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -> Option<Left> {
+    if let Some(taken) = agent.take_back() {
+        ui.show(&indent(&super::super::taken_back_text(&taken)));
+    }
+    side.start_writing(agent.tools());
+    let log = agent.log();
     match side.guide(log) {
         Ok(guidance) => ui.show(&indent(&guidance)),
         Err(ChatError::Interrupted) => {
@@ -46,7 +51,7 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
     let shown = match done {
         Done::NoChange => {
             ui.show(&indent(&format!(
-                "No change: no .rs file or Cargo.toml was written since the boundary. {HINT}"
+                "No change: no .rs file or Cargo.toml was written since molt took the step back. {HINT}"
             )));
             None
         }
@@ -57,8 +62,18 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
             ));
             None
         }
-        Done::Passed { resolution, review } => {
-            ui.show(&indent("cargo check passed."));
+        Done::Passed {
+            resolution,
+            review,
+            check,
+        } => {
+            match &check {
+                Ok(output) if !output.success => ui.show(&indent(&format!(
+                    "cargo check found no error in your lines. Elsewhere:\n{}",
+                    printed(output)
+                ))),
+                _ => ui.show(&indent("cargo check passed.")),
+            }
             match review {
                 Ok(review) => ui.show(&indent(&review)),
                 Err(error) => ui.show(&indent(&format!("Could not get the review: {error}"))),
@@ -81,17 +96,22 @@ fn failed(failure: &Failure) -> String {
         .collect();
     match &failure.check {
         Ok(output) if output.success => {}
-        Ok(output) => {
-            let printed = [output.stdout.trim_end(), output.stderr.trim_end()]
-                .into_iter()
-                .filter(|text| !text.is_empty())
-                .collect::<Vec<_>>()
-                .join("\n");
-            lines.push(format!("cargo check failed:\n{printed}"));
-        }
+        Ok(output) => lines.push(format!(
+            "cargo check found errors in your lines:\n{}",
+            printed(output)
+        )),
         Err(error) => lines.push(format!("cargo check could not run: {error}")),
     }
     lines.join("\n")
+}
+
+/// The output of `cargo check`, stdout then stderr.
+fn printed(output: &crate::workspace::cargo::CargoOutput) -> String {
+    [output.stdout.trim_end(), output.stderr.trim_end()]
+        .into_iter()
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// ③ on the side line through `/choose` and `/done`, and what the main line does with it. Named so

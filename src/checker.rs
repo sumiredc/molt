@@ -1,5 +1,5 @@
 //! Checks content before it is written: which syntax elements and crates it
-//! uses that the profile does not allow (PRD §3, §8.1).
+//! uses that are not `known` in the profile (PRD §3, §8.1).
 //!
 //! A pure function over strings: no file, no environment variable, no network.
 
@@ -9,6 +9,7 @@ pub mod finding;
 mod macro_args;
 pub mod visitor;
 
+use std::collections::BTreeSet;
 use std::ffi::OsStr;
 use std::path::Path;
 
@@ -83,11 +84,14 @@ pub(crate) fn undeclared_known_crates(
     source: &str,
     manifest: &str,
     ctx: &CheckContext,
+    introduced: &BTreeSet<ItemKey>,
 ) -> Vec<String> {
     let declared = crates::declared(manifest);
     let mut names: Vec<String> = Vec::new();
     for finding in crates::in_source(source, ctx.own_modules) {
-        if declared.contains(&finding.key) || !is_allowed(&finding, ctx) {
+        if declared.contains(&finding.key)
+            || !(is_allowed(&finding, ctx) || introduced.contains(&finding.key))
+        {
             continue;
         }
         if !names
@@ -244,7 +248,7 @@ mod tests {
             profile,
             own_modules: &own_modules,
         };
-        undeclared_known_crates(source, manifest, &ctx)
+        undeclared_known_crates(source, manifest, &ctx, &BTreeSet::new())
     }
 
     const MANIFEST: &str = "[package]\nname = \"demo\"\n\n[dependencies]\n";

@@ -13,8 +13,8 @@ use self::approver::UiApprover;
 use self::subline::Left;
 use super::profile;
 use crate::agent::mainline::{
-    AddOutcome, Boundary, BoundaryCause, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved,
-    TOOL_CALL_BUDGET, Turn, TurnEnd,
+    AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, SPLIT_BUDGET,
+    TOOL_CALL_BUDGET, TakenBack, Turn, TurnEnd,
 };
 use crate::agent::subline::{Choice, Resolution, Unresolved};
 use crate::agent::tools::Tools;
@@ -198,9 +198,9 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
 fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
     let stopped = match &turn.end {
         TurnEnd::Finished => return,
-        TurnEnd::OverBudget => {
-            format!("Stopped: this turn reached the limit of {TOOL_CALL_BUDGET} tool calls.")
-        }
+        TurnEnd::OverBudget => format!(
+            "Stopped: this turn reached the limit of {TOOL_CALL_BUDGET} tool calls since its last boundary."
+        ),
         TurnEnd::InvalidArguments(error) => format!(
             "Stopped: the model sent tool arguments that are not valid JSON again after being asked to resend them: {error}"
         ),
@@ -208,6 +208,9 @@ fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
         TurnEnd::Boundary(boundary) => boundary_text(boundary),
         TurnEnd::CompileFixesExhausted => format!(
             "Stopped: the code still does not build after {COMPILE_FIX_BUDGET} compile fixes in this turn."
+        ),
+        TurnEnd::SplitsExhausted => format!(
+            "Stopped: the model kept writing more than one step holds, after {SPLIT_BUDGET} requests to split in a row. Nothing of that was written."
         ),
     };
     ui.show(&stopped);
@@ -217,11 +220,22 @@ fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
             count_by_name(&turn.tool_calls)
         ));
     }
-    // Writes before the stop stay on disk; withdrawing the request does not undo them.
-    if !turn.written.is_empty() {
+    // Writes before the stop stay on disk; withdrawing the request does not undo them. The file
+    // of a step is shown with the step on the side line instead.
+    let step = match &turn.end {
+        TurnEnd::Boundary(boundary) => Some(boundary.step.path.as_str()),
+        _ => None,
+    };
+    let written: Vec<&str> = turn
+        .written
+        .iter()
+        .map(String::as_str)
+        .filter(|path| Some(*path) != step)
+        .collect();
+    if !written.is_empty() {
         ui.show(&format!(
             "Files written in this turn: {}",
-            turn.written.join(", ")
+            written.join(", ")
         ));
     }
 }
@@ -275,7 +289,7 @@ fn show_diffs_and_check(
     }
 }
 
-/// Why the turn stopped at `boundary`, and what the user can do there.
+/// Why the turn stopped at `boundary`: molt wrote a step with items the user has not written.
 fn boundary_text(boundary: &Boundary) -> String {
     let items = boundary
         .items
@@ -286,15 +300,31 @@ fn boundary_text(boundary: &Boundary) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let why = match &boundary.cause {
-        BoundaryCause::RejectedTwice { .. } => {
-            "the model could not avoid them after a rewrite".to_owned()
-        }
-        BoundaryCause::Requested { reason, .. } => format!("the model says: {reason}"),
+    let lines = boundary.step.lines.len();
+    let lines = if lines == 1 {
+        "1 line".to_owned()
+    } else {
+        format!("{lines} lines")
     };
     format!(
-        "Stopped at a boundary: the request needs {items}, which your profile does not allow yet ({why}). Nothing was written for it."
+        "Paused after a step: molt wrote {lines} to {} with {items}, which you have not written yet.",
+        boundary.step.path
     )
+}
+
+/// What taking the step back did (UC3).
+pub(super) fn taken_back_text(taken: &TakenBack) -> String {
+    if taken.restored {
+        format!(
+            "molt took the step back: {} is as it was before it.",
+            taken.path
+        )
+    } else {
+        format!(
+            "molt left {} as it is: it changed after the step, so the step was not taken back.",
+            taken.path
+        )
+    }
 }
 
 /// What the user can do while the main line is paused at a boundary (UC3's exception flow).
@@ -302,10 +332,10 @@ const PAUSED: &str = "Paused at the boundary. Type /side to go back to the side 
 
 /// Opens the side line (UC3) at `boundary`, where the turn stopped. A choice there goes on with
 /// the turn, which opens the side line again when it stops at another boundary. `/abort` there
-/// withdraws the request. Ctrl-C there pauses the main line at the boundary, where `/side` opens the same side
-/// line again and `/abort` withdraws the request, and no other line is accepted. Ctrl-D on the
-/// side line, and Ctrl-D and Ctrl-C while paused, end the main line as at the prompt, and their
-/// exit code is returned.
+/// withdraws the request. Ctrl-C there pauses the main line at the boundary, where `/side` opens
+/// the same side line again and `/abort` withdraws the request, and no other line is accepted.
+/// Ctrl-D on the side line, and Ctrl-D and Ctrl-C while paused, end the main line as at the
+/// prompt, after taking the step back, and their exit code is returned.
 fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Option<ExitCode> {
     let mut side = agent.side_line(boundary);
     loop {
@@ -314,7 +344,7 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 withdraw(ui, agent);
                 return None;
             }
-            Left::Chose(choice) => match side.resolve(choice, agent.log()) {
+            Left::Chose(choice) => match side.resolve(choice, agent.tools(), agent.log()) {
                 Ok(resolution) => {
                     // When the turn went on to its end, the main line takes the next request
                     // (`None`). At another boundary, the side line opens there.
@@ -329,14 +359,14 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 Err(Unresolved::NotOffered) => return None,
             },
             Left::Wrote(resolution) => {
-                // As after ① or ②.
+                // As after ①, ② or ④.
                 let boundary = resolve(ui, agent, &resolution)?;
                 side = agent.side_line(boundary);
                 continue;
             }
             Left::Interrupted => {}
-            Left::Eof => return Some(ExitCode::SUCCESS),
-            Left::Failed => return Some(ExitCode::FAILURE),
+            Left::Eof => return Some(end_at_boundary(ui, agent, ExitCode::SUCCESS)),
+            Left::Failed => return Some(end_at_boundary(ui, agent, ExitCode::FAILURE)),
         }
         ui.show(PAUSED);
         loop {
@@ -347,49 +377,53 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                     return None;
                 }
                 Ok(Input::Line(_)) => ui.show(PAUSED),
-                Ok(Input::Eof) => return Some(ExitCode::SUCCESS),
-                Ok(Input::Interrupted) => return Some(ExitCode::from(INTERRUPTED)),
+                Ok(Input::Eof) => return Some(end_at_boundary(ui, agent, ExitCode::SUCCESS)),
+                Ok(Input::Interrupted) => {
+                    return Some(end_at_boundary(ui, agent, ExitCode::from(INTERRUPTED)));
+                }
                 Err(error) => {
                     eprintln!("{error}");
-                    return Some(ExitCode::FAILURE);
+                    return Some(end_at_boundary(ui, agent, ExitCode::FAILURE));
                 }
             }
         }
     }
 }
 
-/// Hands the choice made on the side line to the main line (UC3, §8.5). While items of the
-/// boundary still wait for a choice, says so and returns them for the next side line. Once every
-/// item has one, shows how each choice changed the profile, then the rest of the turn as any turn,
-/// and returns the next boundary when the turn stops at one again.
+/// Ends the main line at a boundary (UC3's exception flow): takes the step back, unless ③ did
+/// before, says so, and returns `code`.
+fn end_at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, code: ExitCode) -> ExitCode {
+    if let Some(taken) = agent.take_back() {
+        ui.show(&taken_back_text(&taken));
+    }
+    show_log_error(ui, agent);
+    code
+}
+
+/// Hands the choice made on the side line to the main line (UC3, §8.5): shows what taking the
+/// step back did for ②, how the choice changed the profile, then the rest of the turn as any
+/// turn, and returns the next boundary when the turn stops at one again.
 fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
-    let resumed = match agent.resolve(resolution, &mut UiApprover::new(ui))? {
-        Resolved::Pending(pending) => {
-            ui.show(&format!(
-                "Chosen for {}: {}. The main line goes on once there is a choice for {} too.",
-                names(resolution.answers()),
-                chosen(resolution.choice()),
-                names(&pending.items)
-            ));
-            show_log_error(ui, agent);
-            return Some(pending);
+    let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
+    if let Some(taken) = &resumed.taken_back {
+        ui.show(&taken_back_text(taken));
+    }
+    let resolution = &resumed.chosen;
+    let names = names(resolution.items());
+    match (resolution.choice(), resolution.policy()) {
+        (Choice::Rewrite, Some(policy)) => ui.show(&format!(
+            "Your profile marks {names} as seen, and molt writes it without them. Policy: {policy}"
+        )),
+        (Choice::Next, _) => ui.show(&format!(
+            "Your profile marks {names} as seen; molt explains them again when it uses them."
+        )),
+        (Choice::UserWrote, _) if names.is_empty() => {
+            ui.show("Your lines use nothing your profile did not have as known already.")
         }
-        Resolved::Resumed(resumed) => resumed,
-    };
-    for resolution in &resumed.chosen {
-        let names = names(resolution.items());
-        match (resolution.choice(), resolution.policy()) {
-            (Choice::Rewrite, Some(policy)) => ui.show(&format!(
-                "Your profile marks {names} as seen, and molt rewrites without them. Policy: {policy}"
-            )),
-            (Choice::UserWrote, _) if names.is_empty() => {
-                ui.show("Your lines use nothing your profile did not allow already.")
-            }
-            (Choice::UserWrote, _) => ui.show(&format!(
-                "Your profile allows {names} now (known: you wrote it)."
-            )),
-            _ => ui.show(&format!("Your profile allows {names} now (known).")),
-        }
+        (Choice::UserWrote, _) => ui.show(&format!(
+            "Your profile has {names} as known now (you wrote it)."
+        )),
+        _ => ui.show(&format!("Your profile has {names} as known now.")),
     }
     if let Err(error) = &resumed.saved {
         ui.show(&format!(
@@ -417,20 +451,15 @@ fn names(items: &[ItemKey]) -> String {
         .join(", ")
 }
 
-/// What the user chose, in the words of the choices on the side line.
-fn chosen(choice: Choice) -> &'static str {
-    match choice {
-        Choice::Unlock => "understand, then delegate",
-        Choice::Rewrite => "use a construct I know",
-        Choice::UserWrote => "write it myself",
-    }
-}
-
-/// Withdraws the request held at a boundary: nothing more is changed, what was written before the
-/// boundary is shown with its `cargo check`, and the main line waits for the next request.
+/// Withdraws the request held at a boundary: the step is taken back, nothing more is changed, what
+/// was written before the boundary is shown with its `cargo check`, and the main line waits for
+/// the next request.
 fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
     let withdrawal = agent.withdraw();
     ui.show("Request withdrawn.");
+    if let Some(taken) = &withdrawal.taken_back {
+        ui.show(&taken_back_text(taken));
+    }
     show_diffs_and_check(ui, &withdrawal.changes, withdrawal.check.as_ref());
     show_log_error(ui, agent);
 }
@@ -658,7 +687,7 @@ mod turn {
         assert_eq!(
             ui.shown(),
             [
-                "Stopped: this turn reached the limit of 40 tool calls.",
+                "Stopped: this turn reached the limit of 40 tool calls since its last boundary.",
                 "Tool calls in this turn: read_file (40)",
             ]
         );
@@ -718,12 +747,17 @@ mod approval {
             stderr: String::new(),
         }));
         let tools = Tools::new(Root::new(dir.path()).unwrap(), &cargo);
-        let mut agent = MainLine::new(
-            &client,
-            Router::new(&Config::default()),
-            tools,
-            Profile::new(),
-        );
+        let mut serde = Profile::new();
+        serde
+            .transition(
+                "crate:serde".parse().unwrap(),
+                crate::profile::status::Status::Known,
+                crate::profile::status::Provenance::Manual,
+                crate::profile::store::Timestamp::now(),
+                None,
+            )
+            .unwrap();
+        let mut agent = MainLine::new(&client, Router::new(&Config::default()), tools, serde);
         let mut ui = ScriptedUi::new([input("add serde"), Step::Confirm(false), input("/quit")]);
 
         main_line(&mut ui, &mut agent);
@@ -766,7 +800,6 @@ mod write {
     fn rejected_twice_then(reply_text: &str) -> FakeChatClient {
         let client = FakeChatClient::new();
         client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main("second", WITH_DBG)));
         client.push_chat(Ok(reply("dbg! prints a value.")));
         client.push_chat(Ok(reply(reply_text)));
         client
@@ -821,13 +854,14 @@ mod write {
         assert_eq!(
             ui.shown(),
             [
-                "Stopped at a boundary: the request needs dbg_macro (macros), which your profile does not allow yet (the model could not avoid them after a rewrite). Nothing was written for it.",
-                "Tool calls in this turn: write_file (2)",
+                "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.",
+                "Tool calls in this turn: write_file (1)",
                 "── side line: dbg_macro ────────────────────────────────────",
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
+                "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }\n\n  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
                 "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
+                "molt took the step back: src/main.rs is as it was before it.",
                 "hello again",
             ]
         );
@@ -837,7 +871,7 @@ mod write {
         );
         assert_eq!(
             client.requests().len(),
-            4,
+            3,
             "the explanation and the next input went to the model"
         );
         assert_eq!(
@@ -868,10 +902,13 @@ mod write {
     }
 
     #[test]
-    fn a_rejection_is_not_shown_to_the_user() {
+    fn a_split_request_is_not_shown_to_the_user() {
         let client = FakeChatClient::new();
-        client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main("second", "fn main() {\n    let _ = 1;\n}\n")));
+        client.push_chat(Ok(write_main(
+            "big",
+            "fn main() {\n    let a = vec![1];\n    for x in &a {\n        dbg!(x);\n    }\n    println!(\"{a:?}\");\n}\n",
+        )));
+        client.push_chat(Ok(write_main("small", "fn main() {\n    let _ = 1;\n}\n")));
         client.push_chat(Ok(reply("Printed 1.")));
         let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
 
@@ -879,7 +916,7 @@ mod write {
         assert!(
             ui.shown()
                 .iter()
-                .all(|text| !text.contains("rejected") && !text.contains("dbg")),
+                .all(|text| !text.contains("split") && !text.contains("dbg")),
             "{:?}",
             ui.shown()
         );
@@ -891,22 +928,17 @@ mod write {
     }
 
     #[test]
-    fn a_requested_boundary_shows_the_reason_of_the_model() {
+    fn a_step_says_where_molt_wrote_and_the_items_with_their_category() {
         let client = FakeChatClient::new();
-        client.push_chat(Ok(ChatResponse {
-            content: None,
-            tool_calls: vec![ToolCall {
-                id: "b".to_owned(),
-                name: "request_boundary".to_owned(),
-                arguments: json!({ "items": ["arc", "crate:tokio"], "reason": "tasks share it" })
-                    .to_string(),
-            }],
-        }));
+        client.push_chat(Ok(write_main(
+            "step",
+            "use std::sync::Arc;\n\nfn main() {\n    let _ = tokio::spawn;\n    let _a = Arc::new(1);\n}\n",
+        )));
         let (_, ui, _dir) = run(&client, [input("share it"), Step::Eof]);
 
         assert_eq!(
             ui.shown()[0],
-            "Stopped at a boundary: the request needs arc (smart_pointers), crate:tokio, which your profile does not allow yet (the model says: tasks share it). Nothing was written for it."
+            "Paused after a step: molt wrote 6 lines to src/main.rs with arc (smart_pointers), crate:tokio, which you have not written yet."
         );
     }
 
@@ -923,7 +955,6 @@ mod write {
             }],
         }));
         client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main("second", WITH_DBG)));
         let (_, ui, dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
 
         assert_eq!(ui.shown()[2], "Files written in this turn: src/lib.rs");
@@ -946,7 +977,6 @@ mod write {
             }],
         }));
         client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main("second", WITH_DBG)));
         let (_, ui, _dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
 
         let shown = ui.shown();
@@ -957,6 +987,7 @@ mod write {
         assert_eq!(
             shown[at + 1..],
             [
+                "molt took the step back: src/main.rs is as it was before it.",
                 "--- /dev/null\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn f() {}",
                 "cargo check could not run: the fake cargo has no more queued results",
             ]
@@ -1219,16 +1250,25 @@ mod session_log {
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
 
     #[test]
-    fn a_run_from_a_rejection_to_a_boundary_leaves_the_four_kinds_of_events_in_the_session_log() {
+    fn a_run_from_a_split_request_to_a_step_and_its_take_back_is_in_the_session_log() {
+        const TOO_BIG: &str = "fn main() {\n    let a = vec![1];\n    for x in &a {\n        dbg!(x);\n    }\n    println!(\"{a:?}\");\n}\n";
         let dir = project();
         fs::create_dir(dir.path().join("src")).unwrap();
         fs::write(dir.path().join("src/main.rs"), "fn main() {}\n").unwrap();
         let logs = tempfile::tempdir().unwrap();
         let client = FakeChatClient::new();
-        // A clean write, then `dbg!` twice: the second rejection is a boundary.
-        client.push_chat(Ok(write_main("clean", "fn main() {\n    let _ = 1;\n}\n")));
-        client.push_chat(Ok(write_main("first", WITH_DBG)));
-        client.push_chat(Ok(write_main("second", WITH_DBG)));
+        // A clean write, a write of more than a step holds, then a step.
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "clean".to_owned(),
+                name: "write_file".to_owned(),
+                arguments: json!({ "path": "src/lib.rs", "content": "pub fn f() {}\n" })
+                    .to_string(),
+            }],
+        }));
+        client.push_chat(Ok(write_main("big", TOO_BIG)));
+        client.push_chat(Ok(write_main("step", WITH_DBG)));
         let cargo = FakeCargo::new();
         cargo.push(Ok(CargoOutput {
             success: true,
@@ -1267,21 +1307,24 @@ mod session_log {
                 "rejected",
                 "tool_call",
                 "detected",
-                "rejected",
+                "step",
+                "taken_back",
                 "cargo_check",
             ]
         );
         assert_eq!(events[0]["name"], "write_file");
-        assert_eq!(events[2]["path"], "src/main.rs");
+        assert_eq!(events[3]["reason"], "over_step_limit");
+        assert_eq!(events[3]["content"], TOO_BIG);
+        assert_eq!(events[5]["path"], "src/main.rs");
         assert_eq!(
-            events[2]["items"],
+            events[5]["items"],
             json!([{ "line": 2, "item": "dbg_macro", "category": "macros", "text": "dbg!" }])
         );
-        assert_eq!(events[3]["items"], json!(["dbg_macro"]));
-        assert_eq!(events[3]["content"], WITH_DBG);
-        assert_eq!(events[3]["boundary"], false);
-        assert_eq!(events[6]["boundary"], true);
-        assert_eq!(events[7]["status"], "passed");
+        assert_eq!(events[6]["items"], json!(["dbg_macro"]));
+        assert_eq!(events[6]["lines"], json!([1, 2, 3]));
+        assert_eq!(events[7]["path"], "src/main.rs");
+        assert_eq!(events[7]["restored"], true);
+        assert_eq!(events[8]["status"], "passed");
         assert!(
             events.iter().all(|event| event.get("line").is_none()),
             "main-line events carry no `line`"
@@ -1485,7 +1528,6 @@ mod session_path {
             }],
         };
         client.push_chat(Ok(with_dbg("first")));
-        client.push_chat(Ok(with_dbg("second")));
         client
     }
 

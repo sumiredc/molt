@@ -21,13 +21,15 @@ pub(super) fn choose(ui: &mut dyn Ui, side: &SubLine) -> Result<Option<Choice>, 
 fn label(choice: Choice, items: &[ItemKey]) -> String {
     let names = names(items);
     match choice {
-        Choice::Unlock => format!("Understand, then delegate: molt may use {names} from now on"),
+        Choice::Unlock => format!("Understood: the step stays, and molt uses {names} from now on"),
         Choice::Rewrite => {
-            format!("Use a construct I know: molt rewrites without {names}")
+            format!("Write it without them: molt takes the step back and writes it without {names}")
         }
-        Choice::UserWrote => {
-            "Write it myself: molt shows where, and checks what I wrote when I type /done"
-                .to_owned()
+        Choice::UserWrote => "Write it myself: molt takes the step back, shows where, and checks \
+             what I wrote when I type /done"
+            .to_owned(),
+        Choice::Next => {
+            format!("Next: the step stays, and molt explains {names} again when it uses them")
         }
     }
 }
@@ -35,9 +37,8 @@ fn label(choice: Choice, items: &[ItemKey]) -> String {
 /// What the side line says when its boundary recurred after ② in the same turn (UC3).
 pub(super) fn recurred(items: &[ItemKey]) -> String {
     format!(
-        "The request needs {names}: the model could not do without it even after the rewrite in \
-         this turn, so the rewrite is not offered again. Understand it and let molt use it, or \
-         write that part yourself.",
+        "This step uses {names} again after you chose to write without them in this turn: the \
+         request seems to need them, so writing without them is not offered again.",
         names = names(items)
     )
 }
