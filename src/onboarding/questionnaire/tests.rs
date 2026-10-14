@@ -229,10 +229,7 @@ fn accepting_to_overwrite_replaces_the_existing_profile() {
         Ok(Outcome::Saved)
     );
     let profile = Profile::load(&path).unwrap();
-    assert!(
-        profile.moved_from_allow().is_empty() && profile.entries().count() == 0,
-        "the old profile is gone"
-    );
+    assert_eq!(profile.entries().count(), 0, "the old profile is gone");
 }
 
 #[test]

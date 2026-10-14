@@ -265,7 +265,7 @@ pub struct Profile {
     reports: BTreeMap<Category, Report>,
     history: Vec<Change>,
     /// The elements an older file lists in `allow` (and not in `deny`),
-    /// which reading it made `known` (#152). Not saved: the next save holds
+    /// which reading it made `known` (PRD §8.3). Not saved: the next save holds
     /// them as entries.
     moved_from_allow: Vec<Element>,
 }
@@ -359,7 +359,7 @@ impl Profile {
     /// An older file may hold `allow` and `deny`, the elements the user
     /// added to and removed from those molt used without asking. Each element in `allow` and not in `deny` becomes `known`
     /// (provenance manual), since the user added it by hand to what molt
-    /// writes without asking, and `deny` is dropped (#152). Neither is written
+    /// writes without asking, and `deny` is dropped (PRD §8.3). Neither is written
     /// back.
     ///
     /// A key or field that this version does not know (a renamed element, a

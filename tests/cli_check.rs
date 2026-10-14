@@ -108,13 +108,19 @@ fn the_profile_decides_what_is_reported() {
 #[test]
 fn an_element_in_allow_of_an_older_profile_is_known_and_the_note_says_so() {
     let dir = project(&[("a.rs", USES_DBG)]);
-    let profile = profile(&dir, "allow = [\"dbg_macro\"]\n");
+    let older = "allow = [\"dbg_macro\"]\n";
+    let profile = profile(&dir, older);
     let output = check(dir.path(), &profile, &["a.rs"]);
     assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
     let note = stderr(&output);
     assert!(
-        note.contains("dbg_macro were in `allow`") && note.contains("`known` now (manual)"),
+        note.contains("dbg_macro was in `allow`") && note.contains("it is `known` now (manual)"),
         "{note}"
+    );
+    assert_eq!(
+        fs::read_to_string(&profile).unwrap(),
+        older,
+        "check only reads"
     );
 }
 

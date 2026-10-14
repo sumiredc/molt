@@ -270,7 +270,7 @@ mod compare {
     use super::{HARD_WITHIN_PROFILE, NO_COMPARISON};
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
-    const WITHOUT_DBG: &str = "fn main() {\n    elet _ = 1;\n}";
+    const WITHOUT_DBG: &str = "fn main() {\n    eprintln!(\"{}\", 1);\n}";
     /// The words of the instruction for the comparison that the rule rests on.
     pub(super) const REWRITE: &str = "rewrite the code the main line tried without these items";
     const ONLY_ALLOWED: &str =
@@ -468,7 +468,7 @@ mod compare {
 
         let idea = explanation.find("dbg! prints a value and returns it.");
         let tried = explanation.find("    dbg!(1);");
-        let within = explanation.find("    elet _ = 1;");
+        let within = explanation.find("    eprintln!(\"{}\", 1);");
         assert!(
             idea.is_some() && tried.is_some() && within.is_some(),
             "{explanation}"
@@ -851,7 +851,7 @@ mod short {
     use super::compare::{REWRITE, on_side_line, profile_with, project, rejected_twice, requested};
     use super::{NO_COMPARISON, seen_before, similar};
 
-    const WITHOUT_DBG: &str = "```rust\nfn main() {\n    elet _ = 1;\n}\n```";
+    const WITHOUT_DBG: &str = "```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```";
     /// The instruction for the idea of every item.
     const IDEA: &str = "Explain the idea of these items in one paragraph.";
     /// The words every instruction for an idea has.
@@ -908,7 +908,10 @@ mod short {
             )),
             "{explanation}"
         );
-        assert!(explanation.contains("    elet _ = 1;"), "{explanation}");
+        assert!(
+            explanation.contains("    eprintln!(\"{}\", 1);"),
+            "{explanation}"
+        );
     }
 
     #[test]

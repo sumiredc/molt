@@ -177,7 +177,7 @@ fn the_profile_is_shown_per_category_with_status_provenance_and_the_reason_of_th
 }
 
 #[test]
-fn elements_that_were_base_elements_are_shown_in_their_category() {
+fn result_and_unwrap_are_shown_in_their_category() {
     let mut profile = Profile::new();
     profile.set_report(Category::ErrorHandling, Report::CanRead);
     for key in [element(Element::Result), element(Element::Unwrap)] {

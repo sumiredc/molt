@@ -139,7 +139,7 @@ fn set_accepts_a_crate_key() {
 }
 
 #[test]
-fn show_lists_every_element_under_its_category_and_no_base_elements() {
+fn show_lists_every_element_under_its_category_shared_ref_too() {
     let (_dir, path) = empty_profile();
 
     let show = stdout(&molt_with_profile(&path, &["profile", "show"]));
@@ -149,8 +149,8 @@ fn show_lists_every_element_under_its_category_and_no_base_elements() {
             .unwrap_or_else(|| panic!("{text:?} not in:\n{show}"))
     };
     assert!(!show.contains("regardless of status"), "{show}");
-    // shared_ref was used without asking before #152; it is listed once,
-    // under borrowing.
+    // shared_ref was once used without asking, and listed apart; now it is
+    // listed once, under borrowing.
     assert_eq!(show.matches("\n  shared_ref ").count(), 1, "{show}");
     let shared_ref = position("\n  shared_ref ");
     assert!(position("\nborrowing\n") < shared_ref, "{show}");
@@ -162,7 +162,8 @@ fn show_lists_every_element_under_its_category_and_no_base_elements() {
 fn an_element_in_allow_of_an_older_profile_is_shown_known_with_a_note() {
     let dir = TempDir::new().unwrap();
     let path = dir.path().join("profile.toml");
-    fs::write(&path, "allow = [\"arc\"]\ndeny = [\"option\"]\n").unwrap();
+    let older = "allow = [\"arc\", \"rc\"]\ndeny = [\"option\"]\n";
+    fs::write(&path, older).unwrap();
 
     let output = molt_with_profile(&path, &["profile", "show"]);
 
@@ -170,10 +171,37 @@ fn an_element_in_allow_of_an_older_profile_is_shown_known_with_a_note() {
     assert_eq!(row(&stdout(&output), "arc")[1..3], ["known", "manual"]);
     assert_eq!(row(&stdout(&output), "option")[1], "unknown");
     assert!(
-        stderr(&output).contains("arc were in `allow`"),
+        stderr(&output).contains("rc, arc were in `allow`"),
         "{}",
         stderr(&output)
     );
+    assert_eq!(fs::read_to_string(&path).unwrap(), older, "show only reads");
+}
+
+#[test]
+fn set_on_an_older_profile_saves_the_moved_element_and_drops_allow_and_deny() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profile.toml");
+    fs::write(&path, "allow = [\"arc\"]\ndeny = [\"option\"]\n").unwrap();
+
+    let set = molt_with_profile(&path, &["profile", "set", "clone", "known"]);
+
+    assert!(set.status.success(), "{}", stderr(&set));
+    assert!(
+        stderr(&set).contains("arc was in `allow`"),
+        "{}",
+        stderr(&set)
+    );
+    let saved = fs::read_to_string(&path).unwrap();
+    assert!(saved.contains("[items.arc]"), "{saved}");
+    assert!(
+        !saved.contains("allow =") && !saved.contains("deny ="),
+        "{saved}"
+    );
+    assert_eq!(saved.matches("[[history]]").count(), 2, "{saved}");
+    let again = molt_with_profile(&path, &["profile", "show"]);
+    assert!(stderr(&again).is_empty(), "{}", stderr(&again));
+    assert_eq!(row(&stdout(&again), "arc")[1..3], ["known", "manual"]);
 }
 
 #[test]

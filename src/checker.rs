@@ -202,13 +202,14 @@ mod tests {
     }
 
     #[test]
-    fn an_element_that_was_a_base_element_is_reported_unless_known() {
-        let profile = Profile::new();
-        let report = check(&profile, "fn main() {\n    println!(\"hi\");\n}\n");
+    fn println_is_reported_unless_known() {
+        let source = "fn main() {\n    println!(\"hi\");\n}\n";
         assert_eq!(
-            reported(&report),
+            reported(&check(&Profile::new(), source)),
             [(2, ItemKey::Element(Element::PrintMacro))]
         );
+        let known = with_status(Element::PrintMacro, Status::Known);
+        assert_eq!(check(&known, source), CheckReport::Clean);
     }
 
     #[test]

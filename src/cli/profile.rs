@@ -64,7 +64,7 @@ pub(super) fn load(path: &Path) -> Result<Profile, String> {
 }
 
 /// Tells the user, on stderr, which elements reading the profile at `path`
-/// moved from `allow` to `known` (#152), if any.
+/// moved from `allow` to `known` (PRD §8.3), if any.
 pub(super) fn note_moved(path: &Path, profile: &Profile) {
     if let Some(note) = moved_note(path, profile) {
         eprintln!("{note}");
@@ -78,8 +78,13 @@ fn moved_note(path: &Path, profile: &Profile) -> Option<String> {
         return None;
     }
     let names: Vec<&str> = moved.iter().map(|element| element.name()).collect();
+    let (were, they) = if names.len() == 1 {
+        ("was", "it is")
+    } else {
+        ("were", "they are")
+    };
     Some(format!(
-        "{}: {} were in `allow`, which molt no longer has (no element is written without asking unless it is `known`); they are `known` now (manual), and the profile keeps them so from its next save",
+        "{}: {} {were} in `allow`, which molt no longer has (no element is written without asking unless it is `known`); {they} `known` now (manual). The file keeps this from its next save (`molt profile set`, or a choice on the side line)",
         path.display(),
         names.join(", ")
     ))

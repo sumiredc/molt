@@ -272,7 +272,7 @@ mod open {
     #[test]
     fn a_boundary_opens_the_side_line_with_a_banner_its_prompt_and_the_explanation_indented() {
         let client = stops_at_a_boundary_then(&[
-            "dbg! prints a value.\n\nIt returns it, too.\n\n```rust\nfn main() {\n    elet _ = 1;\n}\n```",
+            "dbg! prints a value.\n\nIt returns it, too.\n\n```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```",
         ]);
         let (code, ui) = run(&client, [input("debug 1"), input("/abort"), input("/quit")]);
 
@@ -281,7 +281,7 @@ mod open {
             ui.shown()[2..6],
             [
                 ENTER,
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      elet _ = 1;\n  }\n  ```",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  It returns it, too.\n\n  Two ways to write it\n  With `dbg_macro` (what the main line tried):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile:\n  ```rust\n  fn main() {\n      eprintln!(\"{}\", 1);\n  }\n  ```",
                 HINT_SHOWN,
                 LEAVE
             ]
