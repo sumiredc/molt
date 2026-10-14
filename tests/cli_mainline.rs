@@ -236,9 +236,14 @@ tool_calls = [{ name = "finish", arguments = { summary = "Added `add` to src/lib
     );
     let stdout = before_session_path(&output);
     assert!(
-        stdout.starts_with("molt> add two numbers\nAdded `add` to src/lib.rs.\n"),
+        stdout.starts_with(
+            "molt> add two numbers\n● write_file src/lib.rs\nAdded `add` to src/lib.rs.\n"
+        ),
         "{stdout}"
     );
+    // Output that is not a terminal has no escapes and no carriage returns (PRD §8.1).
+    let all = String::from_utf8_lossy(&output.stdout);
+    assert!(!all.contains('\x1b') && !all.contains('\r'), "{all:?}");
     assert!(
         stdout.contains("+pub fn add(a: i32, b: i32) -> i32 {"),
         "{stdout}"

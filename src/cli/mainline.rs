@@ -13,7 +13,7 @@ use self::approver::UiApprover;
 use self::subline::Left;
 use super::profile;
 use crate::agent::mainline::{
-    AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, SPLIT_BUDGET,
+    AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved, SPLIT_BUDGET,
     TOOL_CALL_BUDGET, TakenBack, Turn, TurnEnd,
 };
 use crate::agent::subline::{Choice, Resolution, Unresolved};
@@ -176,12 +176,13 @@ fn requests(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
     }
 }
 
-/// Shows what the model said last. When the turn stopped instead of finishing, also shows why,
-/// the tool calls and the files written so far. Then the diff of each file molt changed and the
+/// Shows the summary the model passed to `finish`. When the turn stopped instead of finishing,
+/// also shows why and the files written so far. Then the diff of each file molt changed and the
 /// result of `cargo check` (PRD §3 Verification), and what came of each commit the model asked
 /// for (UC4).
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
-    if let Some(reply) = &turn.reply {
+    // A text of the model was shown as it came; only the summary passed to `finish` is not.
+    if let Some(reply) = turn.reply.as_ref().filter(|_| !turn.reply_shown) {
         ui.show(reply);
     }
     show_stop(ui, turn);
@@ -194,7 +195,8 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     }
 }
 
-/// Why the turn stopped, the tool calls and the files written so far, unless the model finished.
+/// Why the turn stopped and the files written so far, unless the model finished. Each tool call
+/// was shown as it ran (PRD §8.1).
 fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
     let stopped = match &turn.end {
         TurnEnd::Finished => return,
@@ -214,12 +216,6 @@ fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
         ),
     };
     ui.show(&stopped);
-    if !turn.tool_calls.is_empty() {
-        ui.show(&format!(
-            "Tool calls in this turn: {}",
-            count_by_name(&turn.tool_calls)
-        ));
-    }
     // Writes before the stop stay on disk; withdrawing the request does not undo them. The file
     // of a step is shown with the step on the side line instead.
     let step = match &turn.end {
@@ -400,36 +396,11 @@ fn end_at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, code: ExitCode) -> Exi
     code
 }
 
-/// Hands the choice made on the side line to the main line (UC3, §8.5): shows what taking the
-/// step back did for ②, how the choice changed the profile, then the rest of the turn as any
-/// turn, and returns the next boundary when the turn stops at one again.
+/// Hands the choice made on the side line to the main line (UC3, §8.5): what the choice did is
+/// shown before the rest of the turn ([`resolved_text`]), then the rest of the turn as any turn.
+/// Returns the next boundary when the turn stops at one again.
 fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
     let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
-    if let Some(taken) = &resumed.taken_back {
-        ui.show(&taken_back_text(taken));
-    }
-    let resolution = &resumed.chosen;
-    let names = names(resolution.items());
-    match (resolution.choice(), resolution.policy()) {
-        (Choice::Rewrite, Some(policy)) => ui.show(&format!(
-            "Your profile marks {names} as seen, and molt writes it without them. Policy: {policy}"
-        )),
-        (Choice::Next, _) => ui.show(&format!(
-            "Your profile marks {names} as seen; molt explains them again when it uses them."
-        )),
-        (Choice::UserWrote, _) if names.is_empty() => {
-            ui.show("Your lines use nothing your profile did not have as known already.")
-        }
-        (Choice::UserWrote, _) => ui.show(&format!(
-            "Your profile has {names} as known now (you wrote it)."
-        )),
-        _ => ui.show(&format!("Your profile has {names} as known now.")),
-    }
-    if let Err(error) = &resumed.saved {
-        ui.show(&format!(
-            "Could not save the profile: {error}. The change holds for this session only."
-        ));
-    }
     show_turn(ui, &resumed.turn);
     show_log_error(ui, agent);
     match resumed.turn.end {
@@ -440,6 +411,36 @@ fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Op
             None
         }
     }
+}
+
+/// What the choice made at a boundary did: taking the step back for ②, how it changed the
+/// profile, and whether the profile could be saved.
+fn resolved_text(resolved: &Resolved) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(taken) = resolved.taken_back {
+        lines.push(taken_back_text(taken));
+    }
+    let resolution = resolved.chosen;
+    let names = names(resolution.items());
+    lines.push(match (resolution.choice(), resolution.policy()) {
+        (Choice::Rewrite, Some(policy)) => format!(
+            "Your profile marks {names} as seen, and molt writes it without them. Policy: {policy}"
+        ),
+        (Choice::Next, _) => format!(
+            "Your profile marks {names} as seen; molt explains them again when it uses them."
+        ),
+        (Choice::UserWrote, _) if names.is_empty() => {
+            "Your lines use nothing your profile did not have as known already.".to_owned()
+        }
+        (Choice::UserWrote, _) => format!("Your profile has {names} as known now (you wrote it)."),
+        _ => format!("Your profile has {names} as known now."),
+    });
+    if let Err(error) = resolved.saved {
+        lines.push(format!(
+            "Could not save the profile: {error}. The change holds for this session only."
+        ));
+    }
+    lines
 }
 
 /// `arc, mutex`.
@@ -489,22 +490,6 @@ fn show_error_of(ui: &mut dyn Ui, log: &SessionLog) {
             path.display()
         ));
     }
-}
-
-/// `read_file (2), run_cargo (1)`, in the order each name first appears.
-fn count_by_name(names: &[String]) -> String {
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for name in names {
-        match counts.iter_mut().find(|(seen, _)| seen == name) {
-            Some((_, count)) => *count += 1,
-            None => counts.push((name, 1)),
-        }
-    }
-    counts
-        .iter()
-        .map(|(name, count)| format!("{name} ({count})"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -610,12 +595,6 @@ mod tests {
         let (code, _) = run_script(&FakeChatClient::new(), []);
         assert_eq!(code, ExitCode::FAILURE);
     }
-
-    #[test]
-    fn count_by_name_counts_each_tool_in_the_order_it_first_appears() {
-        let names = ["read_file", "run_cargo", "read_file"].map(str::to_owned);
-        assert_eq!(count_by_name(&names), "read_file (2), run_cargo (1)");
-    }
 }
 
 /// How a turn shows on the main line. Named so that `cargo test mainline::turn` selects them.
@@ -666,8 +645,8 @@ mod turn {
         assert_eq!(
             ui.shown(),
             [
+                "● read_file Cargo.toml",
                 "Stopped: the chat API returned HTTP 401: invalid api key",
-                "Tool calls in this turn: read_file (1)",
                 "back again",
             ]
         );
@@ -684,12 +663,17 @@ mod turn {
         let (code, ui) = super::tests::run_script(&client, [input("read it"), input("/quit")]);
 
         assert_eq!(code, ExitCode::SUCCESS);
+        let shown = ui.shown();
+        assert_eq!(shown.len(), 41, "{shown:?}");
+        assert!(
+            shown[..40]
+                .iter()
+                .all(|line| line == "● read_file Cargo.toml"),
+            "{shown:?}"
+        );
         assert_eq!(
-            ui.shown(),
-            [
-                "Stopped: this turn reached the limit of 40 tool calls since its last boundary.",
-                "Tool calls in this turn: read_file (40)",
-            ]
+            shown[40],
+            "Stopped: this turn reached the limit of 40 tool calls since its last boundary."
         );
     }
 
@@ -854,8 +838,8 @@ mod write {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
                 "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.",
-                "Tool calls in this turn: write_file (1)",
                 "── side line: dbg_macro ────────────────────────────────────",
                 "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
                 "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
@@ -913,7 +897,8 @@ mod write {
         client.push_chat(Ok(reply("Printed 1.")));
         let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
 
-        assert_eq!(ui.shown()[0], "Printed 1.");
+        // The write sent back to be split has no tool line; the one that reached the disk has.
+        assert_eq!(ui.shown()[..2], ["● write_file src/main.rs", "Printed 1."]);
         assert!(
             ui.shown()
                 .iter()
@@ -938,7 +923,7 @@ mod write {
         let (_, ui, _dir) = run(&client, [input("share it"), Step::Eof]);
 
         assert_eq!(
-            ui.shown()[0],
+            ui.shown()[1],
             "Paused after a step: molt wrote 6 lines to src/main.rs with arc (smart_pointers), crate:tokio, which you have not written yet."
         );
     }
@@ -958,7 +943,7 @@ mod write {
         client.push_chat(Ok(write_main("first", WITH_DBG)));
         let (_, ui, dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
 
-        assert_eq!(ui.shown()[2], "Files written in this turn: src/lib.rs");
+        assert_eq!(ui.shown()[3], "Files written in this turn: src/lib.rs");
         assert_eq!(
             fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
             "pub fn f() {}\n"
@@ -1078,7 +1063,15 @@ mod turn_end {
             [input("print 1"), input("/quit")],
         );
 
-        assert_eq!(ui.shown(), ["Printed 1.", DIFF, "cargo check passed."]);
+        assert_eq!(
+            ui.shown(),
+            [
+                "● write_file src/main.rs",
+                "Printed 1.",
+                DIFF,
+                "cargo check passed."
+            ]
+        );
     }
 
     #[test]
@@ -1100,6 +1093,8 @@ mod turn_end {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
+                "Printed 1.",
                 "I could not fix it.",
                 DIFF,
                 "cargo check failed:\nerror[E0308]: mismatched types"
@@ -1127,9 +1122,15 @@ mod turn_end {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
                 "done",
                 "Stopped: the code still does not build after 3 compile fixes in this turn.",
-                "Tool calls in this turn: write_file (4)",
                 "Files written in this turn: src/main.rs",
                 DIFF,
                 "cargo check failed:\nerror: attempt 3",
@@ -1435,11 +1436,11 @@ mod session_log {
 
         let warning = format!("Could not write the session log {}: ", path.display());
         let shown = ui.shown();
-        assert_eq!(shown.len(), 4, "{shown:?}");
-        assert_eq!(shown[0], "one");
-        assert!(shown[1].starts_with(&warning), "{shown:?}");
-        assert_eq!(shown[2], "two");
-        assert_eq!(shown[3], format!("Session log: {}", path.display()));
+        assert_eq!(shown.len(), 6, "{shown:?}");
+        assert_eq!(shown[..2], ["● read_file Cargo.toml", "one"]);
+        assert!(shown[2].starts_with(&warning), "{shown:?}");
+        assert_eq!(shown[3..5], ["● read_file Cargo.toml", "two"]);
+        assert_eq!(shown[5], format!("Session log: {}", path.display()));
     }
 }
 
@@ -1656,8 +1657,8 @@ mod while_waiting {
         assert_eq!(
             shown[..3],
             [
+                "● write_file src/main.rs",
                 "Stopped: the request to the model was interrupted",
-                "Tool calls in this turn: write_file (1)",
                 "Files written in this turn: src/main.rs",
             ]
         );

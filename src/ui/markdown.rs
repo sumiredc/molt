@@ -47,9 +47,7 @@ impl Renderer {
         // A list item keeps its marker, as `•` for `-`, `*` and `+`.
         let indent = &line[..line.len() - trimmed.len()];
         let (marker, rest) = match trimmed.split_at_checked(2) {
-            Some((m, rest)) if matches!(m, "- " | "* " | "+ ") => {
-                (format!("{indent}• "), rest)
-            }
+            Some(("- " | "* " | "+ ", rest)) => (format!("{indent}• "), rest),
             _ => (indent.to_owned(), trimmed),
         };
         let mut spans = spans(rest);

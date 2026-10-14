@@ -147,6 +147,16 @@ pub struct Resumed {
     pub turn: Turn,
 }
 
+/// The choice made at a boundary, once applied and before the turn goes on with it.
+#[derive(Debug)]
+pub struct Resolved<'a> {
+    pub chosen: &'a Resolution,
+    /// Taking the step back for ②, as in [`Resumed::taken_back`].
+    pub taken_back: Option<&'a TakenBack>,
+    /// Saving the profile, as in [`Resumed::saved`].
+    pub saved: &'a Result<(), StoreError>,
+}
+
 /// What taking a step back did (PRD UC3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakenBack {
@@ -176,6 +186,9 @@ pub struct Turn {
     pub tool_calls: Vec<String>,
     /// What the model said last: the summary passed to `finish`, or the text of its last reply.
     pub reply: Option<String>,
+    /// Whether [`Turn::reply`] is a text the user was shown as it came (PRD §8.1), not the summary
+    /// passed to `finish`.
+    pub reply_shown: bool,
     /// The files written in this turn, as the model named them, each once, in the order first
     /// written.
     pub written: Vec<String>,
@@ -573,6 +586,7 @@ impl<'a> MainLine<'a> {
             end: TurnEnd::Finished,
             tool_calls: held.tool_calls,
             reply: None,
+            reply_shown: false,
             written: held.written,
             compile_fixes: held.compile_fixes,
             changes,
@@ -592,6 +606,11 @@ impl<'a> MainLine<'a> {
             // lines (UC3), so the end of the turn checks the build again.
             progress.unchecked = true;
         }
+        approver.resolved(&Resolved {
+            chosen: resolution,
+            taken_back: taken_back.as_ref(),
+            saved: &saved,
+        });
         let turn = self.run(turn, progress, rewritten, approver);
         Some(Box::new(Resumed {
             chosen: resolution.clone(),
@@ -670,6 +689,7 @@ impl<'a> MainLine<'a> {
             end: TurnEnd::Finished,
             tool_calls: Vec::new(),
             reply: None,
+            reply_shown: false,
             written: Vec::new(),
             compile_fixes: 0,
             changes: Vec::new(),
@@ -733,10 +753,12 @@ impl<'a> MainLine<'a> {
             let request = self.request();
             self.log.record_request(&request);
             approver.working(Some(THINKING));
-            let response = self.client.chat_streamed(&request, &mut |event| match event {
-                StreamEvent::Line(line) => approver.text(&line),
-                StreamEvent::Reasoning => {}
-            });
+            let response = self
+                .client
+                .chat_streamed(&request, &mut |event| match event {
+                    StreamEvent::Line(line) => approver.text(&line),
+                    StreamEvent::Reasoning => {}
+                });
             approver.text_end();
             approver.working(None);
             let response = match response {
@@ -745,6 +767,7 @@ impl<'a> MainLine<'a> {
             };
             if let Some(content) = response.content.as_ref().filter(|c| !c.trim().is_empty()) {
                 turn.reply = Some(content.clone());
+                turn.reply_shown = true;
             }
             self.messages.push(Message::Assistant {
                 content: response.content,
@@ -841,6 +864,7 @@ impl<'a> MainLine<'a> {
                 Ok(args) => {
                     if let Some(summary) = args.summary.filter(|s| !s.trim().is_empty()) {
                         turn.reply = Some(summary);
+                        turn.reply_shown = false;
                     }
                     (prompts::FINISHED.to_owned(), Next::Stop(TurnEnd::Finished))
                 }

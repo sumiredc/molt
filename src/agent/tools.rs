@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::agent::mainline::CommitProposal;
+use crate::agent::mainline::{CommitProposal, Resolved};
 use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
 use crate::profile::status::ItemKey;
@@ -72,6 +72,10 @@ pub trait Approver {
 
     /// The line of a tool call molt ran (`● read_file src/main.rs`).
     fn tool_ran(&mut self, _line: &str) {}
+
+    /// The choice made at a boundary was applied, and the turn goes on with it now: what it did
+    /// is shown before the rest of the turn (PRD UC3).
+    fn resolved(&mut self, _resolved: &Resolved<'_>) {}
 }
 
 /// Why a tool did nothing. Each is returned to the model as the tool's result.

@@ -151,7 +151,9 @@ impl Drop for Screen {
 }
 
 fn lock(state: &Arc<Mutex<State>>) -> MutexGuard<'_, State> {
-    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 /// Turns the spinner until there is nothing to show.

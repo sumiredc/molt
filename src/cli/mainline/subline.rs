@@ -471,8 +471,8 @@ mod open {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
                 STOPPED,
-                "Tool calls in this turn: write_file (1)",
                 ENTER,
                 STEP,
                 EXPLAINED,

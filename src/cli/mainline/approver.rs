@@ -1,16 +1,35 @@
 //! Asking the user for approval of the tools' operations through a [`Ui`] (PRD §8.4).
 
+use crate::agent::mainline::Resolved;
 use crate::agent::tools::{ApprovalRequest, Approver};
 use crate::ui::Ui;
+use crate::ui::markdown::Folder;
 
-/// Asks for approval through a [`Ui`], so the tools can ask the user (PRD §8.4).
+/// Asks for approval through a [`Ui`], so the tools can ask the user (PRD §8.4), and shows what
+/// the main line is doing while the user waits (PRD §8.1).
 pub struct UiApprover<'a> {
     ui: &'a mut dyn Ui,
+    /// Folds the code blocks of the model's text.
+    folder: Folder,
+    /// The text of the response so far, when the [`Ui`] shows it whole.
+    held: Vec<String>,
 }
 
 impl<'a> UiApprover<'a> {
     pub fn new(ui: &'a mut dyn Ui) -> Self {
-        Self { ui }
+        Self {
+            ui,
+            folder: Folder::default(),
+            held: Vec::new(),
+        }
+    }
+
+    fn put(&mut self, line: String) {
+        if self.ui.streams() {
+            self.ui.stream_line(&line, "");
+        } else {
+            self.held.push(line);
+        }
     }
 }
 
@@ -34,6 +53,40 @@ impl Approver for UiApprover<'_> {
                     .show(&format!("could not ask for approval: {error}"));
                 false
             }
+        }
+    }
+
+    fn working(&mut self, doing: Option<&str>) {
+        self.ui.status(doing);
+    }
+
+    fn text(&mut self, line: &str) {
+        if let Some(line) = self.folder.line(line) {
+            self.put(line);
+        }
+    }
+
+    fn text_end(&mut self) {
+        if let Some(line) = self.folder.end() {
+            self.put(line);
+        }
+        if self.ui.streams() {
+            self.ui.end_stream();
+            return;
+        }
+        let text = std::mem::take(&mut self.held).join("\n");
+        if !text.trim().is_empty() {
+            self.ui.show_markdown(&text, "");
+        }
+    }
+
+    fn tool_ran(&mut self, line: &str) {
+        self.ui.show(line);
+    }
+
+    fn resolved(&mut self, resolved: &Resolved<'_>) {
+        for line in super::resolved_text(resolved) {
+            self.ui.show(&line);
         }
     }
 }
@@ -74,6 +127,42 @@ mod tests {
             ui.shown(),
             ["could not ask for approval: the ui script has no step left for a confirmation"]
         );
+    }
+
+    #[test]
+    fn the_models_text_is_shown_once_complete_with_its_code_blocks_folded() {
+        let mut ui = ScriptedUi::new([]);
+        let mut approver = UiApprover::new(&mut ui);
+        for line in [
+            "I will add this:",
+            "```rust",
+            "fn main() {}",
+            "```",
+            "Done.",
+        ] {
+            approver.text(line);
+        }
+        approver.text_end();
+        approver.text_end();
+        assert_eq!(ui.shown(), ["I will add this:\n[code: 1 line]\nDone."]);
+    }
+
+    #[test]
+    fn a_code_block_not_closed_is_folded_to_the_end_of_the_text() {
+        let mut ui = ScriptedUi::new([]);
+        let mut approver = UiApprover::new(&mut ui);
+        for line in ["Here:", "```", "a", "b"] {
+            approver.text(line);
+        }
+        approver.text_end();
+        assert_eq!(ui.shown(), ["Here:\n[code: 2 lines]"]);
+    }
+
+    #[test]
+    fn a_tool_line_is_shown_as_it_is() {
+        let mut ui = ScriptedUi::new([]);
+        UiApprover::new(&mut ui).tool_ran("● read_file src/main.rs");
+        assert_eq!(ui.shown(), ["● read_file src/main.rs"]);
     }
 
     #[test]
