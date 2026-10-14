@@ -67,8 +67,9 @@ pub trait Approver {
     /// A line of the model's text, as it arrives.
     fn text(&mut self, _line: &str) {}
 
-    /// The end of the text of one response.
-    fn text_end(&mut self) {}
+    /// The end of the text of one response: `complete` unless the request failed or was
+    /// interrupted, when the text that came is not the response.
+    fn text_end(&mut self, _complete: bool) {}
 
     /// The line of a tool call molt ran (`● read_file src/main.rs`).
     fn tool_ran(&mut self, _line: &str) {}

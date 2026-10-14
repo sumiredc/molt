@@ -26,18 +26,16 @@ pub enum Span {
 /// lists. A line is rendered once it is complete; a code block is known by its fences.
 #[derive(Debug, Default)]
 pub struct Renderer {
-    in_code: bool,
+    blocks: Blocks,
 }
 
 impl Renderer {
     /// What `line` is, given the lines before it.
     pub fn line(&mut self, line: &str) -> Styled {
-        if is_fence(line) {
-            self.in_code = !self.in_code;
-            return Styled::Code(None);
-        }
-        if self.in_code {
-            return Styled::Code(Some(line.to_owned()));
+        match self.blocks.line(line) {
+            Line::Opens | Line::Closes => return Styled::Code(None),
+            Line::Code => return Styled::Code(Some(line.to_owned())),
+            Line::Text => {}
         }
         let trimmed = line.trim_start();
         let hashes = trimmed.chars().take_while(|&c| c == '#').count();
@@ -58,42 +56,97 @@ impl Renderer {
     }
 }
 
-/// Whether `line` opens or closes a code block.
-pub fn is_fence(line: &str) -> bool {
-    let trimmed = line.trim_start();
-    trimmed.starts_with("```") || trimmed.starts_with("~~~")
+/// The fence that opened a code block: its character and its length.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fence {
+    marker: char,
+    length: usize,
 }
 
-/// The spans of a line of prose: `**bold**`, `*italic*` or `_italic_`, and `` `code` ``. A marker
-/// not closed on the line stays as it is.
+impl Fence {
+    /// The fence `line` opens a code block with: 3 or more of `` ` `` or `~`, an info string
+    /// (`rust`) allowed after them.
+    pub fn opened_by(line: &str) -> Option<Fence> {
+        let trimmed = line.trim_start();
+        let marker = trimmed.chars().next().filter(|c| matches!(c, '`' | '~'))?;
+        let length = trimmed.chars().take_while(|&c| c == marker).count();
+        (length >= 3).then_some(Fence { marker, length })
+    }
+
+    /// Whether `line` closes the block this fence opened: the same character, at least as many,
+    /// and nothing after them.
+    pub fn closed_by(self, line: &str) -> bool {
+        let trimmed = line.trim();
+        let length = trimmed.chars().take_while(|&c| c == self.marker).count();
+        length >= self.length && trimmed.chars().count() == length
+    }
+}
+
+/// Tracks the code blocks of a text line by line.
+#[derive(Debug, Default, Clone, Copy)]
+pub struct Blocks {
+    open: Option<Fence>,
+}
+
+/// What a line is to [`Blocks`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Line {
+    /// Outside any code block.
+    Text,
+    /// The fence that opens a code block.
+    Opens,
+    /// A line inside a code block.
+    Code,
+    /// The fence that closes the code block.
+    Closes,
+}
+
+impl Blocks {
+    /// What `line` is, given the lines before it.
+    pub fn line(&mut self, line: &str) -> Line {
+        match self.open {
+            Some(fence) if fence.closed_by(line) => {
+                self.open = None;
+                Line::Closes
+            }
+            Some(_) => Line::Code,
+            None => match Fence::opened_by(line) {
+                Some(fence) => {
+                    self.open = Some(fence);
+                    Line::Opens
+                }
+                None => Line::Text,
+            },
+        }
+    }
+
+    /// Whether a code block is open.
+    pub fn is_open(&self) -> bool {
+        self.open.is_some()
+    }
+}
+
+/// The spans of a line of prose: `**bold**`, `*italic*` or `_italic_`, and `` `code` ``. Emphasis
+/// opens and closes only at the ends of a word, with no space just inside its markers, so that
+/// `snake_case_name`, `2 * 3` and `src/*.rs` stay as they are. A marker not closed on the line
+/// stays as it is.
 fn spans(text: &str) -> Vec<Span> {
+    let chars: Vec<char> = text.chars().collect();
     let mut spans = Vec::new();
     let mut plain = String::new();
-    let mut rest = text;
-    while !rest.is_empty() {
-        let found = [("`", 1), ("**", 2), ("*", 1), ("_", 1)]
-            .into_iter()
-            .find_map(|(marker, _)| {
-                let after = rest.strip_prefix(marker)?;
-                let end = after.find(marker)?;
-                (end > 0).then(|| (marker, &after[..end], &after[end + marker.len()..]))
-            });
-        match found {
-            Some((marker, inner, after)) => {
+    let mut at = 0;
+    while at < chars.len() {
+        match emphasis(&chars, at) {
+            Some((span, next)) => {
                 if !plain.is_empty() {
                     spans.push(Span::Plain(std::mem::take(&mut plain)));
                 }
-                spans.push(match marker {
-                    "`" => Span::Code(inner.to_owned()),
-                    "**" => Span::Bold(inner.to_owned()),
-                    _ => Span::Italic(inner.to_owned()),
-                });
-                rest = after;
+                spans.push(span);
+                at = next;
             }
             None => {
-                let mut chars = rest.chars();
-                plain.push(chars.next().expect("not empty"));
-                rest = chars.as_str();
+                plain.push(chars[at]);
+                at += 1;
             }
         }
     }
@@ -103,39 +156,78 @@ fn spans(text: &str) -> Vec<Span> {
     spans
 }
 
+/// The span that opens at `at` in `chars`, and where the text after it starts.
+fn emphasis(chars: &[char], at: usize) -> Option<(Span, usize)> {
+    let starts = |marker: &str| {
+        marker
+            .chars()
+            .enumerate()
+            .all(|(i, c)| chars.get(at + i) == Some(&c))
+    };
+    let marker = ["`", "**", "*", "_"].into_iter().find(|m| starts(m))?;
+    let width = marker.chars().count();
+    let first = marker.chars().next()?;
+    let inner_start = at + width;
+    let word = |i: usize| chars.get(i).is_some_and(|c| c.is_alphanumeric());
+    if marker != "`" {
+        // Emphasis opens at the start of a word: after a space or an opening bracket or quote,
+        // and before a character that is not a space.
+        let after_space =
+            at == 0 || chars[at - 1].is_whitespace() || "([{\"'".contains(chars[at - 1]);
+        if !after_space || chars.get(inner_start).is_none_or(|c| c.is_whitespace()) {
+            return None;
+        }
+    }
+    let mut end = inner_start + 1;
+    while end + width <= chars.len() {
+        let closes = (0..width).all(|i| chars[end + i] == first)
+            && (marker == "`" || (!chars[end - 1].is_whitespace() && !word(end + width)));
+        if closes && end > inner_start {
+            let inner: String = chars[inner_start..end].iter().collect();
+            let span = match marker {
+                "`" => Span::Code(inner),
+                "**" => Span::Bold(inner),
+                _ => Span::Italic(inner),
+            };
+            return Some((span, end + width));
+        }
+        end += 1;
+    }
+    None
+}
+
 /// Folds each code block of the main line's text into one line (PRD §8.1): code reaches the user
 /// only as a step or a diff. Lines go in one at a time; what to show comes out.
 #[derive(Debug, Default)]
 pub struct Folder {
-    /// The lines of the code block open, if one is.
-    open: Option<usize>,
+    blocks: Blocks,
+    /// The lines of the code block open so far.
+    lines: usize,
 }
 
 impl Folder {
     /// What to show for `line`: itself outside a code block, nothing inside one, and the folded
     /// line when the block closes.
     pub fn line(&mut self, line: &str) -> Option<String> {
-        match (&mut self.open, is_fence(line)) {
-            (None, true) => {
-                self.open = Some(0);
+        match self.blocks.line(line) {
+            Line::Text => Some(line.to_owned()),
+            Line::Opens => {
+                self.lines = 0;
                 None
             }
-            (None, false) => Some(line.to_owned()),
-            (Some(count), false) => {
-                *count += 1;
+            Line::Code => {
+                self.lines += 1;
                 None
             }
-            (Some(count), true) => {
-                let folded = folded(*count);
-                self.open = None;
-                Some(folded)
-            }
+            Line::Closes => Some(folded(self.lines)),
         }
     }
 
     /// The end of the text: a code block not closed is folded to here.
     pub fn end(&mut self) -> Option<String> {
-        self.open.take().map(folded)
+        let open = self.blocks.is_open();
+        self.blocks = Blocks::default();
+        open.then(|| folded(self.lines))
     }
 }
 
@@ -160,32 +252,24 @@ pub fn fold(text: &str) -> String {
 /// comparison shows after it (PRD §8.6). Every other line passes.
 #[derive(Debug, Default)]
 pub struct HoldFirstCode {
-    state: Hold,
-}
-
-#[derive(Debug, Default, PartialEq, Eq)]
-enum Hold {
-    #[default]
-    Before,
-    Inside,
-    After,
+    blocks: Blocks,
+    /// Whether the first code block has closed.
+    past: bool,
 }
 
 impl HoldFirstCode {
     /// Whether `line` is to be shown as it streams in.
     pub fn passes(&mut self, line: &str) -> bool {
-        match self.state {
-            Hold::Before if is_fence(line) => {
-                self.state = Hold::Inside;
+        if self.past {
+            return true;
+        }
+        match self.blocks.line(line) {
+            Line::Text => true,
+            Line::Opens | Line::Code => false,
+            Line::Closes => {
+                self.past = true;
                 false
             }
-            Hold::Inside => {
-                if is_fence(line) {
-                    self.state = Hold::After;
-                }
-                false
-            }
-            Hold::Before | Hold::After => true,
         }
     }
 }

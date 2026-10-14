@@ -1,7 +1,8 @@
-//! The [`Ui`] for a person at a terminal, all through rustyline (PRD §8.1): lines with history and
-//! editing, and choices and approvals as lines too, so that Ctrl-C means the same at every
-//! question (`Input::Interrupted` or no answer) and never ends molt by itself. The form alone is
-//! drawn with crossterm ([`form`]).
+//! The [`Ui`] for a person at a terminal (PRD §8.1). Questions go through rustyline: lines with
+//! history and editing, and choices and approvals as lines too, so that Ctrl-C means the same at
+//! every question (`Input::Interrupted` or no answer) and never ends molt by itself. What is shown
+//! goes through [`screen`], which keeps the status line and writes styles with crossterm, and the
+//! form is drawn with crossterm ([`form`]).
 
 mod form;
 mod screen;
@@ -63,7 +64,8 @@ impl Ui for TerminalUi {
 
     fn show_markdown(&mut self, text: &str, indent: &str) {
         if !self.screen.styled() {
-            self.screen.print(&super::indented(text, indent));
+            self.screen
+                .print(&super::indented(&super::printable(text), indent));
             return;
         }
         for line in text.lines() {

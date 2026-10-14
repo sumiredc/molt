@@ -15,10 +15,11 @@ use crate::ui::{Input, Tone, Ui};
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
 
-/// What the user is shown while the explanation comes, and while an answer comes (PRD §8.1).
+/// What the user is shown while the explanation comes (PRD §8.1).
 const EXPLAINING: &str = "Explaining…";
 /// What the user is shown while `/done` checks and reviews their lines (PRD §8.1).
 const CHECKING: &str = "Checking your lines…";
+/// What the user is shown while an answer, the guidance of ③ or the policy of ② comes.
 pub(super) const THINKING: &str = "Thinking…";
 
 /// What the user can do on the side line (UC3).
@@ -143,7 +144,10 @@ fn explain(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Result<(), 
     ui.status(None);
     let explanation = explained?;
     match (streams, &explanation.tail) {
-        (true, Some(tail)) => ui.show_markdown(tail, "  "),
+        (true, Some(tail)) => {
+            ui.show("");
+            ui.show_markdown(tail, "  ");
+        }
         (true, None) => {}
         (false, _) => ui.show_markdown(&explanation.to_string(), "  "),
     }
@@ -403,13 +407,14 @@ mod open {
         let shown = ui.shown();
         let at = shown.iter().position(|text| text == ENTER).unwrap();
         assert_eq!(
-            shown[at + 1..at + 12],
+            shown[at + 1..at + 13],
             [
                 STEP,
                 "  `dbg_macro` (macros)",
                 "",
                 "  dbg! prints a value.",
                 "  It returns it, too.",
+                "",
                 "  Without `dbg_macro`, within your profile:\n  ```rust\n  fn main() {}\n  ```",
                 HINT_SHOWN,
                 // An answer streams whole, its code included.

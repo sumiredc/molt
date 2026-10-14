@@ -17,6 +17,7 @@ use crate::profile::element::Element;
 use crate::profile::status::{ItemKey, Status};
 use crate::profile::store::Profile;
 use crate::repo_scan::{self, MAX_PLACES, RepoScan};
+use crate::ui::markdown::{Blocks, Line};
 
 /// The items of `items` the user has seen before: `seen` in `profile` (PRD §7). A crate is seen
 /// when an entry of any spelling the checker takes for it ([`crate_key`]) is.
@@ -222,16 +223,15 @@ pub(crate) fn similar(scan: &RepoScan, items: &[ItemKey]) -> Option<String> {
 /// `None` when there is no block or nothing in it. A block left open runs to the end.
 fn split(reply: &str) -> (String, Option<String>) {
     let lines: Vec<&str> = reply.lines().collect();
-    let is_fence = |line: &&str| {
-        let line = line.trim_start();
-        line.starts_with("```") || line.starts_with("~~~")
-    };
-    let Some(open) = lines.iter().position(is_fence) else {
+    // As the side line holds the block back while the reply streams in (PRD §8.1).
+    let mut blocks = Blocks::default();
+    let kinds: Vec<Line> = lines.iter().map(|line| blocks.line(line)).collect();
+    let Some(open) = kinds.iter().position(|kind| *kind == Line::Opens) else {
         return (reply.trim().to_owned(), None);
     };
-    let close = lines[open + 1..]
+    let close = kinds[open + 1..]
         .iter()
-        .position(is_fence)
+        .position(|kind| *kind == Line::Closes)
         .map_or(lines.len(), |at| open + 1 + at);
     let before = lines[..open].join("\n");
     let after = lines.get(close + 1..).unwrap_or_default().join("\n");

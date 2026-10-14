@@ -2,7 +2,8 @@
 //! of several items and approving an operation.
 //!
 //! `TerminalUi` talks to a person through rustyline (lines with history and editing, and choices
-//! and approvals as lines), and draws the [`Form`] of `molt init` with crossterm (PRD §8.1).
+//! and approvals as lines), and writes the status line, styles and the [`Form`] of `molt init`
+//! with crossterm (PRD §8.1).
 //! [`ScriptedUi`] answers from a script instead, so tests and `--ui-script` (PRD §8.6) run without
 //! a terminal.
 
@@ -64,7 +65,7 @@ pub trait Ui {
     /// Shows the model's `text`, each line after `indent`, Markdown rendered where it can be
     /// (PRD §8.1).
     fn show_markdown(&mut self, text: &str, indent: &str) {
-        self.show(&indented(text, indent));
+        self.show(&indented(&printable(text), indent));
     }
 
     /// What molt is doing while the user waits (`Thinking…`), or `None` when it is done
@@ -82,6 +83,22 @@ pub trait Ui {
 
     /// The end of a text shown with [`Ui::stream_line`].
     fn end_stream(&mut self) {}
+}
+
+/// `text` without the control characters but tabs and line breaks: what the model wrote is shown
+/// as text, never as escapes that move the cursor or color the terminal (PRD §8.1).
+pub(crate) fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n'))
+    {
+        text.chars()
+            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
+    }
 }
 
 /// `text` with `indent` before each line that is not blank. A blank line stays empty.

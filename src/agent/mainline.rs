@@ -32,7 +32,7 @@ use crate::llm::{
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, StoreError, Timestamp};
 use crate::session::{self, Event, SessionLog};
-use crate::workspace::cargo::{CargoError, CargoOutput, CrateName};
+use crate::workspace::cargo::{CargoError, CargoOutput, CargoRequest, CrateName};
 
 pub use commit::{CommitOutcome, CommitProposal};
 
@@ -186,8 +186,8 @@ pub struct Turn {
     pub tool_calls: Vec<String>,
     /// What the model said last: the summary passed to `finish`, or the text of its last reply.
     pub reply: Option<String>,
-    /// Whether [`Turn::reply`] is a text the user was shown as it came (PRD §8.1), not the summary
-    /// passed to `finish`.
+    /// Whether [`Turn::reply`] is a text of the model the user was shown already, as it came or
+    /// once its response was complete (PRD §8.1), not the summary passed to `finish`.
     pub reply_shown: bool,
     /// The files written in this turn, as the model named them, each once, in the order first
     /// written.
@@ -759,7 +759,7 @@ impl<'a> MainLine<'a> {
                     StreamEvent::Line(line) => approver.text(&line),
                     StreamEvent::Reasoning => {}
                 });
-            approver.text_end();
+            approver.text_end(response.is_ok());
             approver.working(None);
             let response = match response {
                 Ok(response) => response,
@@ -853,8 +853,14 @@ impl<'a> MainLine<'a> {
                 return (result, next);
             }
             GIT_COMMIT => {
+                let before = turn.commits.len();
                 let ran = self.commit_tool(arguments, turn, progress, approver);
-                approver.tool_ran(&tool_line(GIT_COMMIT, &serde_json::Map::new()));
+                // A commit the user did not approve, or not proposed, was not run (PRD §8.1).
+                let committed = turn.commits.len() > before
+                    && !matches!(turn.commits.last(), Some(CommitOutcome::NotApproved));
+                if committed {
+                    approver.tool_ran(&tool_line(GIT_COMMIT, &serde_json::Map::new()));
+                }
                 return ran;
             }
             _ => {}
@@ -884,14 +890,23 @@ impl<'a> MainLine<'a> {
             return (prompts::crate_add_before_step(name), Next::Continue);
         }
         let line = tool_line(&call.name, &arguments);
+        // Only a subcommand molt runs names the wait: the status line holds molt's own words.
         if call.name == RUN_CARGO
-            && let Some(RunCargoArgs { subcommand, .. }) = cargo_args(&arguments)
+            && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+            && let Ok(request) = CargoRequest::parse(&subcommand, &args)
         {
+            let subcommand = match request {
+                CargoRequest::Run(run) => run.as_str(),
+                CargoRequest::Add(_) => "add",
+            };
             approver.working(Some(&format!("Running cargo {subcommand}…")));
         }
         let dispatched = self.tools.dispatch(&call.name, &arguments, approver);
         approver.working(None);
-        approver.tool_ran(&line);
+        // A call the user did not approve was not run (PRD §8.1).
+        if !matches!(dispatched, Err(ToolError::NotApproved)) {
+            approver.tool_ran(&line);
+        }
         let result = match dispatched {
             Ok(output) => {
                 if call.name == RUN_CARGO

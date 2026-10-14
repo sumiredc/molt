@@ -116,8 +116,10 @@ impl MainLine<'_> {
             return None;
         }
         let preview = self.preview(self.uncommitted.clone()).ok()?;
-        let message = self.commit_message(&preview)?;
-        Some(self.propose(message, preview, approver))
+        approver.working(Some("Writing the commit message…"));
+        let message = self.commit_message(&preview);
+        approver.working(None);
+        Some(self.propose(message?, preview, approver))
     }
 
     /// Merges `changes` into the uncommitted files. A file committed in the turn (`committed`)

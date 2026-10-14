@@ -478,6 +478,12 @@ fn unlock_rewrite_user_wrote_and_next_at_four_boundaries_each_hand_the_main_line
         "stdout: {stdout}\nstderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
+    // Output that is not a terminal has no escapes and no carriage returns (PRD §8.1), on the
+    // side line too: the step's lines, the explanations and the choices.
+    assert!(
+        !stdout.contains('\x1b') && !stdout.contains('\r'),
+        "{stdout:?}"
+    );
     assert_in_order(
         &stdout,
         &[

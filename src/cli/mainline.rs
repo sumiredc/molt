@@ -23,6 +23,7 @@ use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::{self, SessionLog};
+use crate::ui::markdown::fold;
 use crate::ui::{Input, ScriptedUi, TerminalUi, Ui};
 use crate::workspace::cargo::{Cargo, CargoError, CargoOutput};
 use crate::workspace::path::Root;
@@ -183,7 +184,7 @@ fn requests(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     // A text of the model was shown as it came; only the summary passed to `finish` is not.
     if let Some(reply) = turn.reply.as_ref().filter(|_| !turn.reply_shown) {
-        ui.show(reply);
+        ui.show_markdown(&fold(reply), "");
     }
     show_stop(ui, turn);
     // At a boundary the turn is held for the user's choice, not done: nothing was checked yet.
@@ -470,7 +471,10 @@ fn names(items: &[ItemKey]) -> String {
 /// was written before the boundary is shown with its `cargo check`, and the main line waits for
 /// the next request.
 fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
+    // What the turn wrote before the step is checked again.
+    ui.status(Some("Running cargo check…"));
     let withdrawal = agent.withdraw();
+    ui.status(None);
     ui.show("Request withdrawn.");
     if let Some(taken) = &withdrawal.taken_back {
         ui.show(&taken_back_text(taken));

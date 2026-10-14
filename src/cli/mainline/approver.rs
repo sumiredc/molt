@@ -2,8 +2,8 @@
 
 use crate::agent::mainline::Resolved;
 use crate::agent::tools::{ApprovalRequest, Approver};
-use crate::ui::Ui;
 use crate::ui::markdown::Folder;
+use crate::ui::{Ui, printable};
 
 /// Asks for approval through a [`Ui`], so the tools can ask the user (PRD §8.4), and shows what
 /// the main line is doing while the user waits (PRD §8.1).
@@ -13,6 +13,8 @@ pub struct UiApprover<'a> {
     folder: Folder,
     /// The text of the response so far, when the [`Ui`] shows it whole.
     held: Vec<String>,
+    /// What molt is doing, shown again after a question took the status line away.
+    doing: Option<String>,
 }
 
 impl<'a> UiApprover<'a> {
@@ -21,6 +23,7 @@ impl<'a> UiApprover<'a> {
             ui,
             folder: Folder::default(),
             held: Vec::new(),
+            doing: None,
         }
     }
 
@@ -46,6 +49,11 @@ impl Approver for UiApprover<'_> {
                 .map(|answer| answer == Some(true)),
             ApprovalRequest::GitCommit(proposal) => super::commit::confirm(self.ui, proposal),
         };
+        // Asking took the status line away; what molt does next, such as `cargo add`, is still
+        // waited for.
+        if let Some(doing) = &self.doing {
+            self.ui.status(Some(doing));
+        }
         match answer {
             Ok(approved) => approved,
             Err(error) => {
@@ -57,6 +65,7 @@ impl Approver for UiApprover<'_> {
     }
 
     fn working(&mut self, doing: Option<&str>) {
+        self.doing = doing.map(str::to_owned);
         self.ui.status(doing);
     }
 
@@ -66,7 +75,7 @@ impl Approver for UiApprover<'_> {
         }
     }
 
-    fn text_end(&mut self) {
+    fn text_end(&mut self, complete: bool) {
         if let Some(line) = self.folder.end() {
             self.put(line);
         }
@@ -74,14 +83,15 @@ impl Approver for UiApprover<'_> {
             self.ui.end_stream();
             return;
         }
+        // Text shown whole is shown only once its response is complete (PRD §8.1).
         let text = std::mem::take(&mut self.held).join("\n");
-        if !text.trim().is_empty() {
+        if complete && !text.trim().is_empty() {
             self.ui.show_markdown(&text, "");
         }
     }
 
     fn tool_ran(&mut self, line: &str) {
-        self.ui.show(line);
+        self.ui.show(&printable(line));
     }
 
     fn resolved(&mut self, resolved: &Resolved<'_>) {
@@ -142,8 +152,8 @@ mod tests {
         ] {
             approver.text(line);
         }
-        approver.text_end();
-        approver.text_end();
+        approver.text_end(true);
+        approver.text_end(true);
         assert_eq!(ui.shown(), ["I will add this:\n[code: 1 line]\nDone."]);
     }
 
@@ -161,7 +171,7 @@ mod tests {
         ] {
             approver.text(line);
         }
-        approver.text_end();
+        approver.text_end(true);
         approver.working(None);
         assert_eq!(ui.shown(), ["I will add this:", "[code: 2 lines]"]);
         assert_eq!(ui.statuses(), [Some("Thinking…".to_owned()), None]);
@@ -174,8 +184,26 @@ mod tests {
         for line in ["Here:", "```", "a", "b"] {
             approver.text(line);
         }
-        approver.text_end();
+        approver.text_end(true);
         assert_eq!(ui.shown(), ["Here:\n[code: 2 lines]"]);
+    }
+
+    #[test]
+    fn the_text_of_a_response_that_failed_is_not_shown_whole() {
+        let mut ui = ScriptedUi::new([]);
+        let mut approver = UiApprover::new(&mut ui);
+        approver.text("half of an");
+        approver.text_end(false);
+        approver.text("answer");
+        approver.text_end(true);
+        assert_eq!(ui.shown(), ["answer"]);
+    }
+
+    #[test]
+    fn a_tool_line_loses_its_control_characters() {
+        let mut ui = ScriptedUi::new([]);
+        UiApprover::new(&mut ui).tool_ran("● read_file a\x1b[31m\rb");
+        assert_eq!(ui.shown(), ["● read_file a[31mb"]);
     }
 
     #[test]

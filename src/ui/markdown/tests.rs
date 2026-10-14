@@ -95,3 +95,39 @@ fn only_the_first_code_block_of_an_explanation_is_held_back() {
 
     assert_eq!(passed, ["idea", "after", "```", "second", "```"]);
 }
+
+#[test]
+fn emphasis_needs_a_character_that_is_not_a_space_inside_its_markers() {
+    assert_eq!(
+        render(&["2 * 3 * 4 and src/*.rs or tests/*.rs"]),
+        [Styled::Prose(vec![Span::Plain(
+            "2 * 3 * 4 and src/*.rs or tests/*.rs".to_owned()
+        )])]
+    );
+}
+
+#[test]
+fn an_underscore_inside_a_word_is_not_emphasis() {
+    assert_eq!(
+        render(&["call my_var_name, then _this_"]),
+        [Styled::Prose(vec![
+            Span::Plain("call my_var_name, then ".to_owned()),
+            Span::Italic("this".to_owned()),
+        ])]
+    );
+}
+
+#[test]
+fn a_block_closes_only_at_a_fence_of_its_own_kind_with_nothing_after_it() {
+    assert_eq!(
+        render(&["````markdown", "```rust", "~~~", "```", "````", "after"]),
+        [
+            Styled::Code(None),
+            Styled::Code(Some("```rust".to_owned())),
+            Styled::Code(Some("~~~".to_owned())),
+            Styled::Code(Some("```".to_owned())),
+            Styled::Code(None),
+            Styled::Prose(vec![Span::Plain("after".to_owned())]),
+        ]
+    );
+}

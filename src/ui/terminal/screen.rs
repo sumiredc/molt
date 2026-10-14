@@ -130,8 +130,13 @@ impl Screen {
 
     /// Prints a line of the model's Markdown after `indent`, rendered.
     pub(super) fn markdown_line(&mut self, line: &str, indent: &str) {
-        if let Some(rendered) = self.style.markdown(&mut self.renderer, line) {
-            self.print(&format!("{indent}{rendered}"));
+        let line = super::super::printable(line);
+        if let Some(rendered) = self.style.markdown(&mut self.renderer, &line) {
+            if rendered.is_empty() {
+                self.print("");
+            } else {
+                self.print(&format!("{indent}{rendered}"));
+            }
         }
     }
 
@@ -214,7 +219,7 @@ fn draw(state: &mut State, out: &mut impl Write, styled: bool) {
     }
     let elapsed = since.elapsed();
     let frame = FRAMES[(elapsed.as_millis() / TICK.as_millis()) as usize % FRAMES.len()];
-    let line = format!("{frame} {doing} {}s  (Ctrl-C to stop)", elapsed.as_secs());
+    let line = format!("{frame} {doing} {}s", elapsed.as_secs());
     let width = terminal::size().map_or(80, |(columns, _)| usize::from(columns));
     let line: String = line.chars().take(width.saturating_sub(1)).collect();
     let _ = write!(out, "{}", line.dim());

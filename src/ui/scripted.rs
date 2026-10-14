@@ -248,7 +248,7 @@ impl Ui for ScriptedUi {
     }
 
     fn stream_line(&mut self, line: &str, indent: &str) {
-        self.show(&super::indented(line, indent));
+        self.show(&super::indented(&super::printable(line), indent));
     }
 
     fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
