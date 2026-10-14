@@ -10,12 +10,13 @@ mod user_wrote;
 use std::collections::BTreeMap;
 use std::path::Path;
 
+pub use explain::Explanation;
 pub use user_wrote::{Done, Failure};
 
 use super::mainline::{Boundary, Change};
 use super::prompts;
 use super::tools::Tools;
-use crate::llm::{ChatClient, ChatError, Message, Role, Router};
+use crate::llm::{ChatClient, ChatError, Message, Role, Router, StreamEvent};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::SessionLog;
@@ -342,15 +343,25 @@ impl<'a> SubLine<'a> {
         self.messages.len() > 1
     }
 
-    /// Asks the `reason` model to explain the idea of the items, and returns the explanation. When
-    /// the request fails, nothing is kept, and the user can still ask (see [`SubLine::ask`]). The
-    /// request body goes to `log` (PRD §8.8).
-    pub fn explain(&mut self, log: &SessionLog) -> Result<String, ChatError> {
+    /// The part of the explanation known before it comes ([`Explanation::head`]).
+    pub fn explanation_head(&self) -> String {
+        explain::head(&self.boundary.items, &self.seen)
+    }
+
+    /// Asks the `reason` model to explain the idea of the items, and returns the explanation. Each
+    /// line of the reply goes to `on_line` as it arrives (PRD §8.1). When the request fails,
+    /// nothing is kept, and the user can still ask (see [`SubLine::ask`]). The request body goes
+    /// to `log` (PRD §8.8).
+    pub fn explain(
+        &mut self,
+        log: &SessionLog,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<Explanation, ChatError> {
         // Only the explanation asks for the comparison: a question or the policy of ② asked
         // before it came goes with the context alone.
         let content = format!("{} {}", self.context, self.compare);
         let user = Message::User { content };
-        let answer = self.send(user.clone(), log)?;
+        let answer = self.send(user.clone(), log, on_line)?;
         let explanation =
             explain::assemble(&self.boundary, &self.seen, &answer, self.similar.as_deref());
         self.explained = true;
@@ -362,11 +373,17 @@ impl<'a> SubLine<'a> {
         Ok(explanation)
     }
 
-    /// Asks the `reason` model `question` and returns the answer. The question and the answer join
-    /// the side line's message list only when the request succeeds. Before the explanation has
-    /// come, the question goes with what the model is told about the boundary. The request body
-    /// goes to `log` (PRD §8.8).
-    pub fn ask(&mut self, question: &str, log: &SessionLog) -> Result<String, ChatError> {
+    /// Asks the `reason` model `question` and returns the answer. Each line of it goes to
+    /// `on_line` as it arrives (PRD §8.1). The question and the answer join the side line's
+    /// message list only when the request succeeds. Before the explanation has come, the question
+    /// goes with what the model is told about the boundary. The request body goes to `log`
+    /// (PRD §8.8).
+    pub fn ask(
+        &mut self,
+        question: &str,
+        log: &SessionLog,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<String, ChatError> {
         let content = if self.told() {
             question.to_owned()
         } else {
@@ -375,14 +392,20 @@ impl<'a> SubLine<'a> {
                 self.context
             )
         };
-        self.exchange(content, log)
+        self.exchange(content, log, on_line)
     }
 
-    /// Sends `content` as the user's next message to the `reason` model and returns the answer.
-    /// Both join the side line's message list only when the request succeeds.
-    fn exchange(&mut self, content: String, log: &SessionLog) -> Result<String, ChatError> {
+    /// Sends `content` as the user's next message to the `reason` model and returns the answer,
+    /// each line of which goes to `on_line` as it arrives. Both join the side line's message list
+    /// only when the request succeeds.
+    fn exchange(
+        &mut self,
+        content: String,
+        log: &SessionLog,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<String, ChatError> {
         let user = Message::User { content };
-        let answer = self.send(user.clone(), log)?;
+        let answer = self.send(user.clone(), log, on_line)?;
         self.messages.push(user);
         self.messages.push(Message::Assistant {
             content: Some(answer.clone()),
@@ -391,13 +414,23 @@ impl<'a> SubLine<'a> {
         Ok(answer)
     }
 
-    /// Sends the message list with `user` after it, and returns the text of the reply.
-    fn send(&self, user: Message, log: &SessionLog) -> Result<String, ChatError> {
+    /// Sends the message list with `user` after it, and returns the text of the reply, each line
+    /// of which goes to `on_line` as it arrives.
+    fn send(
+        &self,
+        user: Message,
+        log: &SessionLog,
+        on_line: &mut dyn FnMut(&str),
+    ) -> Result<String, ChatError> {
         let mut messages = self.messages.clone();
         messages.push(user);
         let request = self.router.request(Role::Reason, messages);
         log.record_sub_request(&request);
-        let response = self.client.chat(&request)?;
+        let response = self.client.chat_streamed(&request, &mut |event| {
+            if let StreamEvent::Line(line) = event {
+                on_line(&line);
+            }
+        })?;
         Ok(response.content.unwrap_or_default())
     }
 }
@@ -518,9 +551,13 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Ok(reply("EXPLANATION: dbg! prints a value.")));
         client.push_chat(Ok(reply("ANSWER: to stderr.")));
-        side.explain(&SessionLog::disabled()).unwrap();
-        side.ask("QUESTION: where does it print?", &SessionLog::disabled())
-            .unwrap();
+        side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
+        side.ask(
+            "QUESTION: where does it print?",
+            &SessionLog::disabled(),
+            &mut |_| {},
+        )
+        .unwrap();
         main_line.withdraw();
         client.push_chat(Ok(reply("done")));
 
@@ -553,12 +590,12 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Ok(reply("dbg! prints a value.")));
 
-        let explanation = side.explain(&SessionLog::disabled()).unwrap();
+        let explanation = side
+            .explain(&SessionLog::disabled(), &mut |_| {})
+            .unwrap()
+            .to_string();
 
-        assert!(
-            explanation.starts_with("`dbg_macro` (macros)\n\ndbg! prints a value.\n\n"),
-            "{explanation}"
-        );
+        assert_eq!(explanation, "`dbg_macro` (macros)\n\ndbg! prints a value.");
 
         let request = client.requests().pop().unwrap();
         assert_eq!(request.model, Config::default().models.reason);
@@ -597,10 +634,14 @@ mod open {
         for text in ["explanation", "answer 1", "answer 2", "answer 3"] {
             client.push_chat(Ok(reply(text)));
         }
-        side.explain(&SessionLog::disabled()).unwrap();
+        side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
 
         for (question, answer) in [("q1", "answer 1"), ("q2", "answer 2"), ("q3", "answer 3")] {
-            assert_eq!(side.ask(question, &SessionLog::disabled()).unwrap(), answer);
+            assert_eq!(
+                side.ask(question, &SessionLog::disabled(), &mut |_| {})
+                    .unwrap(),
+                answer
+            );
         }
 
         let texts = texts(&client.requests().pop().unwrap());
@@ -621,9 +662,10 @@ mod open {
         client.push_chat(Err(ChatError::FakeExhausted));
         client.push_chat(Ok(reply("answer")));
 
-        assert!(side.explain(&SessionLog::disabled()).is_err());
+        assert!(side.explain(&SessionLog::disabled(), &mut |_| {}).is_err());
         assert!(!side.explained());
-        side.ask("what is it?", &SessionLog::disabled()).unwrap();
+        side.ask("what is it?", &SessionLog::disabled(), &mut |_| {})
+            .unwrap();
 
         let request = client.requests().pop().unwrap();
         let [Message::System { .. }, Message::User { content }] = &request.messages[..] else {
@@ -647,9 +689,10 @@ mod open {
         let mut side = main_line.side_line(boundary);
         client.push_chat(Err(ChatError::FakeExhausted));
         client.push_chat(Ok(reply("answer")));
-        assert!(side.explain(&SessionLog::disabled()).is_err());
+        assert!(side.explain(&SessionLog::disabled(), &mut |_| {}).is_err());
 
-        side.ask("what is it?", &SessionLog::disabled()).unwrap();
+        side.ask("what is it?", &SessionLog::disabled(), &mut |_| {})
+            .unwrap();
 
         assert!(side.explained());
     }
@@ -667,8 +710,8 @@ mod open {
         client.push_chat(Ok(reply("explanation")));
         client.push_chat(Ok(reply("answer")));
 
-        side.explain(&log).unwrap();
-        side.ask("where does it print?", &log).unwrap();
+        side.explain(&log, &mut |_| {}).unwrap();
+        side.ask("where does it print?", &log, &mut |_| {}).unwrap();
 
         let bodies = fs::read_to_string(log.requests_path().unwrap()).unwrap();
         let lines: Vec<&str> = bodies.lines().collect();
@@ -689,10 +732,14 @@ mod open {
         client.push_chat(Ok(reply("explanation")));
         client.push_chat(Err(ChatError::FakeExhausted));
         client.push_chat(Ok(reply("answer")));
-        side.explain(&SessionLog::disabled()).unwrap();
+        side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
 
-        assert!(side.ask("lost", &SessionLog::disabled()).is_err());
-        side.ask("again", &SessionLog::disabled()).unwrap();
+        assert!(
+            side.ask("lost", &SessionLog::disabled(), &mut |_| {})
+                .is_err()
+        );
+        side.ask("again", &SessionLog::disabled(), &mut |_| {})
+            .unwrap();
 
         let texts = texts(&client.requests().pop().unwrap());
         assert_eq!(texts[2..], ["explanation", "again"]);

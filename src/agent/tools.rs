@@ -17,7 +17,7 @@ use std::path::{Component, Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value};
 
-use crate::agent::mainline::CommitProposal;
+use crate::agent::mainline::{CommitProposal, Resolved};
 use crate::checker::{self, CheckContext, CheckReport, Finding, ParseError};
 use crate::llm::UnknownTool;
 use crate::profile::status::ItemKey;
@@ -59,6 +59,24 @@ pub trait Approver {
     /// the diff of each file and the message first, and approving also means going on despite
     /// the warning and with the other changes that the proposal carries (UC4).
     fn confirm(&mut self, request: &ApprovalRequest) -> bool;
+
+    /// What molt is doing while the user waits (`Thinking…`), or `None` when it is done
+    /// (PRD §8.1).
+    fn working(&mut self, _doing: Option<&str>) {}
+
+    /// A line of the model's text, as it arrives.
+    fn text(&mut self, _line: &str) {}
+
+    /// The end of the text of one response: `complete` unless the request failed or was
+    /// interrupted, when the text that came is not the response.
+    fn text_end(&mut self, _complete: bool) {}
+
+    /// The line of a tool call molt ran (`● read_file src/main.rs`).
+    fn tool_ran(&mut self, _line: &str) {}
+
+    /// The choice made at a boundary was applied, and the turn goes on with it now: what it did
+    /// is shown before the rest of the turn (PRD §8.6).
+    fn resolved(&mut self, _resolved: &Resolved<'_>) {}
 }
 
 /// Why a tool did nothing. Each is returned to the model as the tool's result.

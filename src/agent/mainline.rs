@@ -26,13 +26,13 @@ use super::subline::{Choice, Done, Resolution, SubLine};
 use super::tools::{Approver, RunCargoArgs, ToolError, Tools};
 use crate::llm::types::{check_tool_name, parse_arguments};
 use crate::llm::{
-    ChatClient, ChatError, ChatRequest, InvalidArguments, Message, Role, Router, ToolCall,
-    ToolChoice, ToolDefinition,
+    ChatClient, ChatError, ChatRequest, InvalidArguments, Message, Role, Router, StreamEvent,
+    ToolCall, ToolChoice, ToolDefinition,
 };
 use crate::profile::status::{ItemKey, Provenance, Status};
 use crate::profile::store::{Profile, StoreError, Timestamp};
 use crate::session::{self, Event, SessionLog};
-use crate::workspace::cargo::{CargoError, CargoOutput, CrateName};
+use crate::workspace::cargo::{CargoError, CargoOutput, CargoRequest, CrateName};
 
 pub use commit::{CommitOutcome, CommitProposal};
 
@@ -59,6 +59,9 @@ pub const COMPILE_FIX_BUDGET: usize = 3;
 
 /// The tool that ends the turn. It is handled by the loop, not by [`Tools`].
 const FINISH: &str = "finish";
+
+/// What the user is shown while the model works on the main line (PRD §8.1).
+const THINKING: &str = "Thinking…";
 
 /// The tools that write a file. The loop checks their content before [`Tools`] writes it.
 const WRITE_FILE: &str = "write_file";
@@ -144,6 +147,16 @@ pub struct Resumed {
     pub turn: Turn,
 }
 
+/// The choice made at a boundary, once applied and before the turn goes on with it.
+#[derive(Debug)]
+pub struct Resolved<'a> {
+    pub chosen: &'a Resolution,
+    /// Taking the step back for ②, as in [`Resumed::taken_back`].
+    pub taken_back: Option<&'a TakenBack>,
+    /// Saving the profile, as in [`Resumed::saved`].
+    pub saved: &'a Result<(), StoreError>,
+}
+
 /// What taking a step back did (PRD UC3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TakenBack {
@@ -173,6 +186,9 @@ pub struct Turn {
     pub tool_calls: Vec<String>,
     /// What the model said last: the summary passed to `finish`, or the text of its last reply.
     pub reply: Option<String>,
+    /// Whether [`Turn::reply`] is a text of the model the user was shown already, as it came or
+    /// once its response was complete (PRD §8.1), not the summary passed to `finish`.
+    pub reply_shown: bool,
     /// The files written in this turn, as the model named them, each once, in the order first
     /// written.
     pub written: Vec<String>,
@@ -570,6 +586,7 @@ impl<'a> MainLine<'a> {
             end: TurnEnd::Finished,
             tool_calls: held.tool_calls,
             reply: None,
+            reply_shown: false,
             written: held.written,
             compile_fixes: held.compile_fixes,
             changes,
@@ -589,6 +606,11 @@ impl<'a> MainLine<'a> {
             // lines (UC3), so the end of the turn checks the build again.
             progress.unchecked = true;
         }
+        approver.resolved(&Resolved {
+            chosen: resolution,
+            taken_back: taken_back.as_ref(),
+            saved: &saved,
+        });
         let turn = self.run(turn, progress, rewritten, approver);
         Some(Box::new(Resumed {
             chosen: resolution.clone(),
@@ -667,6 +689,7 @@ impl<'a> MainLine<'a> {
             end: TurnEnd::Finished,
             tool_calls: Vec::new(),
             reply: None,
+            reply_shown: false,
             written: Vec::new(),
             compile_fixes: 0,
             changes: Vec::new(),
@@ -729,12 +752,22 @@ impl<'a> MainLine<'a> {
         loop {
             let request = self.request();
             self.log.record_request(&request);
-            let response = match self.client.chat(&request) {
+            approver.working(Some(THINKING));
+            let response = self
+                .client
+                .chat_streamed(&request, &mut |event| match event {
+                    StreamEvent::Line(line) => approver.text(&line),
+                    StreamEvent::Reasoning => {}
+                });
+            approver.text_end(response.is_ok());
+            approver.working(None);
+            let response = match response {
                 Ok(response) => response,
                 Err(error) => return TurnEnd::ApiFailed(error),
             };
             if let Some(content) = response.content.as_ref().filter(|c| !c.trim().is_empty()) {
                 turn.reply = Some(content.clone());
+                turn.reply_shown = true;
             }
             self.messages.push(Message::Assistant {
                 content: response.content,
@@ -809,8 +842,27 @@ impl<'a> MainLine<'a> {
             }
         };
         match call.name.as_str() {
-            WRITE_FILE | EDIT_FILE => return self.write(&call.name, arguments, turn, progress),
-            GIT_COMMIT => return self.commit_tool(arguments, turn, progress, approver),
+            WRITE_FILE | EDIT_FILE => {
+                let line = tool_line(&call.name, &arguments);
+                let (result, next) = self.write(&call.name, arguments, turn, progress);
+                // Only a write that reached the disk, whole or as a step, is shown: one sent back
+                // to be split, or that did not parse, is not (PRD §8.1).
+                if result.starts_with(prompts::WRITTEN) {
+                    approver.tool_ran(&line);
+                }
+                return (result, next);
+            }
+            GIT_COMMIT => {
+                let before = turn.commits.len();
+                let ran = self.commit_tool(arguments, turn, progress, approver);
+                // A commit the user did not approve, or not proposed, was not run (PRD §8.1).
+                let committed = turn.commits.len() > before
+                    && !matches!(turn.commits.last(), Some(CommitOutcome::NotApproved));
+                if committed {
+                    approver.tool_ran(&tool_line(GIT_COMMIT, &serde_json::Map::new()));
+                }
+                return ran;
+            }
             _ => {}
         }
         if call.name == FINISH {
@@ -818,6 +870,7 @@ impl<'a> MainLine<'a> {
                 Ok(args) => {
                     if let Some(summary) = args.summary.filter(|s| !s.trim().is_empty()) {
                         turn.reply = Some(summary);
+                        turn.reply_shown = false;
                     }
                     (prompts::FINISHED.to_owned(), Next::Stop(TurnEnd::Finished))
                 }
@@ -836,7 +889,25 @@ impl<'a> MainLine<'a> {
         {
             return (prompts::crate_add_before_step(name), Next::Continue);
         }
-        let result = match self.tools.dispatch(&call.name, &arguments, approver) {
+        let line = tool_line(&call.name, &arguments);
+        // Only a subcommand molt runs names the wait: the status line holds molt's own words.
+        if call.name == RUN_CARGO
+            && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
+            && let Ok(request) = CargoRequest::parse(&subcommand, &args)
+        {
+            let subcommand = match request {
+                CargoRequest::Run(run) => run.as_str(),
+                CargoRequest::Add(_) => "add",
+            };
+            approver.working(Some(&format!("Running cargo {subcommand}…")));
+        }
+        let dispatched = self.tools.dispatch(&call.name, &arguments, approver);
+        approver.working(None);
+        // A call the user did not approve was not run (PRD §8.1).
+        if !matches!(dispatched, Err(ToolError::NotApproved)) {
+            approver.tool_ran(&line);
+        }
+        let result = match dispatched {
             Ok(output) => {
                 if call.name == RUN_CARGO
                     && let Some(RunCargoArgs { subcommand, args }) = cargo_args(&arguments)
@@ -886,6 +957,26 @@ impl<'a> MainLine<'a> {
         request.tools = self.definitions.clone();
         request.tool_choice = Some(ToolChoice::Auto);
         request
+    }
+}
+
+/// The line of a tool call molt ran (PRD §8.1): its name and what it was run on.
+fn tool_line(name: &str, arguments: &serde_json::Map<String, Value>) -> String {
+    let text = |key: &str| arguments.get(key).and_then(Value::as_str);
+    let on = match name {
+        RUN_CARGO => {
+            let mut words: Vec<&str> = text("subcommand").into_iter().collect();
+            if let Some(Value::Array(args)) = arguments.get("args") {
+                words.extend(args.iter().filter_map(Value::as_str));
+            }
+            words.join(" ")
+        }
+        _ => text("path").unwrap_or_default().to_owned(),
+    };
+    if on.is_empty() {
+        format!("● {name}")
+    } else {
+        format!("● {name} {on}")
     }
 }
 

@@ -72,7 +72,9 @@ impl MainLine<'_> {
         };
         if progress.unchecked {
             // The end of the turn still checks: this check is for the warning only.
+            approver.working(Some("Running cargo check…"));
             let _ = self.checked();
+            approver.working(None);
         }
         self.update_changes(&mut turn.changes, progress);
         let mut candidates = self.uncommitted.clone();
@@ -116,8 +118,10 @@ impl MainLine<'_> {
             return None;
         }
         let preview = self.preview(self.uncommitted.clone()).ok()?;
-        let message = self.commit_message(&preview)?;
-        Some(self.propose(message, preview, approver))
+        approver.working(Some("Writing the commit message…"));
+        let message = self.commit_message(&preview);
+        approver.working(None);
+        Some(self.propose(message?, preview, approver))
     }
 
     /// Merges `changes` into the uncommitted files. A file committed in the turn (`committed`)

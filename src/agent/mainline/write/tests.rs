@@ -24,6 +24,20 @@ impl Approver for Refuse {
     }
 }
 
+/// Refuses every approval and keeps the tool lines it is shown (PRD §8.1).
+#[derive(Default)]
+struct Lines(Vec<String>);
+
+impl Approver for Lines {
+    fn confirm(&mut self, _request: &ApprovalRequest) -> bool {
+        false
+    }
+
+    fn tool_ran(&mut self, line: &str) {
+        self.0.push(line.to_owned());
+    }
+}
+
 fn project() -> TempDir {
     let dir = tempfile::tempdir().unwrap();
     fs::write(
@@ -494,11 +508,43 @@ fn the_calls_after_a_step_in_the_same_response_are_not_run() {
     }));
     let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
 
-    let turn = main_line.turn("write it", &mut Refuse);
+    let mut lines = Lines::default();
+    let turn = main_line.turn("write it", &mut lines);
 
     boundary_of(&turn);
     assert_eq!(result_of(&main_line, "lib"), prompts::NOT_RUN);
     assert!(!dir.path().join("src/lib.rs").exists());
+    // Only the step ran, so only it has a tool line.
+    assert_eq!(lines.0, ["● write_file src/main.rs"]);
+}
+
+#[test]
+fn a_call_with_broken_arguments_or_not_approved_has_no_tool_line() {
+    let dir = project();
+    let (client, cargo) = (FakeChatClient::new(), FakeCargo::new());
+    client.push_chat(Ok(ChatResponse {
+        content: None,
+        tool_calls: vec![
+            ToolCall {
+                id: "broken".to_owned(),
+                name: "read_file".to_owned(),
+                arguments: "{\"path\": ".to_owned(),
+            },
+            tool_call(
+                "add",
+                "run_cargo",
+                json!({ "subcommand": "add", "args": ["serde"] }),
+            ),
+            tool_call("read", "read_file", json!({ "path": "src/main.rs" })),
+        ],
+    }));
+    client.push_chat(Ok(reply("done")));
+    let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+
+    let mut lines = Lines::default();
+    main_line.turn("look", &mut lines);
+
+    assert_eq!(lines.0, ["● read_file src/main.rs"]);
 }
 
 #[test]

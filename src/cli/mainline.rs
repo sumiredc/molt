@@ -13,16 +13,17 @@ use self::approver::UiApprover;
 use self::subline::Left;
 use super::profile;
 use crate::agent::mainline::{
-    AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, SPLIT_BUDGET,
+    AddOutcome, Boundary, COMPILE_FIX_BUDGET, Change, CrateAdd, MainLine, Resolved, SPLIT_BUDGET,
     TOOL_CALL_BUDGET, TakenBack, Turn, TurnEnd,
 };
-use crate::agent::subline::{Choice, Resolution, Unresolved};
+use crate::agent::subline::{Choice, Resolution, SubLine, Unresolved};
 use crate::agent::tools::Tools;
 use crate::config::{self, Config};
 use crate::llm::{ChatClient, Interrupt, OpenAiClient, Router, fake_script};
 use crate::profile::status::ItemKey;
 use crate::profile::store::Profile;
 use crate::session::{self, SessionLog};
+use crate::ui::markdown::fold;
 use crate::ui::{Input, ScriptedUi, TerminalUi, Ui};
 use crate::workspace::cargo::{Cargo, CargoError, CargoOutput};
 use crate::workspace::path::Root;
@@ -176,13 +177,14 @@ fn requests(ui: &mut dyn Ui, agent: &mut MainLine) -> ExitCode {
     }
 }
 
-/// Shows what the model said last. When the turn stopped instead of finishing, also shows why,
-/// the tool calls and the files written so far. Then the diff of each file molt changed and the
+/// Shows the summary the model passed to `finish`. When the turn stopped instead of finishing,
+/// also shows why and the files written so far. Then the diff of each file molt changed and the
 /// result of `cargo check` (PRD §3 Verification), and what came of each commit the model asked
 /// for (UC4).
 fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
-    if let Some(reply) = &turn.reply {
-        ui.show(reply);
+    // A text of the model was shown as it came; only the summary passed to `finish` is not.
+    if let Some(reply) = turn.reply.as_ref().filter(|_| !turn.reply_shown) {
+        ui.show_markdown(&fold(reply), "");
     }
     show_stop(ui, turn);
     // At a boundary the turn is held for the user's choice, not done: nothing was checked yet.
@@ -194,7 +196,8 @@ fn show_turn(ui: &mut dyn Ui, turn: &Turn) {
     }
 }
 
-/// Why the turn stopped, the tool calls and the files written so far, unless the model finished.
+/// Why the turn stopped and the files written so far, unless the model finished. Each tool call
+/// was shown as it ran (PRD §8.1).
 fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
     let stopped = match &turn.end {
         TurnEnd::Finished => return,
@@ -214,12 +217,6 @@ fn show_stop(ui: &mut dyn Ui, turn: &Turn) {
         ),
     };
     ui.show(&stopped);
-    if !turn.tool_calls.is_empty() {
-        ui.show(&format!(
-            "Tool calls in this turn: {}",
-            count_by_name(&turn.tool_calls)
-        ));
-    }
     // Writes before the stop stay on disk; withdrawing the request does not undo them. The file
     // of a step is shown with the step on the side line instead.
     let step = match &turn.end {
@@ -344,7 +341,7 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
                 withdraw(ui, agent);
                 return None;
             }
-            Left::Chose(choice) => match side.resolve(choice, agent.tools(), agent.log()) {
+            Left::Chose(choice) => match resolve_choice(ui, &mut side, agent, choice) {
                 Ok(resolution) => {
                     // When the turn went on to its end, the main line takes the next request
                     // (`None`). At another boundary, the side line opens there.
@@ -390,6 +387,20 @@ fn at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, boundary: Boundary) -> Opt
     }
 }
 
+/// Turns the choice made on `side` into what the main line is handed, showing that molt waits
+/// while ② asks the model for its policy (PRD §8.1).
+fn resolve_choice(
+    ui: &mut dyn Ui,
+    side: &mut SubLine,
+    agent: &MainLine,
+    choice: Choice,
+) -> Result<Resolution, Unresolved> {
+    ui.status(Some(subline::THINKING));
+    let resolved = side.resolve(choice, agent.tools(), agent.log());
+    ui.status(None);
+    resolved
+}
+
 /// Ends the main line at a boundary (UC3's exception flow): takes the step back, unless ③ did
 /// before, says so, and returns `code`.
 fn end_at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, code: ExitCode) -> ExitCode {
@@ -400,36 +411,11 @@ fn end_at_boundary(ui: &mut dyn Ui, agent: &mut MainLine, code: ExitCode) -> Exi
     code
 }
 
-/// Hands the choice made on the side line to the main line (UC3, §8.5): shows what taking the
-/// step back did for ②, how the choice changed the profile, then the rest of the turn as any
-/// turn, and returns the next boundary when the turn stops at one again.
+/// Hands the choice made on the side line to the main line (UC3, §8.5): what the choice did is
+/// shown before the rest of the turn ([`resolved_text`]), then the rest of the turn as any turn.
+/// Returns the next boundary when the turn stops at one again.
 fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Option<Boundary> {
     let resumed = agent.resolve(resolution, &mut UiApprover::new(ui))?;
-    if let Some(taken) = &resumed.taken_back {
-        ui.show(&taken_back_text(taken));
-    }
-    let resolution = &resumed.chosen;
-    let names = names(resolution.items());
-    match (resolution.choice(), resolution.policy()) {
-        (Choice::Rewrite, Some(policy)) => ui.show(&format!(
-            "Your profile marks {names} as seen, and molt writes it without them. Policy: {policy}"
-        )),
-        (Choice::Next, _) => ui.show(&format!(
-            "Your profile marks {names} as seen; molt explains them again when it uses them."
-        )),
-        (Choice::UserWrote, _) if names.is_empty() => {
-            ui.show("Your lines use nothing your profile did not have as known already.")
-        }
-        (Choice::UserWrote, _) => ui.show(&format!(
-            "Your profile has {names} as known now (you wrote it)."
-        )),
-        _ => ui.show(&format!("Your profile has {names} as known now.")),
-    }
-    if let Err(error) = &resumed.saved {
-        ui.show(&format!(
-            "Could not save the profile: {error}. The change holds for this session only."
-        ));
-    }
     show_turn(ui, &resumed.turn);
     show_log_error(ui, agent);
     match resumed.turn.end {
@@ -440,6 +426,36 @@ fn resolve(ui: &mut dyn Ui, agent: &mut MainLine, resolution: &Resolution) -> Op
             None
         }
     }
+}
+
+/// What the choice made at a boundary did: taking the step back for ②, how it changed the
+/// profile, and whether the profile could be saved.
+fn resolved_text(resolved: &Resolved) -> Vec<String> {
+    let mut lines = Vec::new();
+    if let Some(taken) = resolved.taken_back {
+        lines.push(taken_back_text(taken));
+    }
+    let resolution = resolved.chosen;
+    let names = names(resolution.items());
+    lines.push(match (resolution.choice(), resolution.policy()) {
+        (Choice::Rewrite, Some(policy)) => format!(
+            "Your profile marks {names} as seen, and molt writes it without them. Policy: {policy}"
+        ),
+        (Choice::Next, _) => format!(
+            "Your profile marks {names} as seen; molt explains them again when it uses them."
+        ),
+        (Choice::UserWrote, _) if names.is_empty() => {
+            "Your lines use nothing your profile did not have as known already.".to_owned()
+        }
+        (Choice::UserWrote, _) => format!("Your profile has {names} as known now (you wrote it)."),
+        _ => format!("Your profile has {names} as known now."),
+    });
+    if let Err(error) = resolved.saved {
+        lines.push(format!(
+            "Could not save the profile: {error}. The change holds for this session only."
+        ));
+    }
+    lines
 }
 
 /// `arc, mutex`.
@@ -455,7 +471,10 @@ fn names(items: &[ItemKey]) -> String {
 /// was written before the boundary is shown with its `cargo check`, and the main line waits for
 /// the next request.
 fn withdraw(ui: &mut dyn Ui, agent: &mut MainLine) {
+    // What the turn wrote before the step is checked again.
+    ui.status(Some("Running cargo check…"));
     let withdrawal = agent.withdraw();
+    ui.status(None);
     ui.show("Request withdrawn.");
     if let Some(taken) = &withdrawal.taken_back {
         ui.show(&taken_back_text(taken));
@@ -489,22 +508,6 @@ fn show_error_of(ui: &mut dyn Ui, log: &SessionLog) {
             path.display()
         ));
     }
-}
-
-/// `read_file (2), run_cargo (1)`, in the order each name first appears.
-fn count_by_name(names: &[String]) -> String {
-    let mut counts: Vec<(&str, usize)> = Vec::new();
-    for name in names {
-        match counts.iter_mut().find(|(seen, _)| seen == name) {
-            Some((_, count)) => *count += 1,
-            None => counts.push((name, 1)),
-        }
-    }
-    counts
-        .iter()
-        .map(|(name, count)| format!("{name} ({count})"))
-        .collect::<Vec<_>>()
-        .join(", ")
 }
 
 #[cfg(test)]
@@ -610,12 +613,6 @@ mod tests {
         let (code, _) = run_script(&FakeChatClient::new(), []);
         assert_eq!(code, ExitCode::FAILURE);
     }
-
-    #[test]
-    fn count_by_name_counts_each_tool_in_the_order_it_first_appears() {
-        let names = ["read_file", "run_cargo", "read_file"].map(str::to_owned);
-        assert_eq!(count_by_name(&names), "read_file (2), run_cargo (1)");
-    }
 }
 
 /// How a turn shows on the main line. Named so that `cargo test mainline::turn` selects them.
@@ -666,8 +663,8 @@ mod turn {
         assert_eq!(
             ui.shown(),
             [
+                "● read_file Cargo.toml",
                 "Stopped: the chat API returned HTTP 401: invalid api key",
-                "Tool calls in this turn: read_file (1)",
                 "back again",
             ]
         );
@@ -684,12 +681,17 @@ mod turn {
         let (code, ui) = super::tests::run_script(&client, [input("read it"), input("/quit")]);
 
         assert_eq!(code, ExitCode::SUCCESS);
+        let shown = ui.shown();
+        assert_eq!(shown.len(), 41, "{shown:?}");
+        assert!(
+            shown[..40]
+                .iter()
+                .all(|line| line == "● read_file Cargo.toml"),
+            "{shown:?}"
+        );
         assert_eq!(
-            ui.shown(),
-            [
-                "Stopped: this turn reached the limit of 40 tool calls since its last boundary.",
-                "Tool calls in this turn: read_file (40)",
-            ]
+            shown[40],
+            "Stopped: this turn reached the limit of 40 tool calls since its last boundary."
         );
     }
 
@@ -854,11 +856,11 @@ mod write {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
                 "Paused after a step: molt wrote 3 lines to src/main.rs with dbg_macro (macros), which you have not written yet.",
-                "Tool calls in this turn: write_file (1)",
                 "── side line: dbg_macro ────────────────────────────────────",
                 "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
-                "  `dbg_macro` (macros)\n\n  dbg! prints a value.\n\n  Two ways to write it\n  With `dbg_macro` (the step molt wrote):\n  ```rust\n  fn main() {\n      dbg!(1);\n  }\n  ```\n  Without them, within your profile: hard to write. The model found no good way to.",
+                "  `dbg_macro` (macros)\n\n  dbg! prints a value.",
                 "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
@@ -913,7 +915,8 @@ mod write {
         client.push_chat(Ok(reply("Printed 1.")));
         let (_, ui, dir) = run(&client, [input("show 1"), input("/quit")]);
 
-        assert_eq!(ui.shown()[0], "Printed 1.");
+        // The write sent back to be split has no tool line; the one that reached the disk has.
+        assert_eq!(ui.shown()[..2], ["● write_file src/main.rs", "Printed 1."]);
         assert!(
             ui.shown()
                 .iter()
@@ -938,7 +941,7 @@ mod write {
         let (_, ui, _dir) = run(&client, [input("share it"), Step::Eof]);
 
         assert_eq!(
-            ui.shown()[0],
+            ui.shown()[1],
             "Paused after a step: molt wrote 6 lines to src/main.rs with arc (smart_pointers), crate:tokio, which you have not written yet."
         );
     }
@@ -958,7 +961,7 @@ mod write {
         client.push_chat(Ok(write_main("first", WITH_DBG)));
         let (_, ui, dir) = run(&client, [input("debug 1"), input("/abort"), Step::Eof]);
 
-        assert_eq!(ui.shown()[2], "Files written in this turn: src/lib.rs");
+        assert_eq!(ui.shown()[3], "Files written in this turn: src/lib.rs");
         assert_eq!(
             fs::read_to_string(dir.path().join("src/lib.rs")).unwrap(),
             "pub fn f() {}\n"
@@ -1061,6 +1064,37 @@ mod turn_end {
     }
 
     const PRINT_1: &str = "fn main() {\n    let _ = 1;\n}\n";
+
+    #[test]
+    fn the_summary_of_finish_is_shown_with_its_code_folded_after_the_check_was_waited_for() {
+        let client = FakeChatClient::new();
+        client.push_chat(Ok(write_main("w", PRINT_1)));
+        client.push_chat(Ok(ChatResponse {
+            content: None,
+            tool_calls: vec![ToolCall {
+                id: "f".to_owned(),
+                name: "finish".to_owned(),
+                arguments: json!({ "summary": "Wrote:\n```rust\nlet _ = 1;\n```" }).to_string(),
+            }],
+        }));
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(true, "")));
+
+        let ui = run(
+            &client,
+            &cargo,
+            Profile::new(),
+            [input("print 1"), input("/quit")],
+        );
+
+        assert_eq!(ui.shown()[1], "Wrote:\n[code: 1 line]");
+        let statuses: Vec<Option<&str>> = ui.statuses().iter().map(Option::as_deref).collect();
+        assert!(
+            statuses.contains(&Some("Running cargo check…")),
+            "{statuses:?}"
+        );
+        assert_eq!(statuses.last(), Some(&None), "{statuses:?}");
+    }
     const DIFF: &str = "--- a/src/main.rs\n+++ b/src/main.rs\n@@ -1 +1,3 @@\n-fn main() {}\n+fn main() {\n+    let _ = 1;\n+}";
 
     #[test]
@@ -1078,7 +1112,15 @@ mod turn_end {
             [input("print 1"), input("/quit")],
         );
 
-        assert_eq!(ui.shown(), ["Printed 1.", DIFF, "cargo check passed."]);
+        assert_eq!(
+            ui.shown(),
+            [
+                "● write_file src/main.rs",
+                "Printed 1.",
+                DIFF,
+                "cargo check passed."
+            ]
+        );
     }
 
     #[test]
@@ -1100,6 +1142,8 @@ mod turn_end {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
+                "Printed 1.",
                 "I could not fix it.",
                 DIFF,
                 "cargo check failed:\nerror[E0308]: mismatched types"
@@ -1127,9 +1171,15 @@ mod turn_end {
         assert_eq!(
             ui.shown(),
             [
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
+                "done",
+                "● write_file src/main.rs",
                 "done",
                 "Stopped: the code still does not build after 3 compile fixes in this turn.",
-                "Tool calls in this turn: write_file (4)",
                 "Files written in this turn: src/main.rs",
                 DIFF,
                 "cargo check failed:\nerror: attempt 3",
@@ -1435,11 +1485,11 @@ mod session_log {
 
         let warning = format!("Could not write the session log {}: ", path.display());
         let shown = ui.shown();
-        assert_eq!(shown.len(), 4, "{shown:?}");
-        assert_eq!(shown[0], "one");
-        assert!(shown[1].starts_with(&warning), "{shown:?}");
-        assert_eq!(shown[2], "two");
-        assert_eq!(shown[3], format!("Session log: {}", path.display()));
+        assert_eq!(shown.len(), 6, "{shown:?}");
+        assert_eq!(shown[..2], ["● read_file Cargo.toml", "one"]);
+        assert!(shown[2].starts_with(&warning), "{shown:?}");
+        assert_eq!(shown[3..5], ["● read_file Cargo.toml", "two"]);
+        assert_eq!(shown[5], format!("Session log: {}", path.display()));
     }
 }
 
@@ -1656,8 +1706,8 @@ mod while_waiting {
         assert_eq!(
             shown[..3],
             [
+                "● write_file src/main.rs",
                 "Stopped: the request to the model was interrupted",
-                "Tool calls in this turn: write_file (1)",
                 "Files written in this turn: src/main.rs",
             ]
         );

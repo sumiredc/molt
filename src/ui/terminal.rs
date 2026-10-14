@@ -1,26 +1,33 @@
-//! The [`Ui`] for a person at a terminal, all through rustyline (PRD §8.1): lines with history and
-//! editing, and choices and approvals as lines too, so that Ctrl-C means the same at every
-//! question (`Input::Interrupted` or no answer) and never ends molt by itself. The form alone is
-//! drawn with crossterm ([`form`]).
+//! The [`Ui`] for a person at a terminal (PRD §8.1). Questions go through rustyline: lines with
+//! history and editing, and choices and approvals as lines too, so that Ctrl-C means the same at
+//! every question (`Input::Interrupted` or no answer) and never ends molt by itself. What is shown
+//! goes through [`screen`], which keeps the status line and writes styles with crossterm, and the
+//! form is drawn with crossterm ([`form`]).
 
 mod form;
+mod screen;
 
 use std::io;
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
+use self::screen::Screen;
 use super::form::{Form, FormValues};
-use super::{Input, Ui, UiError};
+use super::{Input, Tone, Ui, UiError};
 
 pub(crate) struct TerminalUi {
     editor: DefaultEditor,
+    screen: Screen,
 }
 
 impl TerminalUi {
     pub(crate) fn new() -> Result<Self, UiError> {
         let editor = DefaultEditor::new().map_err(terminal_error)?;
-        Ok(Self { editor })
+        Ok(Self {
+            editor,
+            screen: Screen::new(),
+        })
     }
 
     /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
@@ -32,6 +39,7 @@ impl TerminalUi {
 
 impl Ui for TerminalUi {
     fn read_line(&mut self, prompt: &str) -> Result<Input, UiError> {
+        self.screen.status(None);
         match self.editor.readline(prompt) {
             Ok(line) => {
                 if !line.trim().is_empty() {
@@ -47,14 +55,51 @@ impl Ui for TerminalUi {
     }
 
     fn show(&mut self, text: &str) {
-        println!("{text}");
+        self.screen.print(&super::printable(text));
+    }
+
+    fn show_lines(&mut self, lines: &[(Tone, String)]) {
+        let lines: Vec<(Tone, String)> = lines
+            .iter()
+            .map(|(tone, line)| (*tone, super::printable(line).into_owned()))
+            .collect();
+        self.screen.print_lines(&lines);
+    }
+
+    fn show_markdown(&mut self, text: &str, indent: &str) {
+        if !self.screen.styled() {
+            self.screen
+                .print(&super::indented(&super::printable(text), indent));
+            return;
+        }
+        for line in text.lines() {
+            self.screen.markdown_line(line, indent);
+        }
+        self.screen.end_markdown();
+    }
+
+    fn status(&mut self, doing: Option<&str>) {
+        self.screen.status(doing);
+    }
+
+    fn streams(&self) -> bool {
+        self.screen.styled()
+    }
+
+    fn stream_line(&mut self, line: &str, indent: &str) {
+        self.screen.markdown_line(line, indent);
+    }
+
+    fn end_stream(&mut self) {
+        self.screen.end_markdown();
     }
 
     /// Lists `items` numbered from 1 and reads a number, asking again until it is one of them.
     fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
-        println!("{prompt}");
+        self.screen.status(None);
+        self.screen.print(prompt);
         for (index, item) in items.iter().enumerate() {
-            println!("  {}) {item}", index + 1);
+            self.screen.print(&format!("  {}) {item}", index + 1));
         }
         loop {
             let Some(line) = self.read_answer("> ")? else {
@@ -63,7 +108,8 @@ impl Ui for TerminalUi {
             if let Some(index) = select_answer(&line, items.len()) {
                 return Ok(Some(index));
             }
-            println!("Type a number from 1 to {}.", items.len());
+            self.screen
+                .print(&format!("Type a number from 1 to {}.", items.len()));
         }
     }
 
@@ -74,13 +120,14 @@ impl Ui for TerminalUi {
             Some((head, last)) => (Some(head), last),
             None => (None, prompt),
         };
+        self.screen.status(None);
         if let Some(head) = head {
-            println!("{head}");
+            self.screen.print(&super::printable(head));
         }
         let question = if last.is_empty() {
             "[y/n] ".to_owned()
         } else {
-            format!("{last} [y/n] ")
+            format!("{} [y/n] ", super::printable(last))
         };
         loop {
             let Some(line) = self.read_answer(&question)? else {
@@ -89,7 +136,7 @@ impl Ui for TerminalUi {
             if let Some(answer) = confirm_answer(&line) {
                 return Ok(Some(answer));
             }
-            println!("Type y or n.");
+            self.screen.print("Type y or n.");
         }
     }
 
@@ -98,6 +145,7 @@ impl Ui for TerminalUi {
         form: &Form,
         initial: Option<&FormValues>,
     ) -> Result<Option<FormValues>, UiError> {
+        self.screen.status(None);
         form::fill_in(form, initial)
     }
 }

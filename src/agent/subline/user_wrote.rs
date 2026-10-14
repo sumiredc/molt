@@ -110,7 +110,7 @@ impl SubLine<'_> {
         } else {
             format!("{}\n\n{instruction}", self.context)
         };
-        let guidance = self.exchange(content, log);
+        let guidance = self.exchange(content, log, &mut |_| {});
         if !matches!(guidance, Err(ChatError::Interrupted)) {
             self.writing = true;
         }

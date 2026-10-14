@@ -2,11 +2,13 @@
 //! of several items and approving an operation.
 //!
 //! `TerminalUi` talks to a person through rustyline (lines with history and editing, and choices
-//! and approvals as lines), and draws the [`Form`] of `molt init` with crossterm (PRD §8.1).
+//! and approvals as lines), and writes the status line, styles and the [`Form`] of `molt init`
+//! with crossterm (PRD §8.1).
 //! [`ScriptedUi`] answers from a script instead, so tests and `--ui-script` (PRD §8.6) run without
 //! a terminal.
 
 mod form;
+pub mod markdown;
 mod scripted;
 mod terminal;
 
@@ -53,6 +55,75 @@ pub trait Ui {
         form: &Form,
         initial: Option<&FormValues>,
     ) -> Result<Option<FormValues>, UiError>;
+
+    /// Shows `lines`, each in its tone (PRD §8.1). Without styles, the lines as they are.
+    fn show_lines(&mut self, lines: &[(Tone, String)]) {
+        let text: Vec<&str> = lines.iter().map(|(_, line)| line.as_str()).collect();
+        self.show(&text.join("\n"));
+    }
+
+    /// Shows the model's `text`, each line after `indent`, Markdown rendered where it can be
+    /// (PRD §8.1).
+    fn show_markdown(&mut self, text: &str, indent: &str) {
+        self.show(&indented(&printable(text), indent));
+    }
+
+    /// What molt is doing while the user waits (`Thinking…`), or `None` when it is done
+    /// (PRD §8.1). Only a terminal shows it.
+    fn status(&mut self, _doing: Option<&str>) {}
+
+    /// Whether the model's text is shown as it arrives, a line at a time ([`Ui::stream_line`]),
+    /// instead of whole once its response is complete (PRD §8.1).
+    fn streams(&self) -> bool {
+        false
+    }
+
+    /// A line of the model's text, after `indent`, as it arrives, when [`Ui::streams`].
+    fn stream_line(&mut self, _line: &str, _indent: &str) {}
+
+    /// The end of a text shown with [`Ui::stream_line`].
+    fn end_stream(&mut self) {}
+}
+
+/// `text` without the control characters but tabs and line breaks. What is shown holds what the
+/// model wrote (its text, paths, commit messages, the code of a step or a diff), and is shown as
+/// text, never as escapes that move the cursor or color the terminal.
+pub(crate) fn printable(text: &str) -> std::borrow::Cow<'_, str> {
+    if text
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\n'))
+    {
+        text.chars()
+            .filter(|c| !c.is_control() || matches!(c, '\t' | '\n'))
+            .collect::<String>()
+            .into()
+    } else {
+        text.into()
+    }
+}
+
+/// `text` with `indent` before each line that is not blank. A blank line stays empty.
+pub(crate) fn indented(text: &str, indent: &str) -> String {
+    text.trim_end()
+        .lines()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                format!("{indent}{line}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// How a line is shown on a terminal (PRD §8.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    /// A side note, or lines around the ones that matter.
+    Dim,
+    Bold,
 }
 
 /// Why the [`Ui`] could not get an answer.

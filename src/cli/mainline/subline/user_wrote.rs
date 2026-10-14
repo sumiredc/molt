@@ -21,8 +21,11 @@ pub(super) fn guide(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -
     }
     side.start_writing(agent.tools());
     let log = agent.log();
-    match side.guide(log) {
-        Ok(guidance) => ui.show(&indent(&guidance)),
+    ui.status(Some(super::THINKING));
+    let guidance = side.guide(log);
+    ui.status(None);
+    match guidance {
+        Ok(guidance) => ui.show_markdown(&guidance, "  "),
         Err(ChatError::Interrupted) => {
             show_error_of(ui, log);
             return Some(Left::Interrupted);
@@ -47,7 +50,9 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
         ));
         return None;
     }
+    ui.status(Some(super::CHECKING));
     let done = agent.done(side);
+    ui.status(None);
     let shown = match done {
         Done::NoChange => {
             ui.show(&indent(&format!(
@@ -75,7 +80,7 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
                 _ => ui.show(&indent("cargo check passed.")),
             }
             match review {
-                Ok(review) => ui.show(&indent(&review)),
+                Ok(review) => ui.show_markdown(&review, "  "),
                 Err(error) => ui.show(&indent(&format!("Could not get the review: {error}"))),
             }
             Some(Left::Wrote(resolution))

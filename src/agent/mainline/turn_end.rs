@@ -34,11 +34,16 @@ impl MainLine<'_> {
         progress.unchecked = false;
         // Crates are added only for the model to go on. After a stop, the state is only shown.
         let notes = if matches!(end, TurnEnd::Finished) {
-            self.add_crates(turn, progress, approver)
+            approver.working(Some("Running cargo add…"));
+            let notes = self.add_crates(turn, progress, approver);
+            approver.working(None);
+            notes
         } else {
             Vec::new()
         };
+        approver.working(Some("Running cargo check…"));
         let check = self.checked();
+        approver.working(None);
         self.update_changes(&mut turn.changes, progress);
         let failed = match &check {
             Ok(output) if !output.success => Some(prompts::check_failed(

@@ -87,15 +87,19 @@ pub fn tool_error(error: impl Display) -> String {
     format!("error: {error}")
 }
 
+/// How the result of a `write_file` or `edit_file` that reached the disk starts: [`written`] and
+/// [`step_written`].
+pub const WRITTEN: &str = "written";
+
 /// The result of `write_file` or `edit_file` whose content passed the check and was written.
 pub fn written(path: &str) -> String {
-    format!("written: {path}")
+    format!("{WRITTEN}: {path}")
 }
 
 /// The result of `write_file` or `edit_file` that molt wrote as a step: the turn stops at a
 /// boundary, for the user to choose how to go on (PRD UC3).
 pub fn step_written(path: &str) -> String {
-    format!("written as a step: {path}. The turn stops here. {AT_BOUNDARY}")
+    format!("{WRITTEN} as a step: {path}. The turn stops here. {AT_BOUNDARY}")
 }
 
 /// What the model is told at a boundary. The user may withdraw the request there, so the next

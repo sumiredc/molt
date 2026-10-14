@@ -334,8 +334,9 @@ fn the_policy_of_rewrite_is_asked_of_the_light_model_with_the_side_line_transcri
     client.push_chat(Ok(reply("EXPLANATION")));
     client.push_chat(Ok(reply("ANSWER")));
     client.push_chat(Ok(reply("\n  Print with println! instead.  \nmore\n")));
-    side.explain(&SessionLog::disabled()).unwrap();
-    side.ask("QUESTION", &SessionLog::disabled()).unwrap();
+    side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
+    side.ask("QUESTION", &SessionLog::disabled(), &mut |_| {})
+        .unwrap();
 
     let resolution = side
         .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
@@ -390,8 +391,9 @@ fn the_side_line_transcript_does_not_reach_the_main_line_after_a_choice() {
     client.push_chat(Ok(reply("EXPLANATION")));
     client.push_chat(Ok(reply("ANSWER")));
     client.push_chat(Ok(reply("POLICY")));
-    side.explain(&SessionLog::disabled()).unwrap();
-    side.ask("QUESTION", &SessionLog::disabled()).unwrap();
+    side.explain(&SessionLog::disabled(), &mut |_| {}).unwrap();
+    side.ask("QUESTION", &SessionLog::disabled(), &mut |_| {})
+        .unwrap();
     let resolution = side
         .resolve(Choice::Rewrite, main_line.tools(), &SessionLog::disabled())
         .unwrap();

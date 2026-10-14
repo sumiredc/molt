@@ -134,6 +134,9 @@ pub struct ScriptedUi {
     asked: Vec<String>,
     forms: Vec<RecordedForm>,
     echo: bool,
+    /// Whether the model's text is taken a line at a time, as a terminal shows it.
+    streaming: bool,
+    statuses: Vec<Option<String>>,
 }
 
 impl ScriptedUi {
@@ -145,7 +148,23 @@ impl ScriptedUi {
             asked: Vec::new(),
             forms: Vec::new(),
             echo: false,
+            streaming: false,
+            statuses: Vec::new(),
         }
+    }
+
+    /// Takes the model's text a line at a time as a terminal does ([`Ui::streams`]), each line
+    /// recorded as shown on its own.
+    #[cfg(test)]
+    pub fn streaming(mut self) -> Self {
+        self.streaming = true;
+        self
+    }
+
+    /// What molt said it was doing while the user waited ([`Ui::status`]), in order.
+    #[cfg(test)]
+    pub fn statuses(&self) -> &[Option<String>] {
+        &self.statuses
     }
 
     /// Reads the script file at `path` (the format is in the module documentation).
@@ -186,7 +205,7 @@ impl ScriptedUi {
 
     fn print(&self, text: &str) {
         if self.echo {
-            println!("{text}");
+            println!("{}", super::printable(text));
         }
     }
 
@@ -216,8 +235,21 @@ impl Ui for ScriptedUi {
     }
 
     fn show(&mut self, text: &str) {
-        self.print(text);
-        self.shown.push(text.to_owned());
+        let text = super::printable(text);
+        self.print(&text);
+        self.shown.push(text.into_owned());
+    }
+
+    fn status(&mut self, doing: Option<&str>) {
+        self.statuses.push(doing.map(str::to_owned));
+    }
+
+    fn streams(&self) -> bool {
+        self.streaming
+    }
+
+    fn stream_line(&mut self, line: &str, indent: &str) {
+        self.show(&super::indented(&super::printable(line), indent));
     }
 
     fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {

@@ -132,7 +132,10 @@ fn choosing_1_saves_the_item_as_known_and_the_main_line_goes_on_with_the_unlock_
         .iter()
         .position(|text| text == "Your profile has dbg_macro as known now.")
         .unwrap_or_else(|| panic!("{shown:?}"));
-    assert_eq!(shown[at + 1], "done with dbg!");
+    assert_eq!(
+        shown[at + 1..at + 3],
+        ["● write_file src/main.rs", "done with dbg!"]
+    );
     assert!(last_main_line_input(&client).starts_with("BOUNDARY RESOLVED: unlock\n"));
     assert_eq!(
         ui.asked(),
