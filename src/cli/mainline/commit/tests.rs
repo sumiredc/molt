@@ -18,7 +18,7 @@ use crate::workspace::git::testing::{git_in, init, init_without_identity, withou
 use crate::workspace::path::Root;
 
 const MAIN: &str = "fn main() {}\n";
-const PRINTS: &str = "fn main() {\n    println!(\"{}\", 1);\n}\n";
+const PRINTS: &str = "fn main() {\n    let _ = 1;\n}\n";
 
 fn project() -> TempDir {
     let dir = tempfile::tempdir().unwrap();

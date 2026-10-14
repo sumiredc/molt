@@ -350,6 +350,7 @@ flowchart TB
 - `ItemKey = Element | Crate(String)`（toml キーは `arc` / `"crate:tokio"`）
 - `Profile`：要素ごとの `{ status, provenance, at, evidence }`、分類ごとの申告、履歴（追記のみ）
 - 基本要素は無い。`&`・`Result`・`?`・`println!` も含め、どの要素も `known` のときだけ止まらずに書く
+- 基本要素があったころに書いたプロファイルのファイルには、`allow`（利用者が基本要素に足した要素）と `deny`（外した要素）がありうる。読むときは、`allow` にあって `deny` に無い要素を `known`（根拠は manual）にする。利用者が手で、聞かずに書いてよいと決めた要素だからである。`deny` は捨て、移した要素を利用者に伝える。どちらも書き戻さない
 - `CheckReport = Clean | OutOfProfile(Vec<Finding>) | ParseError`。OutOfProfile はその書き込みをステップにするか、ステップの上限を超えていれば返す（8.4）。ParseError はコンパイル系の失敗として扱い、境界にしない
 - マクロ呼び出しの中身は syn では見えない。Rust の式を引数に取る std マクロ（`print!`・`format!` / `write!`・`vec!`・`assert!`・`dbg!`・`matches!`・`panic!` の各族。`asm!` は除く）は、引数を式とパターンとして parse し、周りのコードと同じに検査する。finding はそれぞれ、要素を作るトークンの行に置く。書式文字列のインラインの引数（`{x}`）は名前しか書けないので見ない。マクロの形で parse できない引数は見えず、その呼び出しを `macro_call` の finding にもする。それ以外のマクロの中身は見えない → 呼び出しが `known` でなければ、呼び出し自体を finding にする
 - 新規クレートは `Cargo.toml` の依存キーの差分と、ソース中のパスの先頭セグメント（std / core / crate / self / super / 自プロジェクトのモジュール以外）の両方から検出する
@@ -473,7 +474,7 @@ molt doctor               設定したエンドポイントとモデルの対応
 
 | 対象 | 方法 |
 |---|---|
-| checker | `tests/fixtures/elements/*.rs` の先頭 `// expect: …` と検出集合の完全一致。`fixtures/negative/*.rs`（要素の一覧に無い構文：構造体・列挙型・`match` など）は 0 件。全 `Element` に fixture があることをテストで強制。変更行フィルタ（旧↔新）で既存の要素が出ないこと |
+| checker | `tests/fixtures/elements/*.rs` の先頭 `// expect: …` と検出集合の完全一致。`fixtures/negative/*.rs`（要素の一覧に無い構文：構造体・列挙型・`match` など。先頭の `// expect: …` が挙げる要素を含む）は、その要素だけを検出する。全 `Element` に fixture があることをテストで強制。変更行フィルタ（旧↔新）で既存の要素が出ないこと |
 | profile | toml 往復、遷移で履歴が増える、未記載 = unknown、存在しない要素名・無効な状態の拒否 |
 | llm | `FakeChatClient`（応答キュー＋送ったリクエストの記録）。wire 形式は JSON fixture と比較。実 API は `#[ignore]` で、`[api]` が指すエンドポイントに対して走らせる（8.7）。キーがあり loopback 以外への `http://` ならクライアントを作らず、loopback・`https://`・キー無しなら作る |
 | agent（本線） | `FakeCargo` + tempdir。`known` の項目だけ → ディスクに書かれ、境界は無い。`known` でない項目がステップの上限内 → ディスクに書かれ、ターンが境界で止まる。ステップの上限を超える → ディスクは変わらず、分割するよう返り、同じ応答の中でその後に来たツール呼び出しは実行しない。続けて 3 回のあとの次でターンを止める。項目が 3 つを超える 1 行だけの変更の書き込みはステップになる。同じ応答の中でステップの後に来たツール呼び出しは実行しない。境界でツール呼び出しの回数が 0 に戻る。`known` でないクレートの `cargo add` は、それを使うステップが ① か ④ で解決されるまで拒む。予算超過で止まる |

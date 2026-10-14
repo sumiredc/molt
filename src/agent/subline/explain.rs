@@ -69,8 +69,8 @@ fn heading(items: &[ItemKey]) -> String {
     format!("{} ({})", names(&once), categories.join(", "))
 }
 
-/// The items `profile` lets the code use, as the checker decides (PRD §8.4): the base elements and
-/// the `known` elements, in the order of [`Element::ALL`], then the `known` crates.
+/// The items `profile` lets the code use, as the checker decides (PRD §8.4): the `known`
+/// elements, in the order of [`Element::ALL`], then the `known` crates.
 pub(crate) fn allowed(profile: &Profile) -> Vec<ItemKey> {
     let elements = Element::ALL
         .iter()
@@ -261,8 +261,7 @@ mod compare {
     use crate::agent::tools::Tools;
     use crate::config::Config;
     use crate::llm::{ChatError, ChatResponse, FakeChatClient, Message, Router};
-    use crate::profile::element::Element;
-    use crate::profile::status::{ItemKey, Provenance, Status};
+    use crate::profile::status::{Provenance, Status};
     use crate::profile::store::{Profile, Timestamp};
     use crate::session::SessionLog;
     use crate::workspace::cargo::FakeCargo;
@@ -271,7 +270,7 @@ mod compare {
     use super::{HARD_WITHIN_PROFILE, NO_COMPARISON};
 
     const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
-    const WITHOUT_DBG: &str = "fn main() {\n    eprintln!(\"{}\", 1);\n}";
+    const WITHOUT_DBG: &str = "fn main() {\n    elet _ = 1;\n}";
     /// The words of the instruction for the comparison that the rule rests on.
     pub(super) const REWRITE: &str = "rewrite the code the main line tried without these items";
     const ONLY_ALLOWED: &str =
@@ -393,8 +392,7 @@ mod compare {
     }
 
     #[test]
-    fn the_request_for_the_explanation_names_the_base_and_known_items_and_not_the_others() {
-        let base = ItemKey::Element(Element::ForLoop).to_string();
+    fn the_request_for_the_explanation_names_the_known_items_and_not_the_others() {
         let profile = profile_with(&[
             ("arc", Status::Known),
             ("crate:serde", Status::Known),
@@ -410,10 +408,10 @@ mod compare {
         .for_each(|text| sent = text);
 
         let allowed = &sent[sent.find(ONLY_ALLOWED).expect("the instruction")..];
-        for name in [base.as_str(), "arc", "crate:serde"] {
+        for name in ["arc", "crate:serde"] {
             assert!(allowed.contains(&format!("`{name}`")), "{name}: {allowed}");
         }
-        for name in ["mutex", "crate:tokio", "dbg_macro"] {
+        for name in ["mutex", "crate:tokio", "dbg_macro", "for_loop"] {
             assert!(!allowed.contains(&format!("`{name}`")), "{name}: {allowed}");
         }
     }
@@ -470,7 +468,7 @@ mod compare {
 
         let idea = explanation.find("dbg! prints a value and returns it.");
         let tried = explanation.find("    dbg!(1);");
-        let within = explanation.find("    eprintln!(\"{}\", 1);");
+        let within = explanation.find("    elet _ = 1;");
         assert!(
             idea.is_some() && tried.is_some() && within.is_some(),
             "{explanation}"
@@ -853,7 +851,7 @@ mod short {
     use super::compare::{REWRITE, on_side_line, profile_with, project, rejected_twice, requested};
     use super::{NO_COMPARISON, seen_before, similar};
 
-    const WITHOUT_DBG: &str = "```rust\nfn main() {\n    eprintln!(\"{}\", 1);\n}\n```";
+    const WITHOUT_DBG: &str = "```rust\nfn main() {\n    elet _ = 1;\n}\n```";
     /// The instruction for the idea of every item.
     const IDEA: &str = "Explain the idea of these items in one paragraph.";
     /// The words every instruction for an idea has.
@@ -910,10 +908,7 @@ mod short {
             )),
             "{explanation}"
         );
-        assert!(
-            explanation.contains("    eprintln!(\"{}\", 1);"),
-            "{explanation}"
-        );
+        assert!(explanation.contains("    elet _ = 1;"), "{explanation}");
     }
 
     #[test]

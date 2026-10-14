@@ -1,3 +1,4 @@
+// expect: shared_ref, for_loop, format_macro
 // Structs, enums, inherent impls and match: no category holds them.
 use std::collections::HashMap;
 

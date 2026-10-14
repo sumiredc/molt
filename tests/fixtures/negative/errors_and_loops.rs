@@ -1,3 +1,4 @@
+// expect: shared_ref, result, option, question_mark, for_loop, range, format_macro
 // Result, Option, ?, for loops, ranges and while / loop with labels.
 use std::num::ParseIntError;
 

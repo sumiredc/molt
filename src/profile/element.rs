@@ -404,7 +404,8 @@ mod tests {
 
     #[test]
     fn the_elements_named_in_prd_fall_in_the_categories_their_names_suggest() {
-        // Elements named in PRD §2 (examples and base elements) and §8.3. The
+        // Elements named in PRD §2 (examples, and those it calls elements like
+        // any other) and §8.3. The
         // PRD does not state their categories; the pairs are this list's decision.
         let cases = [
             (Element::Arc, Category::SmartPointers),

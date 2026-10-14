@@ -35,7 +35,7 @@ use crate::profile::element::Element;
 use crate::profile::status::ItemKey;
 use names::PathUse;
 
-/// Every element in `source`, base elements included, in line order.
+/// Every element in `source`, in line order.
 ///
 /// Content that syn cannot parse as a file, including a `derive` whose
 /// arguments are not a list of paths, is a `ParseError`.

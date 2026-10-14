@@ -140,8 +140,7 @@ struct RequestBoundaryArgs {
 }
 
 /// Runs `request_boundary`: stops the turn at a boundary on the items it names that `profile`
-/// does not allow. A `known` item never becomes a boundary again (PRD §3 Idempotence), and a base
-/// element never is one. Arguments that name no item outside the profile, or a string that is
+/// does not allow. A `known` item never becomes a boundary again (PRD §3 Idempotence). Arguments that name no item outside the profile, or a string that is
 /// not an element name or `crate:<name>`, are returned to the model as an error, and the turn
 /// goes on.
 pub(super) fn request_boundary(profile: &Profile, arguments: Map<String, Value>) -> (String, Next) {
@@ -167,10 +166,7 @@ pub(super) fn request_boundary(profile: &Profile, arguments: Map<String, Value>)
     if items.is_empty() {
         return invalid("items must name at least one item".to_owned());
     }
-    let allowed = |item: &ItemKey| {
-        profile.status(item) == Status::Known
-            || matches!(item, ItemKey::Element(element) if profile.is_base(*element))
-    };
+    let allowed = |item: &ItemKey| profile.status(item) == Status::Known;
     let (allowed, items): (Vec<ItemKey>, Vec<ItemKey>) = items.into_iter().partition(allowed);
     if items.is_empty() {
         let allowed = allowed

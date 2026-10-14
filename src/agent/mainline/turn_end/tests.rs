@@ -130,8 +130,8 @@ fn known_crate(name: &str) -> Profile {
     profile
 }
 
-const CLEAN: &str = "fn main() {\n    println!(\"{}\", 1);\n}\n";
-const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::to_string(&1);\n}\n";
+const CLEAN: &str = "fn main() {\n    let _ = 1;\n}\n";
+const USES_SERDE_JSON: &str = "fn main() {\n    let _ = serde_json::Value::Null;\n}\n";
 /// Does not parse: a `let` without a pattern.
 const BROKEN: &str = "fn main() {\n    let = 1;\n}\n";
 const MISMATCH: &str = "error[E0308]: mismatched types";
@@ -850,7 +850,7 @@ fn a_file_written_under_two_spellings_is_one_change() {
     client.push_chat(Ok(write_file(
         "w2",
         "./src/main.rs",
-        "fn main() {\n    println!(\"{}\", 2);\n}\n",
+        "fn main() {\n    let _ = 2;\n}\n",
     )));
     client.push_chat(Ok(reply("done")));
     cargo.push(passed());

@@ -40,7 +40,7 @@ fn empty_profile() -> (TempDir, PathBuf) {
 
 /// A profile file that saving would rewrite (the comment would be dropped), so
 /// comparing its bytes shows whether the file was written again.
-const HAND_WRITTEN_PROFILE: &str = "# written by hand\ndeny = [\"option\"]\n";
+const HAND_WRITTEN_PROFILE: &str = "# written by hand\n[items.arc]\nstatus = \"known\"\nprovenance = \"manual\"\nat = 2026-10-10T12:34:56Z\n";
 
 fn hand_written_profile() -> (TempDir, PathBuf) {
     let dir = TempDir::new().unwrap();
@@ -139,7 +139,7 @@ fn set_accepts_a_crate_key() {
 }
 
 #[test]
-fn show_lists_base_elements_together_after_every_category() {
+fn show_lists_every_element_under_its_category_and_no_base_elements() {
     let (_dir, path) = empty_profile();
 
     let show = stdout(&molt_with_profile(&path, &["profile", "show"]));
@@ -148,30 +148,32 @@ fn show_lists_base_elements_together_after_every_category() {
         show.find(text)
             .unwrap_or_else(|| panic!("{text:?} not in:\n{show}"))
     };
-    let base = position("\nbase elements");
-    let last_category = position("\nunsafe");
-    assert!(last_category < base, "{show}");
-    // shared_ref is a default base element of the borrowing category: it is
-    // listed once, under the base elements.
+    assert!(!show.contains("regardless of status"), "{show}");
+    // shared_ref was used without asking before #152; it is listed once,
+    // under borrowing.
     assert_eq!(show.matches("\n  shared_ref ").count(), 1, "{show}");
-    assert!(position("\n  shared_ref ") > base, "{show}");
-    // clone is not a base element: it is listed under its category.
-    let clone = position("\n  clone ");
-    assert!(position("ownership\n") < clone, "{show}");
-    assert!(clone < position("\nborrowing\n"), "{show}");
+    let shared_ref = position("\n  shared_ref ");
+    assert!(position("\nborrowing\n") < shared_ref, "{show}");
+    assert!(shared_ref < position("\nlifetimes\n"), "{show}");
+    assert_eq!(row(&show, "shared_ref")[1], "unknown");
 }
 
 #[test]
-fn a_base_element_set_to_unknown_is_listed_under_its_category_instead_of_the_base_elements() {
-    let (_dir, path) = empty_profile();
+fn an_element_in_allow_of_an_older_profile_is_shown_known_with_a_note() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profile.toml");
+    fs::write(&path, "allow = [\"arc\"]\ndeny = [\"option\"]\n").unwrap();
 
-    let set = molt_with_profile(&path, &["profile", "set", "shared_ref", "unknown"]);
-    assert!(set.status.success(), "{}", stderr(&set));
+    let output = molt_with_profile(&path, &["profile", "show"]);
 
-    let show = stdout(&molt_with_profile(&path, &["profile", "show"]));
-    let base = show.find("\nbase elements").unwrap();
-    assert!(show.find("\n  shared_ref ").unwrap() < base, "{show}");
-    assert_eq!(row(&show, "shared_ref")[1..3], ["unknown", "manual"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(row(&stdout(&output), "arc")[1..3], ["known", "manual"]);
+    assert_eq!(row(&stdout(&output), "option")[1], "unknown");
+    assert!(
+        stderr(&output).contains("arc were in `allow`"),
+        "{}",
+        stderr(&output)
+    );
 }
 
 #[test]

@@ -17,7 +17,7 @@ use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::path::Root;
 
 const WITH_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
-const WITHOUT_DBG: &str = "fn main() {\n    println!(\"{}\", 1);\n}\n";
+const WITHOUT_DBG: &str = "fn main() {\n    let _ = 1;\n}\n";
 
 struct Refuse;
 

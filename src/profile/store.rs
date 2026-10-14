@@ -19,7 +19,6 @@ use serde::de::{self, Deserialize, Deserializer};
 use serde::ser::{Serialize, Serializer};
 use toml::value::{Date, Datetime, Offset, Time};
 
-use super::baseline;
 use super::element::{Category, Element};
 use super::status::{ItemKey, Provenance, Status, named_enum, serde_by_name};
 
@@ -241,9 +240,7 @@ impl std::error::Error for TransitionError {}
 
 /// Whether PRD §7 allows `from` → `to` with `provenance`.
 ///
-/// `Manual` (`molt profile set`) may set any status, its current one included:
-/// UC5 sets a base element, which has no entry and so is `unknown`, to
-/// `unknown` to put it in `deny`.
+/// `Manual` (`molt profile set`) may set any status, its current one included.
 fn is_allowed(from: Status, to: Status, provenance: Provenance) -> bool {
     use Provenance::*;
     use Status::*;
@@ -251,26 +248,26 @@ fn is_allowed(from: Status, to: Status, provenance: Provenance) -> bool {
         Manual => true,
         SelfReport => (from, to) == (Unknown, Seen),
         Qa | ReferenceRepo => (from, to) == (Unknown, Known),
-        // ① understood → known, ② use a construct I know → seen.
+        // ① understood → known, ② write it without and ④ next → seen.
         SideLine => matches!((from, to), (Unknown | Seen, Known) | (Unknown, Seen)),
         WroteIt => matches!((from, to), (Unknown | Seen, Known)),
     }
 }
 
 /// The comprehension profile: per item its status, provenance, time and
-/// evidence, the report per category, the user's additions to (`allow`) and
-/// removals from (`deny`) the base elements, and the history of transitions.
+/// evidence, the report per category, and the history of transitions.
 ///
 /// `Profile::new()` and an empty file are the same profile: no item has an
-/// entry, so everything is `unknown` and only the default base elements may be
-/// used.
+/// entry, so everything is `unknown`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Profile {
     items: BTreeMap<ItemKey, Entry>,
     reports: BTreeMap<Category, Report>,
-    allow: BTreeSet<Element>,
-    deny: BTreeSet<Element>,
     history: Vec<Change>,
+    /// The elements an older file lists in `allow` (and not in `deny`),
+    /// which reading it made `known` (#152). Not saved: the next save holds
+    /// them as entries.
+    moved_from_allow: Vec<Element>,
 }
 
 impl Profile {
@@ -292,17 +289,10 @@ impl Profile {
         self.items.iter()
     }
 
-    /// Whether generation may use `element` regardless of its status.
-    pub fn is_base(&self, element: Element) -> bool {
-        baseline::is_base(element, &self.allow, &self.deny)
-    }
-
-    pub fn allow(&self) -> &BTreeSet<Element> {
-        &self.allow
-    }
-
-    pub fn deny(&self) -> &BTreeSet<Element> {
-        &self.deny
+    /// The elements reading the file moved from its `allow` to `known`, in
+    /// the order of `Element`, so that the user can be told once per read.
+    pub fn moved_from_allow(&self) -> &[Element] {
+        &self.moved_from_allow
     }
 
     pub fn report(&self, category: Category) -> Option<Report> {
@@ -325,14 +315,6 @@ impl Profile {
     /// Only the transitions of PRD §7 are accepted; anything else returns
     /// `TransitionError` and changes nothing. On success the entry is
     /// overwritten and one `Change` is appended to the history.
-    ///
-    /// With `Manual` (`molt profile set`, UC5) an element set to `unknown` while
-    /// it is a base element is added to `deny`, and one set to `known` is
-    /// removed from `deny`. Other provenances leave `deny` alone: an element the
-    /// user excluded stays excluded when it becomes `known` on the side line, so
-    /// setting it to `seen` later does not quietly make it a base element again.
-    /// Setting a base element to `seen` keeps it a base element (§2: base
-    /// elements are used regardless of the profile).
     pub fn transition(
         &mut self,
         key: ItemKey,
@@ -349,19 +331,6 @@ impl Profile {
                 to,
                 provenance,
             });
-        }
-
-        if let (ItemKey::Element(element), Provenance::Manual) = (&key, provenance) {
-            let element = *element;
-            match to {
-                Status::Unknown if self.is_base(element) => {
-                    self.deny.insert(element);
-                }
-                Status::Known => {
-                    self.deny.remove(&element);
-                }
-                _ => {}
-            }
         }
 
         self.history.push(Change {
@@ -385,7 +354,13 @@ impl Profile {
     }
 
     /// Reads the profile at `path`. Items with no entry are `unknown`; an empty
-    /// file is a profile of base elements only.
+    /// file is a profile with nothing `known`.
+    ///
+    /// An older file may hold `allow` and `deny`, the elements the user
+    /// added to and removed from those molt used without asking. Each element in `allow` and not in `deny` becomes `known`
+    /// (provenance manual), since the user added it by hand to what molt
+    /// writes without asking, and `deny` is dropped (#152). Neither is written
+    /// back.
     ///
     /// A key or field that this version does not know (a renamed element, a
     /// misspelt field) is an error rather than skipped: skipping would drop it
@@ -424,19 +399,36 @@ impl Profile {
 
     fn from_toml(text: &str) -> Result<Profile, toml::de::Error> {
         let file: ProfileFile = toml::from_str(text)?;
-        Ok(Profile {
+        let mut profile = Profile {
             items: file.items,
             reports: file.reports.into_iter().map(|(c, r)| (c.0, r)).collect(),
-            allow: file.allow.into_iter().map(|e| e.0).collect(),
-            deny: file.deny.into_iter().map(|e| e.0).collect(),
             history: file.history,
-        })
+            moved_from_allow: Vec::new(),
+        };
+        let at = Timestamp::now();
+        for ElementName(element) in file.allow {
+            let key = ItemKey::Element(element);
+            if file.deny.contains(&ElementName(element)) || profile.status(&key) == Status::Known {
+                continue;
+            }
+            profile
+                .transition(
+                    key,
+                    Status::Known,
+                    Provenance::Manual,
+                    at,
+                    Some(MOVED.to_owned()),
+                )
+                .expect("manual may set any status");
+            profile.moved_from_allow.push(element);
+        }
+        Ok(profile)
     }
 
     fn to_toml(&self) -> String {
         let file = ProfileFile {
-            allow: self.allow.iter().map(|&e| ElementName(e)).collect(),
-            deny: self.deny.iter().map(|&e| ElementName(e)).collect(),
+            allow: BTreeSet::new(),
+            deny: BTreeSet::new(),
             reports: self
                 .reports
                 .iter()
@@ -545,14 +537,18 @@ impl std::error::Error for StoreError {
     }
 }
 
+/// The evidence of an element moved from `allow` to `known` when read.
+const MOVED: &str = "in allow of an older profile file";
+
 /// The shape of the profile file. Separate from `Profile` so that only `load`
 /// can build a `Profile` from outside data.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProfileFile {
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    /// Read from an older file, and never written (see [`Profile::load`]).
+    #[serde(default, skip_serializing)]
     allow: BTreeSet<ElementName>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(default, skip_serializing)]
     deny: BTreeSet<ElementName>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     reports: BTreeMap<CategoryName, Report>,
@@ -562,15 +558,9 @@ struct ProfileFile {
     history: Vec<Change>,
 }
 
-/// An element in `allow` / `deny`, written as its name.
+/// An element in `allow` / `deny` of an older file, read as its name.
 #[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct ElementName(Element);
-
-impl Serialize for ElementName {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(self.0.name())
-    }
-}
 
 impl<'de> Deserialize<'de> for ElementName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -623,12 +613,11 @@ mod tests {
     }
 
     /// A profile with every part filled: entries of elements and a crate,
-    /// reports, allow / deny and a history of several transitions.
+    /// reports and a history of several transitions.
     fn filled_profile() -> Profile {
         let mut p = Profile::new();
         p.set_report(Category::Ownership, Report::HaveWritten);
         p.set_report(Category::Async, Report::CanRead);
-        p.allow.insert(Element::Clone);
         p.transition(
             el(Element::Arc),
             Known,
@@ -779,24 +768,19 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_toml_is_a_profile_of_base_elements_only() {
+    fn an_empty_toml_is_a_profile_with_nothing_known() {
         let p = Profile::from_toml("").unwrap();
 
         assert_eq!(p, Profile::new());
         assert_eq!(p.entries().count(), 0);
         assert!(p.history().is_empty());
         for &element in Element::ALL {
-            assert_eq!(
-                p.is_base(element),
-                baseline::DEFAULT.contains(&element),
-                "{element}"
-            );
             assert_eq!(p.status(&el(element)), Unknown, "{element}");
         }
     }
 
     #[test]
-    fn an_empty_profile_file_loads_as_a_profile_of_base_elements_only() {
+    fn an_empty_profile_file_loads_as_a_profile_with_nothing_known() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("profile.toml");
         fs::write(&path, "").unwrap();
@@ -805,76 +789,50 @@ mod tests {
     }
 
     #[test]
-    fn setting_a_base_element_to_unknown_adds_it_to_deny_and_it_is_no_longer_base() {
-        let mut p = Profile::new();
-        assert!(p.is_base(Element::Option));
+    fn an_element_in_allow_and_not_in_deny_is_read_as_known_by_hand_and_said_so() {
+        let p = Profile::from_toml(
+            "allow = [\"rc\", \"arc\", \"mutex\"]\ndeny = [\"mutex\", \"option\"]\n",
+        )
+        .unwrap();
 
-        p.transition(el(Element::Option), Unknown, Manual, at(100), None)
-            .unwrap();
-
-        assert!(p.deny().contains(&Element::Option));
-        assert!(!p.is_base(Element::Option));
-        assert_eq!(p.history().len(), 1);
+        assert_eq!(p.moved_from_allow(), [Element::Rc, Element::Arc]);
+        for element in [Element::Arc, Element::Rc] {
+            let entry = p.entry(&el(element)).unwrap();
+            assert_eq!(entry.status, Known, "{element}");
+            assert_eq!(entry.provenance, Manual, "{element}");
+            assert_eq!(entry.evidence.as_deref(), Some(MOVED), "{element}");
+        }
+        // In deny too: the user took it back by hand.
+        assert_eq!(p.status(&el(Element::Mutex)), Unknown);
+        // Only in deny: an element that was allowed by default and that the
+        // user took back, now unknown like every element with no entry.
+        assert_eq!(p.status(&el(Element::Option)), Unknown);
+        assert_eq!(p.history().len(), 2);
     }
 
     #[test]
-    fn setting_an_allowed_element_to_unknown_adds_it_to_deny() {
-        let mut p = Profile::from_toml("allow = [\"arc\"]\n").unwrap();
-        assert!(p.is_base(Element::Arc));
+    fn an_element_in_allow_that_is_known_already_is_left_as_it_is() {
+        let p = Profile::from_toml(
+            "allow = [\"arc\"]\n[items.arc]\nstatus = \"known\"\nprovenance = \"qa\"\nat = 2026-10-10T12:34:56Z\n",
+        )
+        .unwrap();
 
-        p.transition(el(Element::Arc), Unknown, Manual, at(100), None)
-            .unwrap();
-
-        assert!(p.deny().contains(&Element::Arc));
-        assert!(!p.is_base(Element::Arc));
+        assert!(p.moved_from_allow().is_empty());
+        assert_eq!(p.entry(&el(Element::Arc)).unwrap().provenance, Qa);
+        assert!(p.history().is_empty());
     }
 
     #[test]
-    fn setting_a_denied_element_back_to_known_removes_it_from_deny_and_it_is_base_again() {
-        let mut p = Profile::new();
-        p.transition(el(Element::Option), Unknown, Manual, at(100), None)
-            .unwrap();
+    fn allow_and_deny_are_not_written_back() {
+        let p = Profile::from_toml("allow = [\"arc\"]\ndeny = [\"option\"]\n").unwrap();
 
-        p.transition(el(Element::Option), Known, Manual, at(200), None)
-            .unwrap();
+        let text = p.to_toml();
 
-        assert!(!p.deny().contains(&Element::Option));
-        assert!(p.is_base(Element::Option));
-    }
-
-    #[test]
-    fn setting_an_element_that_is_not_base_to_unknown_leaves_deny_empty() {
-        let mut p = Profile::new();
-        p.transition(el(Element::Arc), Known, Qa, at(100), None)
-            .unwrap();
-
-        p.transition(el(Element::Arc), Unknown, Manual, at(200), None)
-            .unwrap();
-
-        assert!(p.deny().is_empty());
-    }
-
-    #[test]
-    fn setting_a_base_element_to_seen_leaves_deny_unchanged() {
-        let mut p = Profile::new();
-
-        p.transition(el(Element::Option), Seen, Manual, at(100), None)
-            .unwrap();
-
-        assert!(p.deny().is_empty());
-        assert!(p.is_base(Element::Option));
-    }
-
-    #[test]
-    fn an_excluded_element_that_becomes_known_on_the_side_line_stays_in_deny() {
-        let mut p = Profile::new();
-        p.transition(el(Element::Option), Unknown, Manual, at(100), None)
-            .unwrap();
-
-        p.transition(el(Element::Option), Known, SideLine, at(200), None)
-            .unwrap();
-
-        assert!(p.deny().contains(&Element::Option));
+        assert!(!text.contains("allow ="), "{text}");
+        assert!(!text.contains("deny ="), "{text}");
+        let again = Profile::from_toml(&text).unwrap();
+        assert!(again.moved_from_allow().is_empty());
+        assert_eq!(again.status(&el(Element::Arc)), Known);
     }
 
     /// The transitions of PRD §7, plus `Manual` to the current status (UC5).

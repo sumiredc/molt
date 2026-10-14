@@ -21,7 +21,7 @@ fn no_profile() -> (TempDir, PathBuf) {
 }
 
 /// A profile file that `init` would rewrite if it saved (the comment would be dropped).
-const EXISTING_PROFILE: &str = "# written by hand\ndeny = [\"option\"]\n";
+const EXISTING_PROFILE: &str = "# written by hand\n[items.arc]\nstatus = \"known\"\nprovenance = \"manual\"\nat = 2026-10-10T12:34:56Z\n";
 
 fn existing_profile() -> (TempDir, PathBuf) {
     let (dir, path) = no_profile();
@@ -140,7 +140,7 @@ fn dont_know_leaves_the_elements_of_the_category_unknown() {
 }
 
 #[test]
-fn all_dont_know_saves_a_profile_of_base_elements_only_without_calling_the_model() {
+fn all_dont_know_saves_a_profile_with_nothing_known_without_calling_the_model() {
     let (_dir, path) = no_profile();
     let client = FakeChatClient::new();
     let mut ui = ScriptedUi::new(every_category(Report::DontKnow));
@@ -148,7 +148,6 @@ fn all_dont_know_saves_a_profile_of_base_elements_only_without_calling_the_model
     assert!(client.requests().is_empty(), "{:?}", client.requests());
     let profile = Profile::load(&path).unwrap();
     assert_eq!(profile.entries().count(), 0);
-    assert!(profile.allow().is_empty() && profile.deny().is_empty());
     assert!(profile.history().is_empty());
 }
 
@@ -230,7 +229,10 @@ fn accepting_to_overwrite_replaces_the_existing_profile() {
         Ok(Outcome::Saved)
     );
     let profile = Profile::load(&path).unwrap();
-    assert!(profile.deny().is_empty(), "the old profile is gone");
+    assert!(
+        profile.moved_from_allow().is_empty() && profile.entries().count() == 0,
+        "the old profile is gone"
+    );
 }
 
 #[test]

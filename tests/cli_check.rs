@@ -50,7 +50,7 @@ fn profile(dir: &TempDir, content: &str) -> PathBuf {
     path
 }
 
-const BASE_ONLY: &str = "fn main() {\n    println!(\"hi\");\n}\n";
+const NO_ELEMENT: &str = "fn main() {\n    let _ = 1;\n}\n";
 const USES_DBG: &str = "fn main() {\n    dbg!(1);\n}\n";
 
 #[test]
@@ -64,7 +64,7 @@ fn a_finding_is_printed_as_path_line_element_category_and_exits_1() {
 
 #[test]
 fn content_with_no_finding_prints_nothing_and_exits_0() {
-    let dir = project(&[("a.rs", BASE_ONLY)]);
+    let dir = project(&[("a.rs", NO_ELEMENT)]);
     let profile = profile(&dir, "");
     let output = check(dir.path(), &profile, &["a.rs"]);
     assert_eq!(output.status.code(), Some(0), "{}", stderr(&output));
@@ -97,20 +97,36 @@ fn a_crate_is_printed_under_crates() {
 #[test]
 fn the_profile_decides_what_is_reported() {
     let dir = project(&[("a.rs", USES_DBG)]);
-    let profile = profile(&dir, "allow = [\"dbg_macro\"]\n");
+    let profile = profile(
+        &dir,
+        "[items.dbg_macro]\nstatus = \"known\"\nprovenance = \"manual\"\nat = 2026-10-10T12:34:56Z\n",
+    );
     let output = check(dir.path(), &profile, &["a.rs"]);
     assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
 }
 
 #[test]
-fn without_a_profile_it_says_so_on_stderr_and_checks_with_base_elements_only() {
-    let dir = project(&[("base.rs", BASE_ONLY), ("dbg.rs", USES_DBG)]);
+fn an_element_in_allow_of_an_older_profile_is_known_and_the_note_says_so() {
+    let dir = project(&[("a.rs", USES_DBG)]);
+    let profile = profile(&dir, "allow = [\"dbg_macro\"]\n");
+    let output = check(dir.path(), &profile, &["a.rs"]);
+    assert_eq!(output.status.code(), Some(0), "{}", stdout(&output));
+    let note = stderr(&output);
+    assert!(
+        note.contains("dbg_macro were in `allow`") && note.contains("`known` now (manual)"),
+        "{note}"
+    );
+}
+
+#[test]
+fn without_a_profile_it_says_so_on_stderr_and_checks_with_nothing_known() {
+    let dir = project(&[("base.rs", NO_ELEMENT), ("dbg.rs", USES_DBG)]);
     let missing = dir.path().join("missing.toml");
 
     let base = check(dir.path(), &missing, &["base.rs"]);
     assert_eq!(base.status.code(), Some(0), "{}", stdout(&base));
     assert!(
-        stderr(&base).contains("base elements only"),
+        stderr(&base).contains("checking with nothing known"),
         "{}",
         stderr(&base)
     );
@@ -124,7 +140,7 @@ fn without_a_profile_it_says_so_on_stderr_and_checks_with_base_elements_only() {
 
 #[test]
 fn a_profile_that_cannot_be_read_stops_the_check_with_exit_2() {
-    let dir = project(&[("a.rs", BASE_ONLY)]);
+    let dir = project(&[("a.rs", NO_ELEMENT)]);
     let profile = profile(&dir, "not toml [");
     let output = check(dir.path(), &profile, &["a.rs"]);
     assert_eq!(output.status.code(), Some(2));
@@ -361,7 +377,7 @@ fn a_file_that_does_not_parse_is_reported_on_stderr_with_exit_2() {
 
 #[test]
 fn a_missing_path_is_reported_on_stderr_with_exit_2() {
-    let dir = project(&[("a.rs", BASE_ONLY)]);
+    let dir = project(&[("a.rs", NO_ELEMENT)]);
     let profile = profile(&dir, "");
     let output = check(dir.path(), &profile, &["nope.rs", "a.rs"]);
     assert_eq!(output.status.code(), Some(2));
