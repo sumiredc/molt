@@ -7,6 +7,7 @@
 //! a terminal.
 
 mod form;
+pub mod markdown;
 mod scripted;
 mod terminal;
 
@@ -53,6 +54,44 @@ pub trait Ui {
         form: &Form,
         initial: Option<&FormValues>,
     ) -> Result<Option<FormValues>, UiError>;
+
+    /// Shows `lines`, each in its tone (PRD §8.1). Without styles, the lines as they are.
+    fn show_lines(&mut self, lines: &[(Tone, String)]) {
+        let text: Vec<&str> = lines.iter().map(|(_, line)| line.as_str()).collect();
+        self.show(&text.join("\n"));
+    }
+
+    /// Shows the model's `text`, each line after `indent`, Markdown rendered where it can be
+    /// (PRD §8.1).
+    fn show_markdown(&mut self, text: &str, indent: &str) {
+        let lines: Vec<String> = text.lines().map(|line| format!("{indent}{line}")).collect();
+        self.show(lines.join("\n").trim_end());
+    }
+
+    /// What molt is doing while the user waits (`Thinking…`), or `None` when it is done
+    /// (PRD §8.1). Only a terminal shows it.
+    fn status(&mut self, _doing: Option<&str>) {}
+
+    /// Whether the model's text is shown as it arrives, a line at a time ([`Ui::stream_line`]),
+    /// instead of whole once its response is complete (PRD §8.1).
+    fn streams(&self) -> bool {
+        false
+    }
+
+    /// A line of the model's text, after `indent`, as it arrives, when [`Ui::streams`].
+    fn stream_line(&mut self, _line: &str, _indent: &str) {}
+
+    /// The end of a text shown with [`Ui::stream_line`].
+    fn end_stream(&mut self) {}
+}
+
+/// How a line is shown on a terminal (PRD §8.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Tone {
+    Normal,
+    /// A side note, or lines around the ones that matter.
+    Dim,
+    Bold,
 }
 
 /// Why the [`Ui`] could not get an answer.
