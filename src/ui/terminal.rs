@@ -4,17 +4,19 @@
 //! goes through [`screen`], which keeps the status line and writes styles with crossterm, and the
 //! form is drawn with crossterm ([`form`]).
 
+mod choices;
 mod form;
 mod screen;
 
-use std::io;
+use std::io::{self, IsTerminal};
 
 use rustyline::DefaultEditor;
 use rustyline::error::ReadlineError;
 
+use self::choices::Keys;
 use self::screen::Screen;
 use super::form::{Form, FormValues};
-use super::{Input, Tone, Ui, UiError};
+use super::{Input, Picked, Tone, Ui, UiError};
 
 pub(crate) struct TerminalUi {
     editor: DefaultEditor,
@@ -32,6 +34,43 @@ impl TerminalUi {
 
     /// Reads one line for an answer, which is not kept in the history. `None` for Ctrl-C and
     /// Ctrl-D: the user did not answer.
+    /// The choices listed, and a line read at `line_prompt`: the number of a choice listed
+    /// chooses it, and any other line is the line.
+    fn choose_by_line(
+        &mut self,
+        prompt: &str,
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<Picked, UiError> {
+        self.screen.print(prompt);
+        for (at, (number, label)) in choices.iter().enumerate() {
+            self.screen.print(&choices::line(*number, label, at == 0));
+        }
+        let read = self.editor.readline(line_prompt);
+        Ok(match self.picked_line(read)? {
+            Picked::Line(line) => match picked_number(&line, choices) {
+                Some(number) => Picked::Choice(number),
+                None => Picked::Line(line),
+            },
+            picked => picked,
+        })
+    }
+
+    /// The line read at the choices, kept in the history like one read at a prompt.
+    fn picked_line(&mut self, read: Result<String, ReadlineError>) -> Result<Picked, UiError> {
+        match read {
+            Ok(line) => {
+                if !line.trim().is_empty() {
+                    let _ = self.editor.add_history_entry(line.as_str());
+                }
+                Ok(Picked::Line(line))
+            }
+            Err(ReadlineError::Interrupted) => Ok(Picked::Interrupted),
+            Err(ReadlineError::Eof) => Ok(Picked::Eof),
+            Err(error) => Err(terminal_error(error)),
+        }
+    }
+
     fn read_answer(&mut self, prompt: &str) -> Result<Option<String>, UiError> {
         answer(self.editor.readline(prompt))
     }
@@ -95,25 +134,34 @@ impl Ui for TerminalUi {
     }
 
     /// Lists `items` numbered from 1 and reads a number, asking again until it is one of them.
-    fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
+    /// Keys choose when stdin and stdout are a terminal; otherwise a line chooses by number
+    /// (PRD §8.6).
+    fn choose(
+        &mut self,
+        prompt: &str,
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<Picked, UiError> {
         self.screen.status(None);
-        self.screen.print(prompt);
-        for (index, item) in items.iter().enumerate() {
-            self.screen.print(&format!("  {}) {item}", index + 1));
+        if !io::stdin().is_terminal() || !self.screen.styled() {
+            return self.choose_by_line(prompt, choices, line_prompt);
         }
-        loop {
-            let Some(line) = self.read_answer("> ")? else {
-                return Ok(None);
-            };
-            if let Some(index) = select_answer(&line, items.len()) {
-                return Ok(Some(index));
+        let started = match choices::read(prompt, choices, self.screen.styled())
+            .map_err(UiError::Terminal)?
+        {
+            Keys::Picked(picked) => return Ok(picked),
+            Keys::Typed(line) => {
+                self.screen.print(&format!("{line_prompt}{line}"));
+                return self.picked_line(Ok(line));
             }
-            self.screen
-                .print(&format!("Type a number from 1 to {}.", items.len()));
-        }
+            Keys::Line(started) => started,
+        };
+        let read = self
+            .editor
+            .readline_with_initial(line_prompt, (started.as_str(), ""));
+        self.picked_line(read)
     }
 
-    /// Reads `y`/`yes` or `n`/`no` after `prompt`, asking again until it is one of them.
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
         // A prompt of several lines is printed, and only its last line stays beside the answer.
         let (head, last) = match prompt.rsplit_once('\n') {
@@ -171,9 +219,12 @@ fn confirm_answer(line: &str) -> Option<bool> {
 }
 
 /// The index of the item numbered `line` (from 1) among `items` items, if it is one.
-fn select_answer(line: &str, items: usize) -> Option<usize> {
-    let number: usize = line.trim().parse().ok()?;
-    (1..=items).contains(&number).then(|| number - 1)
+/// The number of a choice listed that `line` is, as typed or full width.
+fn picked_number(line: &str, choices: &[(usize, &str)]) -> Option<usize> {
+    let mut chars = line.trim().chars();
+    let number = chars.next().and_then(choices::number)?;
+    (chars.next().is_none() && choices.iter().any(|(listed, _)| *listed == number))
+        .then_some(number)
 }
 
 fn terminal_error(error: ReadlineError) -> UiError {
@@ -224,16 +275,19 @@ mod tests {
         }
     }
 
+    const CHOICES: [(usize, &str); 3] = [(1, "a"), (2, "b"), (4, "d")];
+
     #[test]
-    fn a_number_of_an_item_chooses_it_counting_from_1() {
-        assert_eq!(select_answer("1", 3), Some(0));
-        assert_eq!(select_answer(" 3 ", 3), Some(2));
+    fn with_stdin_not_a_terminal_a_line_with_the_number_of_a_choice_listed_chooses_it() {
+        assert_eq!(picked_number("1", &CHOICES), Some(1));
+        assert_eq!(picked_number(" 4 ", &CHOICES), Some(4));
+        assert_eq!(picked_number("２", &CHOICES), Some(2));
     }
 
     #[test]
-    fn a_number_outside_the_items_or_not_a_number_chooses_nothing() {
-        for line in ["0", "4", "-1", "", "two"] {
-            assert_eq!(select_answer(line, 3), None, "{line:?}");
+    fn with_stdin_not_a_terminal_any_other_line_is_a_line() {
+        for line in ["3", "0", "5", "12", "", "two", "1?"] {
+            assert_eq!(picked_number(line, &CHOICES), None, "{line:?}");
         }
     }
 }

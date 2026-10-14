@@ -6,7 +6,6 @@ use tempfile::TempDir;
 
 use super::super::super::main_line;
 use super::super::super::tests::{input, project, reply};
-use super::super::HINT;
 use super::*;
 use crate::agent::mainline::MainLine;
 use crate::agent::tools::Tools;
@@ -113,12 +112,7 @@ fn choosing_1_saves_the_item_as_known_and_the_main_line_goes_on_with_the_unlock_
     let (code, ui) = run_in(
         &dir,
         &client,
-        [
-            input("debug 1"),
-            input("/choose"),
-            Step::Select(1),
-            input("/quit"),
-        ],
+        [input("debug 1"), Step::Select(1), input("/quit")],
     );
 
     assert_eq!(code, ExitCode::SUCCESS);
@@ -139,7 +133,7 @@ fn choosing_1_saves_the_item_as_known_and_the_main_line_goes_on_with_the_unlock_
     assert!(last_main_line_input(&client).starts_with("BOUNDARY RESOLVED: unlock\n"));
     assert_eq!(
         ui.asked(),
-        ["molt> ", SUB, "How do you want to go on?", "molt> "]
+        ["molt> ", "How do you want to go on?", "molt> "]
     );
 }
 
@@ -155,12 +149,7 @@ fn choosing_2_saves_the_item_as_seen_and_the_main_line_rewrites_with_the_policy(
     let (code, ui) = run_in(
         &dir,
         &client,
-        [
-            input("debug 1"),
-            input("/choose"),
-            Step::Select(2),
-            input("/quit"),
-        ],
+        [input("debug 1"), Step::Select(2), input("/quit")],
     );
 
     assert_eq!(code, ExitCode::SUCCESS);
@@ -185,7 +174,7 @@ fn choosing_2_saves_the_item_as_seen_and_the_main_line_rewrites_with_the_policy(
 }
 
 #[test]
-fn ctrl_c_at_the_choice_stays_on_the_side_line_and_changes_nothing() {
+fn ctrl_c_at_the_choices_pauses_the_main_line_at_the_boundary_and_changes_nothing() {
     let dir = project_with_a_profile();
     let client = stops_at_a_boundary_then(Vec::new());
 
@@ -194,7 +183,6 @@ fn ctrl_c_at_the_choice_stays_on_the_side_line_and_changes_nothing() {
         &client,
         [
             input("debug 1"),
-            input("/choose"),
             Step::Interrupt,
             input("/abort"),
             input("/quit"),
@@ -206,17 +194,14 @@ fn ctrl_c_at_the_choice_stays_on_the_side_line_and_changes_nothing() {
         fs::read_to_string(dir.path().join("profile.toml")).unwrap(),
         ""
     );
-    let hint = format!("  {HINT}");
-    assert_eq!(
-        ui.shown().iter().filter(|text| **text == hint).count(),
-        2,
+    assert!(
+        ui.shown()
+            .iter()
+            .any(|text| text.starts_with("Paused at the boundary.")),
         "{:?}",
         ui.shown()
     );
-    assert_eq!(
-        ui.asked(),
-        ["molt> ", SUB, "How do you want to go on?", SUB, "molt> "]
-    );
+    assert_eq!(ui.asked(), ["molt> ", SUB, "molt> ", "molt> "]);
 }
 
 #[test]
@@ -232,13 +217,7 @@ fn a_boundary_recurring_after_2_opens_the_side_line_again_recommending_the_other
     let (code, ui) = run_in(
         &dir,
         &client,
-        [
-            input("debug 1"),
-            input("/choose"),
-            Step::Select(2),
-            input("/choose"),
-            Step::Select(3),
-        ],
+        [input("debug 1"), Step::Select(2), Step::Select(3)],
     );
 
     assert_eq!(code, ExitCode::FAILURE, "there is no third choice");
@@ -263,9 +242,7 @@ fn choosing_1_after_a_recurrence_makes_the_item_known() {
         &client,
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(2),
-            input("/choose"),
             Step::Select(1),
             input("/quit"),
         ],
@@ -275,39 +252,8 @@ fn choosing_1_after_a_recurrence_makes_the_item_known() {
     assert_eq!(saved_status(&dir), Status::Known);
 }
 
-/// A [`Ui`] that records the items of each selection and chooses the first.
-#[derive(Default)]
-struct Recording {
-    items: Vec<Vec<String>>,
-}
-
-impl Ui for Recording {
-    fn read_line(&mut self, _prompt: &str) -> Result<crate::ui::Input, UiError> {
-        unreachable!("only selections are asked")
-    }
-
-    fn show(&mut self, _text: &str) {}
-
-    fn select(&mut self, _prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
-        self.items
-            .push(items.iter().map(|item| (*item).to_owned()).collect());
-        Ok(Some(0))
-    }
-
-    fn confirm(&mut self, _prompt: &str) -> Result<Option<bool>, UiError> {
-        unreachable!("only selections are asked")
-    }
-    fn form(
-        &mut self,
-        _form: &crate::ui::Form,
-        _initial: Option<&crate::ui::FormValues>,
-    ) -> Result<Option<crate::ui::FormValues>, UiError> {
-        unreachable!("only selections are asked")
-    }
-}
-
-/// The items `choose` offers on a side line at a `dbg_macro` boundary, recurred or not.
-fn offered(recurred: bool) -> Vec<String> {
+/// The choices offered, numbered, on a side line at a `dbg_macro` boundary, recurred or not.
+fn listed(recurred: bool) -> Vec<(usize, String)> {
     let dir = project_with_a_profile();
     let client = FakeChatClient::new();
     let cargo = FakeCargo::new();
@@ -329,32 +275,33 @@ fn offered(recurred: bool) -> Vec<String> {
         &crate::profile::store::Profile::new(),
     )
     .recurred(recurred);
-    let mut ui = Recording::default();
-    assert_eq!(choose(&mut ui, &side).unwrap(), Some(Choice::Unlock));
-    ui.items.pop().unwrap()
+    offered(&side)
+        .into_iter()
+        .map(|(choice, label)| (choice.number(), label))
+        .collect()
 }
 
 #[test]
-fn choose_offers_1_2_3_and_4_by_number_in_that_order() {
+fn the_choices_are_1_2_3_and_4_in_that_order() {
     assert_eq!(
-        offered(false),
+        listed(false),
         [
-            "Understood: the step stays, and molt uses dbg_macro from now on",
-            "Write it without them: molt takes the step back and writes it without dbg_macro",
-            "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done",
-            "Next: the step stays, and molt explains dbg_macro again when it uses them",
+            (1, "Understood: the step stays, and molt uses dbg_macro from now on".to_owned()),
+            (2, "Write it without them: molt takes the step back and writes it without dbg_macro".to_owned()),
+            (3, "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done".to_owned()),
+            (4, "Next: the step stays, and molt explains dbg_macro again when it uses them".to_owned()),
         ]
     );
 }
 
 #[test]
-fn choose_offers_no_2_at_a_boundary_recurring_after_2() {
+fn at_a_boundary_recurring_after_2_there_is_no_2_and_the_others_keep_their_numbers() {
     assert_eq!(
-        offered(true),
+        listed(true),
         [
-            "Understood: the step stays, and molt uses dbg_macro from now on",
-            "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done",
-            "Next: the step stays, and molt explains dbg_macro again when it uses them",
+            (1, "Understood: the step stays, and molt uses dbg_macro from now on".to_owned()),
+            (3, "Write it myself: molt takes the step back, shows where, and checks what I wrote when I type /done".to_owned()),
+            (4, "Next: the step stays, and molt explains dbg_macro again when it uses them".to_owned()),
         ]
     );
 }
@@ -373,23 +320,13 @@ fn a_step_with_items_of_two_categories_gets_one_side_line_and_one_choice_for_all
     let (code, ui) = run_in(
         &dir,
         &client,
-        [
-            input("share it"),
-            input("/choose"),
-            Step::Select(1),
-            input("/quit"),
-        ],
+        [input("share it"), Step::Select(1), input("/quit")],
     );
 
     assert_eq!(code, ExitCode::SUCCESS);
     assert_eq!(
         ui.asked(),
-        [
-            "molt> ",
-            "molt [sub: arc, dbg_macro]> ",
-            "How do you want to go on?",
-            "molt> "
-        ]
+        ["molt> ", "How do you want to go on?", "molt> "]
     );
     assert!(
         ui.shown()
@@ -410,12 +347,7 @@ fn choosing_4_keeps_the_step_marks_the_item_seen_and_the_main_line_goes_on() {
     let (code, ui) = run_in(
         &dir,
         &client,
-        [
-            input("debug 1"),
-            input("/choose"),
-            Step::Select(4),
-            input("/quit"),
-        ],
+        [input("debug 1"), Step::Select(4), input("/quit")],
     );
 
     assert_eq!(code, ExitCode::SUCCESS);

@@ -10,7 +10,7 @@ use crate::ui::Ui;
 
 /// What the user can do while they write in ③.
 pub(super) const WRITING: &str = "Write it in your editor, then type /done to have molt check it. \
-     You can still ask questions, /choose another way, or /abort to withdraw the request.";
+     You can still ask questions, choose another way, or /abort to withdraw the request.";
 
 /// Starts ③ on `side`, the side line of `agent`: takes the step back, says so, then shows where to
 /// write what, as the model tells it, and what to do next. [`Left::Interrupted`] when the user
@@ -46,7 +46,7 @@ pub(super) fn guide(ui: &mut dyn Ui, side: &mut SubLine, agent: &mut MainLine) -
 pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Option<Left> {
     if !side.is_writing() {
         ui.show(&indent(
-            "Type /choose and choose to write it yourself first, then /done when you wrote it.",
+            "Choose ③ to write it yourself first, then type /done when you wrote it.",
         ));
         return None;
     }
@@ -63,7 +63,7 @@ pub(super) fn done(ui: &mut dyn Ui, side: &mut SubLine, agent: &MainLine) -> Opt
         Done::Failed(failure) => {
             ui.show(&indent(&failed(&failure)));
             ui.show(&indent(
-                "Your profile is unchanged. Fix it and type /done again, or /choose another way.",
+                "Your profile is unchanged. Fix it and type /done again, or choose another way.",
             ));
             None
         }
@@ -123,7 +123,7 @@ fn printed(output: &crate::workspace::cargo::CargoOutput) -> String {
         .join("\n")
 }
 
-/// ③ on the side line through `/choose` and `/done`, and what the main line does with it. Named so
+/// ③ at the choices of the side line and `/done`, and what the main line does with it. Named so
 /// that `cargo test subline::user_wrote` selects them.
 #[cfg(test)]
 mod tests;

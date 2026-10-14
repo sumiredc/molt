@@ -8,7 +8,7 @@
 //! steps = [
 //!   { input = "add a function that sums a slice" },  # a line at the prompt
 //!   { confirm = true },                              # yes (or false: no) to an approval
-//!   { select = 2 },                                  # the 2nd item of a choice (from 1)
+//!   { select = 2 },                                  # ② at the choices of a boundary
 //!   "interrupt",                                     # Ctrl-C at any question
 //!   "eof",                                           # Ctrl-D at the prompt
 //!   { form = [                                       # a form submitted, tab by tab:
@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use serde::Deserialize;
 
 use super::form::{Form, FormValues, TabValues};
-use super::{Input, Ui, UiError};
+use super::{Input, Picked, Ui, UiError, circled};
 
 /// One answer in a script.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -40,7 +40,7 @@ use super::{Input, Ui, UiError};
 pub enum Step {
     /// A line typed at the prompt.
     Input(String),
-    /// The item chosen, numbered from 1 as listed.
+    /// The number of the choice chosen at a boundary (`1` is ①).
     Select(usize),
     /// The answer to a yes/no question.
     Confirm(bool),
@@ -75,7 +75,7 @@ impl Step {
     pub(super) fn kind(&self) -> &'static str {
         match self {
             Step::Input(_) => "an input",
-            Step::Select(_) => "a selection",
+            Step::Select(_) => "a choice",
             Step::Confirm(_) => "a confirmation",
             Step::Interrupt => "an interrupt",
             Step::Eof => "an eof",
@@ -193,7 +193,8 @@ impl ScriptedUi {
     }
 
     /// The prompts of the questions answered or attempted, in order. A form's is the name of its
-    /// submit tab; the form itself is in [`ScriptedUi::forms`].
+    /// submit tab; the form itself is in [`ScriptedUi::forms`]. At the choices, it is their
+    /// question when a choice is chosen, and the line's prompt otherwise.
     pub fn asked(&self) -> &[String] {
         &self.asked
     }
@@ -252,30 +253,47 @@ impl Ui for ScriptedUi {
         self.show(&super::indented(&super::printable(line), indent));
     }
 
-    fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
-        let step = self.next("a selection", prompt)?;
+    /// A choice step chooses; an input step is the line typed instead, as at a prompt.
+    fn choose(
+        &mut self,
+        prompt: &str,
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<Picked, UiError> {
+        // A line typed at the choices is typed at `line_prompt` (PRD §8.6).
+        let asked = match self.steps.front() {
+            Some(Step::Select(_)) | None => prompt,
+            Some(_) => line_prompt,
+        };
+        let step = self.next("a choice", asked)?;
         self.print(prompt);
-        for (index, item) in items.iter().enumerate() {
-            self.print(&format!("  {}) {item}", index + 1));
+        for (at, (number, label)) in choices.iter().enumerate() {
+            // The first is in focus, as on a terminal.
+            let focus = if at == 0 { '❯' } else { ' ' };
+            self.print(&format!("{focus} {} {label}", circled(*number)));
         }
-        match step {
-            Step::Select(number) if (1..=items.len()).contains(&number) => {
-                self.print(&format!("> {number}"));
-                Ok(Some(number - 1))
+        let (picked, echoed) = match step {
+            Step::Select(number) if choices.iter().any(|(offered, _)| *offered == number) => {
+                (Picked::Choice(number), number.to_string())
             }
-            Step::Select(number) => Err(UiError::SelectOutOfRange {
-                number,
-                items: items.len(),
-            }),
-            Step::Interrupt => {
-                self.print("> ^C");
-                Ok(None)
+            Step::Select(number) => {
+                return Err(UiError::ChoiceNotOffered {
+                    number,
+                    offered: choices.iter().map(|(number, _)| *number).collect(),
+                });
             }
-            step => Err(UiError::ScriptMismatch {
-                asked: "a selection",
-                step,
-            }),
-        }
+            Step::Input(line) => (Picked::Line(line.clone()), line),
+            Step::Interrupt => (Picked::Interrupted, "^C".to_owned()),
+            Step::Eof => (Picked::Eof, "^D".to_owned()),
+            step => {
+                return Err(UiError::ScriptMismatch {
+                    asked: "a choice",
+                    step,
+                });
+            }
+        };
+        self.print(&format!("{line_prompt}{echoed}"));
+        Ok(picked)
     }
 
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
@@ -449,27 +467,45 @@ mod tests {
         assert_eq!(ui.read_line("molt> ").unwrap(), Input::Eof);
     }
 
+    const CHOICES: [(usize, &str); 3] = [(1, "a"), (2, "b"), (4, "d")];
+
     #[test]
-    fn select_returns_the_index_of_the_item_numbered_from_1() {
-        let mut ui = ScriptedUi::new([Step::Select(3)]);
-        assert_eq!(ui.select("Choose", &["a", "b", "c"]).unwrap(), Some(2));
+    fn a_choice_step_chooses_by_the_number_of_the_choice() {
+        let mut ui = ScriptedUi::new([Step::Select(4)]);
+        assert_eq!(
+            ui.choose("Choose", &CHOICES, "> ").unwrap(),
+            Picked::Choice(4)
+        );
     }
 
     #[test]
-    fn select_rejects_a_number_outside_the_items() {
-        for number in [0, 4] {
+    fn a_choice_step_with_a_number_not_listed_is_an_error() {
+        for number in [0, 3, 5] {
             let mut ui = ScriptedUi::new([Step::Select(number)]);
             assert!(matches!(
-                ui.select("Choose", &["a", "b", "c"]),
-                Err(UiError::SelectOutOfRange { number: n, items: 3 }) if n == number
+                ui.choose("Choose", &CHOICES, "> "),
+                Err(UiError::ChoiceNotOffered { number: n, ref offered }) if n == number && *offered == [1, 2, 4]
             ));
         }
     }
 
     #[test]
-    fn an_interrupt_answers_a_selection_and_a_confirmation_with_none() {
-        let mut ui = ScriptedUi::new([Step::Interrupt, Step::Interrupt]);
-        assert_eq!(ui.select("Choose", &["a"]).unwrap(), None);
+    fn at_the_choices_an_input_is_a_line_and_interrupt_and_eof_are_themselves() {
+        let mut ui = ScriptedUi::new([Step::Input("why?".to_owned()), Step::Interrupt, Step::Eof]);
+        assert_eq!(
+            ui.choose("Choose", &CHOICES, "> ").unwrap(),
+            Picked::Line("why?".to_owned())
+        );
+        assert_eq!(
+            ui.choose("Choose", &CHOICES, "> ").unwrap(),
+            Picked::Interrupted
+        );
+        assert_eq!(ui.choose("Choose", &CHOICES, "> ").unwrap(), Picked::Eof);
+    }
+
+    #[test]
+    fn an_interrupt_answers_a_confirmation_with_none() {
+        let mut ui = ScriptedUi::new([Step::Interrupt]);
         assert_eq!(ui.confirm("Go?").unwrap(), None);
     }
 

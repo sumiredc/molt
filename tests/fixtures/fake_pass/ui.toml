@@ -2,8 +2,7 @@
 # `tests/fake_pass.rs` and `tests/fake_example.rs`.
 steps = [
   { input = "Print 1 to stderr with dbg! in src/main.rs." }, # the request, which stops at a boundary
-  { input = "/choose" },                                     # on the side line
-  { select = 1 },                                            # ①: understood
+  { select = 1 },                                            # ① at the side line's choices: understood
   { confirm = true },                                        # "Commit with this message?"
   { input = "/quit" },
 ]

@@ -439,10 +439,7 @@ fn done_without_writing_anything_reports_no_change_and_the_user_chooses_again() 
 
     assert!(!side.is_writing());
     assert!(cargo.calls().is_empty(), "no cargo check");
-    assert_eq!(
-        side.choices(),
-        [Choice::Unlock, Choice::Rewrite, Choice::UserWrote]
-    );
+    assert_eq!(side.choices(), [Choice::Unlock, Choice::Rewrite]);
 }
 
 #[test]

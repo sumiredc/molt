@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::llm::{ChatResponse, FakeChatClient, Message, Router, ToolCall};
 use crate::profile::status::{Provenance, Status};
 use crate::profile::store::Profile;
-use crate::ui::{Input, ScriptedUi, Step, UiError};
+use crate::ui::{Input, Picked, ScriptedUi, Step, UiError};
 use crate::workspace::cargo::{CargoOutput, FakeCargo};
 use crate::workspace::path::Root;
 
@@ -53,21 +53,26 @@ struct Writing {
 
 impl Ui for Writing {
     fn read_line(&mut self, prompt: &str) -> Result<Input, UiError> {
-        let input = self.ui.read_line(prompt)?;
-        if matches!(&input, Input::Line(line) if line == "/done") {
-            for (path, content) in self.writes.pop_front().unwrap_or_default() {
-                fs::write(path, content).unwrap();
-            }
-        }
-        Ok(input)
+        self.ui.read_line(prompt)
     }
 
     fn show(&mut self, text: &str) {
         self.ui.show(text);
     }
 
-    fn select(&mut self, prompt: &str, items: &[&str]) -> Result<Option<usize>, UiError> {
-        self.ui.select(prompt, items)
+    fn choose(
+        &mut self,
+        prompt: &str,
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<Picked, UiError> {
+        let picked = self.ui.choose(prompt, choices, line_prompt)?;
+        if matches!(&picked, Picked::Line(line) if line == "/done") {
+            for (path, content) in self.writes.pop_front().unwrap_or_default() {
+                fs::write(path, content).unwrap();
+            }
+        }
+        Ok(picked)
     }
 
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, UiError> {
@@ -188,7 +193,6 @@ fn choosing_3_guides_and_done_saves_the_items_as_written_and_the_main_line_goes_
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/quit"),
@@ -214,7 +218,7 @@ fn choosing_3_guides_and_done_saves_the_items_as_written_and_the_main_line_goes_
     assert!(last_main_line_input(&client).starts_with("BOUNDARY RESOLVED: user_wrote\n"));
     assert_eq!(
         ui.asked(),
-        ["molt> ", SUB, "How do you want to go on?", SUB, "molt> "]
+        ["molt> ", "How do you want to go on?", SUB, "molt> "]
     );
 }
 
@@ -237,7 +241,6 @@ fn a_failed_check_on_done_is_shown_and_the_user_can_send_done_again() {
         ],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/done"),
@@ -252,7 +255,7 @@ fn a_failed_check_on_done_is_shown_and_the_user_can_send_done_again() {
     );
     assert_eq!(
         ui.shown()[failed + 1],
-        "  Your profile is unchanged. Fix it and type /done again, or /choose another way."
+        "  Your profile is unchanged. Fix it and type /done again, or choose another way."
     );
     assert_eq!(saved(&dir), Some((Status::Known, Provenance::WroteIt)));
 }
@@ -269,7 +272,6 @@ fn after_a_failed_check_the_profile_is_unchanged_until_the_user_switches_to_1() 
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             Step::Interrupt,
@@ -295,10 +297,8 @@ fn after_a_failed_check_the_profile_is_unchanged_until_the_user_switches_to_1() 
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
-            input("/choose"),
             Step::Select(1),
             input("/quit"),
         ],
@@ -322,10 +322,8 @@ fn done_without_writing_reports_no_change_and_the_user_chooses_again() {
         Vec::new(),
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
-            input("/choose"),
             Step::Select(1),
             input("/quit"),
         ],
@@ -361,7 +359,7 @@ fn done_before_choosing_3_says_to_choose_it_first() {
 
     shown_at(
         &ui,
-        "  Type /choose and choose to write it yourself first, then /done when you wrote it.",
+        "  Choose ③ to write it yourself first, then type /done when you wrote it.",
     );
     assert_eq!(saved(&dir), None);
 }
@@ -383,7 +381,6 @@ fn ctrl_c_while_waiting_for_the_review_pauses_at_the_boundary_and_side_goes_on_w
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/side"),
@@ -419,7 +416,6 @@ fn a_guidance_that_cannot_be_got_is_shown_and_the_user_still_writes() {
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/quit"),
@@ -448,7 +444,6 @@ fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing(
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/side"),
             input("/done"),
@@ -462,7 +457,7 @@ fn ctrl_c_while_waiting_for_the_guidance_pauses_at_the_boundary_without_writing(
     assert_eq!(ui.shown()[paused + 2], format!("  {HINT}"));
     shown_at(
         &ui,
-        "  Type /choose and choose to write it yourself first, then /done when you wrote it.",
+        "  Choose ③ to write it yourself first, then type /done when you wrote it.",
     );
     assert_eq!(saved(&dir), None);
 }
@@ -483,7 +478,6 @@ fn a_review_that_cannot_be_got_is_shown_and_done_still_passes() {
         vec![vec![("src/main.rs", WITH_DBG)]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/quit"),
@@ -516,7 +510,6 @@ fn lines_with_no_item_new_to_the_profile_say_so_and_the_main_line_goes_on() {
         vec![vec![("src/main.rs", "fn main() {\n    let _x = 1;\n}\n")]],
         [
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             input("/quit"),

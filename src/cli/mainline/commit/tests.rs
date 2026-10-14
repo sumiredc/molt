@@ -381,23 +381,24 @@ struct WritesOnDone {
 
 impl crate::ui::Ui for WritesOnDone {
     fn read_line(&mut self, prompt: &str) -> Result<crate::ui::Input, crate::ui::UiError> {
-        let input = self.ui.read_line(prompt)?;
-        if matches!(&input, crate::ui::Input::Line(line) if line == "/done") {
-            fs::write(&self.path, self.content).unwrap();
-        }
-        Ok(input)
+        self.ui.read_line(prompt)
     }
 
     fn show(&mut self, text: &str) {
         self.ui.show(text);
     }
 
-    fn select(
+    fn choose(
         &mut self,
         prompt: &str,
-        items: &[&str],
-    ) -> Result<Option<usize>, crate::ui::UiError> {
-        self.ui.select(prompt, items)
+        choices: &[(usize, &str)],
+        line_prompt: &str,
+    ) -> Result<crate::ui::Picked, crate::ui::UiError> {
+        let picked = self.ui.choose(prompt, choices, line_prompt)?;
+        if matches!(&picked, crate::ui::Picked::Line(line) if line == "/done") {
+            fs::write(&self.path, self.content).unwrap();
+        }
+        Ok(picked)
     }
 
     fn confirm(&mut self, prompt: &str) -> Result<Option<bool>, crate::ui::UiError> {
@@ -444,7 +445,6 @@ fn after_the_user_wrote_it_in_3_molt_proposes_the_commit_once_the_turn_goes_on_a
     let mut ui = WritesOnDone {
         ui: ScriptedUi::new([
             input("debug 1"),
-            input("/choose"),
             Step::Select(3),
             input("/done"),
             Step::Confirm(true),

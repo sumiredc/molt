@@ -38,6 +38,16 @@ pub enum Choice {
 }
 
 impl Choice {
+    /// Its number among the choices, `1` for ①: fixed, whichever are offered (PRD §8.6).
+    pub fn number(self) -> usize {
+        match self {
+            Choice::Unlock => 1,
+            Choice::Rewrite => 2,
+            Choice::UserWrote => 3,
+            Choice::Next => 4,
+        }
+    }
+
     /// The name in the message to the main line (PRD §8.5).
     pub fn name(self) -> &'static str {
         match self {
@@ -246,8 +256,9 @@ impl<'a> SubLine<'a> {
         .into_iter()
         .filter(|choice| match choice {
             Choice::Rewrite => !self.recurred,
-            Choice::Next => !self.taken_back,
-            Choice::Unlock | Choice::UserWrote => true,
+            // After ③ took the step back, ① and ② switch from it (PRD §8.6).
+            Choice::UserWrote | Choice::Next => !self.taken_back,
+            Choice::Unlock => true,
         })
         .collect()
     }

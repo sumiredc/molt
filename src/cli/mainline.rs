@@ -861,7 +861,7 @@ mod write {
                 "── side line: dbg_macro ────────────────────────────────────",
                 "  The step molt wrote to src/main.rs:\n  1 | fn main() {\n  2 |     dbg!(1);\n  3 | }",
                 "  `dbg_macro` (macros)\n\n  dbg! prints a value.",
-                "  Ask anything about it, as many times as you like. Type /choose to choose how to go on, or /abort to withdraw the request.",
+                "  Ask anything about it, as many times as you like, or choose how to go on below. Type /abort to withdraw the request.",
                 "── back to the main line ───────────────────────────────────",
                 "Request withdrawn.",
                 "molt took the step back: src/main.rs is as it was before it.",
