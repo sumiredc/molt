@@ -2,9 +2,9 @@
 
 [日本語版](README.ja.md)
 
-A Rust coding agent that writes code only in the ways its user can understand.
+A Rust coding agent that writes what its user already knows in bulk, and what they have not written yet one explained step at a time.
 
-molt keeps a profile of the Rust constructs you understand. When a request needs a construct you have never written, molt stops at that boundary, explains it on a side line, and lets you choose how to go on instead of silently writing code you cannot read.
+molt keeps a profile of the Rust constructs you have written. Code made of them, molt writes as it comes. When the code needs a construct you have never written, molt writes it in a small step, stops right after it, explains those lines on a side line, and lets you choose how to go on, instead of writing code you cannot read or writing around what you have yet to learn.
 
 ## Prerequisites
 
@@ -38,19 +38,20 @@ Run `molt` in the root of a cargo project (where `Cargo.toml` is):
 molt
 ```
 
-Type a request at `molt> `. Writes within your profile need no approval; after `cargo check` passes, molt proposes a commit message and commits only when you approve. `/quit` or Ctrl-D ends molt and prints the path of the session log.
+Type a request at `molt> `. Writes of what your profile has as `known` need no approval and do not stop; a write with anything else is a step, which stops at a boundary (below). After `cargo check` passes, molt proposes a commit message and commits only when you approve. `/quit` or Ctrl-D ends molt and prints the path of the session log.
 
 ## Choosing at a boundary
 
-When a request needs an item your profile does not allow yet, molt stops and opens a side line `molt [sub: <items>]> ` with an explanation. Ask as many questions as you like; they never enter the main line. Then type `/choose` and pick one:
+When code needs an item (a syntax element or a crate) your profile does not have as `known`, molt writes it as a small step: at most 3 such items and 30 changed lines. Right after the step it stops and opens a side line `molt [sub: <items>]> `, which shows the step's lines and explains them. Ask as many questions as you like; they never enter the main line. Then type `/choose` and pick one:
 
 | Choice | What happens |
 |---|---|
-| ① Understand, then delegate | The item becomes `known`, and molt uses it from now on |
-| ② Use a construct I know | The item becomes `seen`, and molt rewrites without it |
-| ③ Write it myself | molt shows where to write what. Write it and type `/done`; molt runs `cargo check` and reviews your lines, and the items in them become `known` |
+| ① Understood | The items become `known`, the step stays, and molt uses them from now on |
+| ② Write it without them | molt takes the step back, the items become `seen`, and molt writes that part without them |
+| ③ Write it myself | molt takes the step back and shows where to write what. Write it and type `/done`; molt runs `cargo check` and reviews your lines, and the items in them become `known` |
+| ④ Next | The step stays, and items you did not know become `seen`. The next step that uses them stops again, with a shorter explanation |
 
-`/abort` withdraws the request and changes nothing more; what molt already wrote for it stays and is shown with `cargo check`. After Ctrl-C on the side line, `/side` goes back to it. The full flow is in [PRD UC3](PRD.md#uc3-choose-at-a-boundary-side-line).
+`/abort` withdraws the request: molt takes the step back, and what it wrote before the step stays and is shown with `cargo check`. Ending molt at a boundary (Ctrl-D, or Ctrl-C while paused) takes the step back too. After Ctrl-C on the side line, `/side` goes back to it. The full flow is in [PRD UC3](PRD.md#uc3-choose-at-a-boundary-side-line).
 
 ## Limitations
 
@@ -83,7 +84,7 @@ Pass a copy of the profile, because choosing ① rewrites it. Then type:
 3. `y` to `Stage and commit only the files molt changed?` and to `Commit with this message?`
 4. `/quit`
 
-molt stops at the boundary for `dbg_macro`, writes `dbg!(1);` into `src/main.rs` after ①, and commits it as `Print 1 with dbg!`.
+molt writes `dbg!(1);` into `src/main.rs` as a step, stops at the boundary for `dbg_macro` and explains it, keeps the step after ①, and commits it as `Print 1 with dbg!`.
 
 ## Try it in a container
 
