@@ -383,7 +383,7 @@ sequenceDiagram
     C-->>T: 行・列・メッセージ
     T-->>L: parse エラー（コンパイル失敗と同じ扱い）
   end
-  Note over T,D: ターン中に書き込みがあれば、モデルの呼び出しに関係なく<br/>ターンの終わりに tools 側が cargo check を実行する
+  Note over T,D: ターン中に書き込みがあれば（取り消したステップと、/done が通った利用者のファイルも数える）、<br/>モデルの呼び出しに関係なく<br/>ターンの終わりに tools 側が cargo check を実行する
   T->>D: cargo check
   D-->>T: 結果
   T-->>L: 結果（失敗なら修正のターンへ）

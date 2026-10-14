@@ -383,7 +383,7 @@ sequenceDiagram
     C-->>T: line, column, message
     T-->>L: parse error (treated like a compile failure)
   end
-  Note over T,D: If anything was written during the turn, tools runs cargo check<br/>at the end of the turn regardless of the model's calls
+  Note over T,D: If anything was written during the turn (a step taken back counts,<br/>and so do the user's files of a /done that passed), tools runs cargo check<br/>at the end of the turn regardless of the model's calls
   T->>D: cargo check
   D-->>T: Result
   T-->>L: Result (on failure, a fixing turn follows)
