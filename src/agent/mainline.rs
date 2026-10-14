@@ -561,6 +561,8 @@ impl<'a> MainLine<'a> {
         }
         let mut message = resolution.message();
         if let Some(path) = &held.left {
+            // The messages of ② and ③ say the step was taken back; here it was not.
+            message = message.replace(" was taken back", " could not be taken back");
             message.push_str(&prompts::step_left(path));
         }
         self.messages.push(Message::User { content: message });

@@ -835,7 +835,9 @@ fn a_step_that_could_not_be_taken_back_is_noted_in_the_message_of_rewrite() {
         .pop()
         .unwrap();
     assert!(
-        message.contains("could not be taken back") && message.contains("`src/main.rs`"),
+        message.contains("could not be taken back")
+            && !message.contains(" was taken back")
+            && message.contains("`src/main.rs`"),
         "{message}"
     );
     assert_eq!(

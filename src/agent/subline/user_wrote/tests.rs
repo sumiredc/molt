@@ -871,3 +871,36 @@ fn an_error_on_a_line_the_user_did_not_change_in_their_file_does_not_fail_done()
 
     assert!(matches!(done, Done::Passed { .. }), "{done:?}");
 }
+
+#[test]
+fn an_error_without_a_place_fails_done_only_when_the_user_changed_a_cargo_toml() {
+    for (manifest, fails) in [(false, false), (true, true)] {
+        let dir = project();
+        let client = FakeChatClient::new();
+        let cargo = FakeCargo::new();
+        cargo.push(Ok(output(
+            false,
+            "error: no matching package named `gone` found\n",
+        )));
+        let mut main_line = main_line(&client, &cargo, &dir, Profile::new());
+        let boundary = stop_at_a_boundary(&client, &mut main_line);
+        let mut side = writing(&mut main_line, boundary);
+        fs::write(dir.path().join("src/main.rs"), WITH_DBG).unwrap();
+        if manifest {
+            fs::write(
+                dir.path().join("Cargo.toml"),
+                "[package]\nname = \"demo\"\n\n[dependencies]\ngone = \"1\"\n",
+            )
+            .unwrap();
+        }
+        client.push_chat(Ok(reply("review")));
+
+        let done = main_line.done(&mut side);
+
+        assert_eq!(
+            matches!(done, Done::Failed(_)),
+            fails,
+            "{manifest}: {done:?}"
+        );
+    }
+}

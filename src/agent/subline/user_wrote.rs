@@ -167,11 +167,14 @@ impl SubLine<'_> {
         }
         let reviewed = files.len();
         let check = tools.cargo_check();
-        // An error without a place may come of the user's change (a crate added to `Cargo.toml`
-        // that cannot be found), so it counts as theirs.
+        // An error without a place may come of a crate the user added to `Cargo.toml` that cannot
+        // be found, so it counts as theirs when they changed a `Cargo.toml`.
+        let changed_manifest = files
+            .iter()
+            .any(|file| file.path.rsplit('/').next() == Some("Cargo.toml"));
         let in_user_lines = |output: &CargoOutput| {
             error_places(output).iter().any(|place| match place {
-                None => true,
+                None => changed_manifest,
                 Some((path, line)) => files.iter().any(|file| {
                     tools.same_file(&file.path, path)
                         && diff::changed_lines(file.before.as_deref().unwrap_or(""), &file.after)
