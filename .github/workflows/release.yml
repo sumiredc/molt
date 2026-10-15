@@ -1,0 +1,93 @@
+name: Release
+
+on:
+  push:
+    tags: ['v[0-9]+.[0-9]+.[0-9]+']
+  # タグを打つ前にビルドだけ試す。タグを選んで実行しても Release は作らない
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  version-check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare the tag with the version in Cargo.toml
+        if: github.event_name == 'push'
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$TAG" ]; then
+            echo "The tag $TAG does not match the version $version in Cargo.toml" >&2
+            exit 1
+          fi
+
+  build:
+    needs: version-check
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      # workflow_dispatch の実行には、タグの代わりに dispatch を名前に入れる
+      NAME: molt-${{ github.event_name == 'push' && github.ref_name || 'dispatch' }}-${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # musl の std は rust-toolchain.toml の版に足す。ring は musl-gcc で C とアセンブリをビルドする
+      - name: Install the musl target
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+      - run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Package
+        run: |
+          mkdir dist
+          cp target/${{ matrix.target }}/release/molt LICENSE-APACHE LICENSE-MIT dist/
+          # macOS の tar（bsdtar）には拡張属性と ._ のファイルを入れさせない。GNU tar はこのフラグを持たない
+          flags=()
+          if [ "$RUNNER_OS" = macOS ]; then flags=(--no-xattrs --no-mac-metadata); fi
+          tar "${flags[@]}" -czf "$NAME.tar.gz" -C dist molt LICENSE-APACHE LICENSE-MIT
+          shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ env.NAME }}
+          path: |
+            ${{ env.NAME }}.tar.gz
+            ${{ env.NAME }}.tar.gz.sha256
+          if-no-files-found: error
+
+  release:
+    if: github.event_name == 'push'
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" dist/* --verify-tag --repo "$GITHUB_REPOSITORY" --title "molt $TAG" --generate-notes
