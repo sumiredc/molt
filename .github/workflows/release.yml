@@ -59,13 +59,13 @@ jobs:
           sudo apt-get install -y musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
-        env:
-          # macOS の tar に拡張属性（._molt など）を入れさせない
-          COPYFILE_DISABLE: 1
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/molt LICENSE-APACHE LICENSE-MIT dist/
-          tar czf "$NAME.tar.gz" -C dist molt LICENSE-APACHE LICENSE-MIT
+          # macOS の tar（bsdtar）には拡張属性と ._ のファイルを入れさせない。GNU tar はこのフラグを持たない
+          flags=()
+          if [ "$RUNNER_OS" = macOS ]; then flags=(--no-xattrs --no-mac-metadata); fi
+          tar "${flags[@]}" -czf "$NAME.tar.gz" -C dist molt LICENSE-APACHE LICENSE-MIT
           shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
