@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags: ['v*']
-  # タグを打つ前にビルドだけ試す。Release は作らない
+  # タグを打つ前にビルドだけ試す。タグを選んで実行しても Release は作らない
   workflow_dispatch:
 
 permissions:
@@ -21,7 +21,7 @@ jobs:
         with:
           persist-credentials: false
       - name: Compare the tag with the version in Cargo.toml
-        if: github.ref_type == 'tag'
+        if: github.event_name == 'push'
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 30
     env:
       # workflow_dispatch の実行には、タグの代わりに dispatch を名前に入れる
-      NAME: molt-${{ github.ref_type == 'tag' && github.ref_name || 'dispatch' }}-${{ matrix.target }}
+      NAME: molt-${{ github.event_name == 'push' && github.ref_name || 'dispatch' }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -58,6 +58,9 @@ jobs:
           sudo apt-get install -y musl-tools
       - run: cargo build --release --locked --target ${{ matrix.target }}
       - name: Package
+        env:
+          # macOS の tar に拡張属性（._molt など）を入れさせない
+          COPYFILE_DISABLE: 1
         run: |
           mkdir dist
           cp target/${{ matrix.target }}/release/molt LICENSE-APACHE LICENSE-MIT dist/
@@ -72,7 +75,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.ref_type == 'tag'
+    if: github.event_name == 'push'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -87,4 +90,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --title "molt $TAG" --generate-notes
+        run: gh release create "$TAG" dist/* --verify-tag --repo "$GITHUB_REPOSITORY" --title "molt $TAG" --generate-notes
