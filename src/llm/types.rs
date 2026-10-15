@@ -123,9 +123,11 @@ impl fmt::Display for ChatError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::FakeExhausted => write!(f, "the fake chat client has no more queued responses"),
-            Self::MissingApiKey { env } => {
-                write!(f, "the API key environment variable `{env}` is not set")
-            }
+            Self::MissingApiKey { env } => write!(
+                f,
+                "the API key environment variable `{env}` is not set; \
+                 add `export {env}=<your key>` to your shell's startup file (e.g. ~/.zshrc) and open a new shell"
+            ),
             Self::ApiKeyOverPlainHttp { env, host } => write!(
                 f,
                 "refusing to send the API key from `{env}` over plain HTTP to `{host}`; \
@@ -410,5 +412,14 @@ mod tests {
                 valid: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn missing_api_key_message_says_how_to_set_the_named_variable() {
+        let message = ChatError::MissingApiKey {
+            env: "TEST_API_KEY".to_owned(),
+        }
+        .to_string();
+        assert!(message.contains("export TEST_API_KEY="), "{message}");
     }
 }

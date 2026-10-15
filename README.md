@@ -13,15 +13,48 @@ molt keeps a profile of the Rust constructs you have written. Code made of them,
 
 ## Install
 
+Either way, the Rust toolchain of [Prerequisites](#prerequisites) is needed: molt runs `cargo check` in your project.
+
+From a [release](https://github.com/sumiredc/molt/releases), with a built binary for macOS (Apple silicon) and Linux (x86_64, statically linked). Pick the archive for your OS, put `molt` on your `PATH`, and check that it runs:
+
+```sh
+VERSION=v0.1.0
+# macOS (Apple silicon)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-aarch64-apple-darwin.tar.gz"
+tar -xzf "molt-$VERSION-aarch64-apple-darwin.tar.gz" molt
+# Linux (x86_64)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf "molt-$VERSION-x86_64-unknown-linux-musl.tar.gz" molt
+
+mv molt ~/.cargo/bin/
+molt --version
+```
+
+- macOS: an archive downloaded with a browser is quarantined, and Gatekeeper stops `molt` from running. Remove the mark with `xattr -d com.apple.quarantine molt` before moving it (`curl` does not set it)
+- Linux: the binary needs no libraries, but HTTPS needs the OS certificates (the `ca-certificates` package)
+
+Or from the source, which builds molt with the pinned toolchain:
+
 ```sh
 git clone https://github.com/sumiredc/molt
 cd molt
 cargo install --locked --path .
 ```
 
-## Create your profile
+## API key
 
-molt talks to a model through an OpenAI-compatible chat API. By default it uses Nebius Token Factory and reads the API key from the environment variable `NEBIUS_API_KEY`; to use another endpoint, set it up first as in [Configuration](#configuration).
+molt talks to a model through an OpenAI-compatible chat API. By default it uses [Nebius Token Factory](https://tokenfactory.nebius.com/) and reads the API key from the environment variable `NEBIUS_API_KEY`; to use another endpoint, set it up first as in [Configuration](#configuration).
+
+1. Create a key on the [API keys](https://tokenfactory.nebius.com/project/api-keys) page of Token Factory ([Authentication](https://docs.tokenfactory.nebius.com/api-reference/introduction) in its docs). The key is shown once, so copy it there
+2. Add the line below to your shell's startup file (`~/.zshrc`, `~/.bashrc`, ...) once, and open a new shell
+
+```sh
+export NEBIUS_API_KEY=…
+```
+
+Without the variable, every command that talks to the model (`molt doctor`, `molt init`, `molt`) stops with `` the API key environment variable `NEBIUS_API_KEY` is not set `` and the same instruction.
+
+## Create your profile
 
 ```sh
 molt doctor
@@ -64,6 +97,34 @@ Settings live in `config.toml` in molt's directory; [`examples/config.toml`](exa
 molt waits `timeout_secs` (300 by default) for each response, or, for a model `molt doctor` found it can stream, for anything of the response to arrive. A slow model, such as a local one, can take longer than that to write one file: run `molt doctor` first, and when molt still stops with `the chat API did not respond within 300 seconds`, raise `timeout_secs` under `[api]`.
 
 Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and `molt` prints both paths when it ends with `/quit` or Ctrl-D ([PRD §8.8](PRD.md#88-persistence)).
+
+## Nemotron on Nebius Token Factory
+
+molt sends each request to one of three roles, so that a request goes to a model of the size it needs. The defaults are the NVIDIA Nemotron 3 models on Token Factory; [`src/config.rs`](src/config.rs) holds them, and `[models]` and `[reasoning_effort]` in `config.toml` change them.
+
+| Role | Default model | What molt sends it | `reasoning_effort` |
+|---|---|---|---|
+| light | `nvidia/Nemotron-3_5-Lightning` | The judgement of the answers of `molt init` (one category per request, 3 at a time), the one-line policy after ② for writing without the items | `low` |
+| generate | `nvidia/nemotron-3-super-120b-a12b` | Writing the code, through tools such as `read_file`, `write_file` and `run_cargo` (the list is in [`src/agent/mainline.rs`](src/agent/mainline.rs)), the rewrite of ②, the review of ③, the commit message | `medium` |
+| reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | The explanation of a step, the same part within your profile, the guidance of ③ (where to write what), and the side-line Q&A | `high` |
+
+`molt doctor` confirmed, on 2026-10-15, that each default accepts everything molt relies on:
+
+```text
+role      model                              id  chat  tool_choice: required  json_schema  reasoning_effort  streaming
+light     nvidia/Nemotron-3_5-Lightning      ok  ok    ok                     ok           ok (low)          ok
+generate  nvidia/nemotron-3-super-120b-a12b  ok  ok    ok                     ok           ok (medium)       ok
+reason    nvidia/Nemotron-3-Ultra-550b-a55b  ok  ok    ok                     ok           ok (high)         ok
+```
+
+| Column | What it gives molt |
+|---|---|
+| `tool_choice: required` | `doctor` checks that the model answers with the named tool when told to, and that its arguments parse. The main line sends its tools with `tool_choice: auto`, and the code comes back as tool calls |
+| `json_schema` | The judgement of `molt init` comes back in the schema molt gives, never as prose to parse. A model without it gets `json_object`, the schema in the prompt, and one repair |
+| `reasoning_effort` | Once `doctor` has confirmed it for a role, the value of the role goes with every request |
+| `streaming` | The reply is streamed, so `timeout_secs` bounds a pause in it, not the whole explanation of the reason model |
+
+One pass on these defaults, in a fresh `cargo init` project, measured once on 2026-10-15: `molt init` with 5 categories answered took 19 s, and a request that stopped at a boundary (`numbers.iter().map(|&x| x * x).collect()`, three items not yet known), was explained by the reason model, kept with ①, passed `cargo check` and was committed took 29 s.
 
 ## Try it without a model
 
