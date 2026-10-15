@@ -1,9 +1,11 @@
 name: Release
 
+# タグと Release は GitHub の画面で同時に作る。このワークフローは Release を作らず、
+# ビルドした配布物をその Release に上げる
 on:
-  push:
-    tags: ['v[0-9]+.[0-9]+.[0-9]+']
-  # タグを打つ前にビルドだけ試す。タグを選んで実行しても Release は作らない
+  release:
+    types: [published]
+  # Release を作る前にビルドだけ試す。配布物は上げない
   workflow_dispatch:
 
 permissions:
@@ -20,8 +22,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      # release のトリガーにはタグ名のフィルタが無いので、v1.2.3 の形でないタグもここで止まる
       - name: Compare the tag with the version in Cargo.toml
-        if: github.event_name == 'push'
+        if: github.event_name == 'release'
         env:
           TAG: ${{ github.ref_name }}
         run: |
@@ -44,7 +47,7 @@ jobs:
     timeout-minutes: 30
     env:
       # workflow_dispatch の実行には、タグの代わりに dispatch を名前に入れる
-      NAME: molt-${{ github.event_name == 'push' && github.ref_name || 'dispatch' }}-${{ matrix.target }}
+      NAME: molt-${{ github.event_name == 'release' && github.ref_name || 'dispatch' }}-${{ matrix.target }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -75,7 +78,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    if: github.event_name == 'push'
+    if: github.event_name == 'release'
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -86,8 +89,9 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - name: Create the release
+      # --clobber は、job を再実行したときに同じ名前の配布物を置き換えるため
+      - name: Upload the assets to the release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --verify-tag --repo "$GITHUB_REPOSITORY" --title "molt $TAG" --generate-notes
+        run: gh release upload "$TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
