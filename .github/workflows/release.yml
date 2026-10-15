@@ -2,7 +2,6 @@ name: Release
 
 on:
   push:
-    # v1.2.3 の形だけ。filter pattern の + は直前の文字の 1 回以上の繰り返しで、. はそのままの文字
     tags: ['v[0-9]+.[0-9]+.[0-9]+']
   # タグを打つ前にビルドだけ試す。タグを選んで実行しても Release は作らない
   workflow_dispatch:
