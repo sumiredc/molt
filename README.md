@@ -98,6 +98,34 @@ molt waits `timeout_secs` (300 by default) for each response, or, for a model `m
 
 Set `MOLT_LOG` to anything but empty or `0` to also write the LLM request bodies: they go to `sessions/<time>-<pid>.requests.jsonl` in molt's directory, next to the session log `sessions/<time>-<pid>.jsonl`, and `molt` prints both paths when it ends with `/quit` or Ctrl-D ([PRD §8.8](PRD.md#88-persistence)).
 
+## Nemotron on Nebius Token Factory
+
+molt sends each request to one of three roles, so that a request goes to a model of the size it needs. The defaults are the NVIDIA Nemotron 3 models on Token Factory; [`src/config.rs`](src/config.rs) holds them, and `[models]` and `[reasoning_effort]` in `config.toml` change them.
+
+| Role | Default model | What molt sends it | `reasoning_effort` |
+|---|---|---|---|
+| light | `nvidia/Nemotron-3_5-Lightning` | The judgement of the answers of `molt init` (one category per request, 3 at a time), the one-line policy after ② for writing without the items | `low` |
+| generate | `nvidia/nemotron-3-super-120b-a12b` | Writing the code, through tools such as `read_file`, `write_file` and `run_cargo` (the list is in [`src/agent/mainline.rs`](src/agent/mainline.rs)), the rewrite of ②, the review of ③, the commit message | `medium` |
+| reason | `nvidia/Nemotron-3-Ultra-550b-a55b` | The explanation of a step, the same part within your profile, the guidance of ③ (where to write what), and the side-line Q&A | `high` |
+
+`molt doctor` confirmed, on 2026-10-15, that each default accepts everything molt relies on:
+
+```text
+role      model                              id  chat  tool_choice: required  json_schema  reasoning_effort  streaming
+light     nvidia/Nemotron-3_5-Lightning      ok  ok    ok                     ok           ok (low)          ok
+generate  nvidia/nemotron-3-super-120b-a12b  ok  ok    ok                     ok           ok (medium)       ok
+reason    nvidia/Nemotron-3-Ultra-550b-a55b  ok  ok    ok                     ok           ok (high)         ok
+```
+
+| Column | What it gives molt |
+|---|---|
+| `tool_choice: required` | `doctor` checks that the model answers with the named tool when told to, and that its arguments parse. The main line sends its tools with `tool_choice: auto`, and the code comes back as tool calls |
+| `json_schema` | The judgement of `molt init` comes back in the schema molt gives, never as prose to parse. A model without it gets `json_object`, the schema in the prompt, and one repair |
+| `reasoning_effort` | Once `doctor` has confirmed it for a role, the value of the role goes with every request |
+| `streaming` | The reply is streamed, so `timeout_secs` bounds a pause in it, not the whole explanation of the reason model |
+
+One pass on these defaults, in a fresh `cargo init` project, measured once on 2026-10-15: `molt init` with 5 categories answered took 19 s, and a request that stopped at a boundary (`numbers.iter().map(|&x| x * x).collect()`, three items not yet known), was explained by the reason model, kept with ①, passed `cargo check` and was committed took 29 s.
+
 ## Try it without a model
 
 `--fake PATH` replaces the model with a script of responses, so you can try one pass offline. From the root of this repository, with `molt` installed:
