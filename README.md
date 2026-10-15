@@ -13,15 +13,48 @@ molt keeps a profile of the Rust constructs you have written. Code made of them,
 
 ## Install
 
+Either way, the Rust toolchain of [Prerequisites](#prerequisites) is needed: molt runs `cargo check` in your project.
+
+From a [release](https://github.com/sumiredc/molt/releases), with a built binary for macOS (Apple silicon) and Linux (x86_64, statically linked). Pick the archive for your OS, put `molt` on your `PATH`, and check that it runs:
+
+```sh
+VERSION=v0.1.0
+# macOS (Apple silicon)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-aarch64-apple-darwin.tar.gz"
+tar -xzf "molt-$VERSION-aarch64-apple-darwin.tar.gz" molt
+# Linux (x86_64)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf "molt-$VERSION-x86_64-unknown-linux-musl.tar.gz" molt
+
+mv molt ~/.cargo/bin/
+molt --version
+```
+
+- macOS: an archive downloaded with a browser is quarantined, and Gatekeeper stops `molt` from running. Remove the mark with `xattr -d com.apple.quarantine molt` before moving it (`curl` does not set it)
+- Linux: the binary needs no libraries, but HTTPS needs the OS certificates (the `ca-certificates` package)
+
+Or from the source, which builds molt with the pinned toolchain:
+
 ```sh
 git clone https://github.com/sumiredc/molt
 cd molt
 cargo install --locked --path .
 ```
 
-## Create your profile
+## API key
 
-molt talks to a model through an OpenAI-compatible chat API. By default it uses Nebius Token Factory and reads the API key from the environment variable `NEBIUS_API_KEY`; to use another endpoint, set it up first as in [Configuration](#configuration).
+molt talks to a model through an OpenAI-compatible chat API. By default it uses [Nebius Token Factory](https://tokenfactory.nebius.com/) and reads the API key from the environment variable `NEBIUS_API_KEY`; to use another endpoint, set it up first as in [Configuration](#configuration).
+
+1. Create a key on the [API keys](https://tokenfactory.nebius.com/project/api-keys) page of Token Factory ([Authentication](https://docs.tokenfactory.nebius.com/api-reference/introduction) in its docs). The key is shown once, so copy it there
+2. Add the line below to your shell's startup file (`~/.zshrc`, `~/.bashrc`, ...) once, and open a new shell
+
+```sh
+export NEBIUS_API_KEY=…
+```
+
+Without the variable, every command that talks to the model (`molt doctor`, `molt init`, `molt`) stops with `` the API key environment variable `NEBIUS_API_KEY` is not set `` and the same instruction.
+
+## Create your profile
 
 ```sh
 molt doctor

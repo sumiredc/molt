@@ -13,15 +13,48 @@ molt は、利用者が書いたことのある Rust の書き方をプロファ
 
 ## インストール
 
+どちらの入れ方でも、[前提](#前提) の Rust の toolchain は要る。molt は利用者のプロジェクトで `cargo check` を実行するため。
+
+[release](https://github.com/sumiredc/molt/releases) から入れる。ビルド済みのバイナリが macOS（Apple silicon）と Linux（x86_64、静的リンク）にある。OS に合うアーカイブを選び、`molt` を `PATH` に置いて、動くことを確かめる:
+
+```sh
+VERSION=v0.1.0
+# macOS (Apple silicon)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-aarch64-apple-darwin.tar.gz"
+tar -xzf "molt-$VERSION-aarch64-apple-darwin.tar.gz" molt
+# Linux (x86_64)
+curl -LO "https://github.com/sumiredc/molt/releases/download/$VERSION/molt-$VERSION-x86_64-unknown-linux-musl.tar.gz"
+tar -xzf "molt-$VERSION-x86_64-unknown-linux-musl.tar.gz" molt
+
+mv molt ~/.cargo/bin/
+molt --version
+```
+
+- macOS: ブラウザで落としたアーカイブは quarantine の印が付き、Gatekeeper が `molt` の実行を止める。移す前に `xattr -d com.apple.quarantine molt` で印を外す（`curl` は印を付けない）
+- Linux: バイナリにライブラリは要らないが、HTTPS には OS の証明書（`ca-certificates` パッケージ）が要る
+
+またはソースから入れる。固定した toolchain で molt をビルドする:
+
 ```sh
 git clone https://github.com/sumiredc/molt
 cd molt
 cargo install --locked --path .
 ```
 
-## プロファイルを作る
+## API キー
 
-molt は OpenAI 互換の chat API でモデルと話す。既定の接続先は Nebius Token Factory で、API キーを環境変数 `NEBIUS_API_KEY` から読む。別の接続先を使うときは、先に [設定](#設定) のとおりに設定する。
+molt は OpenAI 互換の chat API でモデルと話す。既定の接続先は [Nebius Token Factory](https://tokenfactory.nebius.com/) で、API キーを環境変数 `NEBIUS_API_KEY` から読む。別の接続先を使うときは、先に [設定](#設定) のとおりに設定する。
+
+1. Token Factory の [API keys](https://tokenfactory.nebius.com/project/api-keys) のページでキーを作る（docs の [Authentication](https://docs.tokenfactory.nebius.com/api-reference/introduction)）。キーは 1 回しか表示されないので、そこで写す
+2. 下の行をシェルの設定ファイル（`~/.zshrc`、`~/.bashrc` など）に 1 回書き、新しいシェルを開く
+
+```sh
+export NEBIUS_API_KEY=…
+```
+
+この変数が無いと、モデルと話すコマンド（`molt doctor`、`molt init`、`molt`）はどれも `` the API key environment variable `NEBIUS_API_KEY` is not set `` と同じ案内を出して止まる。
+
+## プロファイルを作る
 
 ```sh
 molt doctor
