@@ -6,6 +6,8 @@ A Rust coding agent that writes what its user already knows in bulk, and what th
 
 molt keeps a profile of the Rust constructs you have written. Code made of them, molt writes as it comes. When the code needs a construct you have never written, molt writes it in a small step, stops right after it, explains those lines on a side line, and lets you choose how to go on, instead of writing code you cannot read or writing around what you have yet to learn.
 
+molt is named after what crabs do to grow: they shed their shell, which is called molting. Rust's mascot is a crab, and in molt the range of what you understand is your shell, and it widens the more you use molt. Grow your Rust, one shell at a time.
+
 ## Prerequisites
 
 - [rustup](https://rustup.rs/). The toolchain version is pinned in `rust-toolchain.toml`, and rustup installs it on the first `cargo` command
