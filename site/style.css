@@ -1,0 +1,407 @@
+:root {
+  color-scheme: light dark;
+  --bg: #faf7f0;
+  --surface: #ffffff;
+  --panel: #1a1916;
+  --panel-text: #ece7dc;
+  --text: #1b1a17;
+  --muted: #5d584e;
+  --line: #e3ddcf;
+  --accent: #c98a14;
+  --accent-strong: #9a6608;
+  --accent-text: #1b1a17;
+  --side: #1f7f86;
+  --radius: 14px;
+  --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #12110f;
+    --surface: #1c1b18;
+    --panel: #0b0a09;
+    --panel-text: #ece7dc;
+    --text: #ece7dc;
+    --muted: #a9a294;
+    --line: #2e2c27;
+    --accent: #e3a83a;
+    --accent-strong: #f0bd5c;
+    --accent-text: #12110f;
+    --side: #4fc3cc;
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--sans);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+}
+
+img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+}
+
+a {
+  color: var(--accent-strong);
+}
+
+code,
+pre {
+  font-family: var(--mono);
+  font-size: 0.9em;
+}
+
+:not(pre) > code {
+  padding: 0.1em 0.35em;
+  border-radius: 6px;
+  background: var(--line);
+  overflow-wrap: anywhere;
+}
+
+pre {
+  margin: 1rem 0;
+  padding: 1rem 1.25rem;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--panel-text);
+  overflow-x: auto;
+  line-height: 1.6;
+}
+
+.wrap {
+  width: 100%;
+  max-width: 1040px;
+  margin: 0 auto;
+  padding-left: 16px;
+  padding-right: 16px;
+}
+
+/* ヘッダー */
+
+.top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-top: 1rem;
+  padding-bottom: 1rem;
+}
+
+.top-mark {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--text);
+  font-family: var(--mono);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.top-mark img {
+  width: 28px;
+  height: 28px;
+}
+
+.top nav {
+  display: flex;
+  gap: 1rem;
+  font-size: 0.95rem;
+}
+
+.top nav a {
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.top nav a:hover {
+  color: var(--text);
+}
+
+/* ヒーロー */
+
+.hero {
+  padding-top: 3rem;
+  padding-bottom: 4rem;
+  text-align: center;
+}
+
+.hero h1 {
+  margin: 0 auto 1.5rem;
+  max-width: 420px;
+}
+
+.lead {
+  max-width: 40rem;
+  margin: 0 auto;
+  font-size: 1.2rem;
+}
+
+.tagline {
+  margin: 1.25rem 0 2rem;
+  color: var(--accent-strong);
+  font-family: var(--mono);
+  font-weight: 700;
+}
+
+.buttons {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 0.75rem;
+}
+
+.button {
+  display: inline-block;
+  padding: 0.7rem 1.4rem;
+  border: 2px solid var(--accent);
+  border-radius: 999px;
+  color: var(--text);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.button.primary {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+
+.button:hover {
+  border-color: var(--accent-strong);
+}
+
+/* 節 */
+
+section {
+  padding-top: 3.5rem;
+  padding-bottom: 3.5rem;
+  border-top: 1px solid var(--line);
+}
+
+h2 {
+  margin: 0 0 1rem;
+  font-size: 1.75rem;
+  line-height: 1.3;
+}
+
+h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1.1rem;
+  line-height: 1.4;
+}
+
+.note {
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* 流れの図 */
+
+.flow {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: flow;
+}
+
+.flow li {
+  position: relative;
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+  counter-increment: flow;
+}
+
+.flow li::before {
+  content: counter(flow);
+  display: inline-grid;
+  place-items: center;
+  width: 1.8rem;
+  height: 1.8rem;
+  margin-bottom: 0.5rem;
+  border-radius: 8px;
+  background: var(--accent);
+  color: var(--accent-text);
+  font-weight: 700;
+}
+
+.flow code {
+  font-weight: 700;
+}
+
+.flow p {
+  margin: 0.25rem 0 0;
+}
+
+/* 本線と副線 */
+
+.lanes {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.lane {
+  padding: 1.25rem 1.25rem 1.25rem 1.5rem;
+  border-radius: var(--radius);
+  background: var(--panel);
+  color: var(--panel-text);
+  border-left: 6px solid var(--accent);
+}
+
+.lane.side {
+  border-left-color: var(--side);
+}
+
+.lane-name {
+  margin: 0 0 0.75rem;
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--accent);
+}
+
+.lane.side .lane-name {
+  color: var(--side);
+}
+
+.lane ol {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.lane li + li {
+  margin-top: 0.4rem;
+}
+
+.lane code {
+  background: transparent;
+  padding: 0;
+  color: inherit;
+}
+
+.choices {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+}
+
+.choice {
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.choice p {
+  margin: 0;
+}
+
+/* 画面 */
+
+.gallery {
+  display: grid;
+  gap: 2rem;
+  margin: 1.5rem 0 0;
+}
+
+.gallery figure {
+  margin: 0;
+}
+
+.gallery img {
+  border-radius: var(--radius);
+  border: 1px solid var(--line);
+}
+
+.gallery figcaption {
+  margin-top: 0.5rem;
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+/* モデルの 3 役 */
+
+.roles {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.role {
+  padding: 1.25rem;
+  border: 1px solid var(--line);
+  border-top: 4px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+
+.role h3 {
+  font-family: var(--mono);
+}
+
+.role p {
+  margin: 0;
+}
+
+/* フッター */
+
+footer {
+  padding-top: 2rem;
+  padding-bottom: 3rem;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 0.95rem;
+}
+
+footer p {
+  margin: 0.25rem 0;
+}
+
+@media (max-width: 640px) {
+  body {
+    font-size: 1rem;
+  }
+
+  .hero {
+    padding-top: 2rem;
+    padding-bottom: 3rem;
+  }
+
+  .lead {
+    font-size: 1.05rem;
+  }
+
+  .lanes {
+    grid-template-columns: 1fr;
+  }
+
+  section {
+    padding-top: 2.5rem;
+    padding-bottom: 2.5rem;
+  }
+
+  h2 {
+    font-size: 1.45rem;
+  }
+}

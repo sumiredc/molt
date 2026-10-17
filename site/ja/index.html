@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>molt — 利用者と一緒に育つ Rust コーディングエージェント</title>
+  <meta name="description" content="利用者が書いたことのある書き方はまとめて、まだ書いたことのない書き方は説明しながら 1 ステップずつ書く Rust コーディングエージェント。">
+  <link rel="canonical" href="https://sumiredc.github.io/molt/ja/">
+  <link rel="alternate" hreflang="en" href="https://sumiredc.github.io/molt/">
+  <link rel="alternate" hreflang="ja" href="https://sumiredc.github.io/molt/ja/">
+  <link rel="icon" href="../assets/molt-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="../style.css">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="molt — Grow your Rust, one shell at a time.">
+  <meta property="og:description" content="利用者が書いたことのある書き方はまとめて、まだ書いたことのない書き方は説明しながら 1 ステップずつ書く Rust コーディングエージェント。">
+  <meta property="og:url" content="https://sumiredc.github.io/molt/ja/">
+  <meta property="og:image" content="https://sumiredc.github.io/molt/assets/molt-thumbnail.png">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+  <header class="wrap top">
+    <a class="top-mark" href="./"><img src="../assets/molt-mark.svg" alt="" width="28" height="28">molt</a>
+    <nav>
+      <a href="https://github.com/sumiredc/molt">GitHub</a>
+      <a href="../" hreflang="en" lang="en">English</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="wrap hero">
+      <h1>
+        <picture>
+          <source srcset="../assets/molt-logo-dark-bg.png" media="(prefers-color-scheme: dark)">
+          <img src="../assets/molt-logo-light-bg.png" alt="molt" width="896" height="300">
+        </picture>
+      </h1>
+      <p class="lead">利用者が書いたことのある書き方はまとめて、まだ書いたことのない書き方は説明しながら 1 ステップずつ書く Rust コーディングエージェント。</p>
+      <p class="tagline">Grow your Rust, one shell at a time.</p>
+      <div class="buttons">
+        <a class="button primary" href="https://github.com/sumiredc/molt/releases/latest">Release から入手する</a>
+        <a class="button" href="https://github.com/sumiredc/molt">GitHub で見る</a>
+      </div>
+    </div>
+
+    <section class="wrap" id="name">
+      <h2>molt という名前</h2>
+      <p>カニは殻を脱ぎ捨てて大きくなる。これを脱皮（molt）という。Rust のマスコットはカニで、molt では理解の範囲が殻にあたり、使うほど広がる。</p>
+    </section>
+
+    <section class="wrap" id="start">
+      <h2>使い始める</h2>
+      <ol class="flow">
+        <li><code>molt doctor</code><p>接続先と各モデルが何に対応しているかを確かめて記録する。</p></li>
+        <li><code>molt init</code><p>書いたことのある Rust について尋ね、確認のあとプロファイルを保存する。</p></li>
+        <li><code>molt</code><p>cargo のプロジェクトで、<code>molt&gt;</code> に依頼を打つ。</p></li>
+      </ol>
+    </section>
+
+    <section class="wrap" id="how">
+      <h2>仕組み</h2>
+      <p>molt は 2 本の線で動く。本線がコードを書く。プロファイルで <code>known</code> でない項目が要る書き込みは、小さなステップ（そうした項目は 3 つまで、変更は 30 行まで）として書き、直後に止まって副線を開く。</p>
+      <div class="lanes">
+        <div class="lane">
+          <p class="lane-name">本線 · molt&gt;</p>
+          <ol>
+            <li>利用者が依頼を打つ</li>
+            <li>知っている書き方は、止まらずにまとめて書く</li>
+            <li>書いたことのない項目は小さなステップになり、境界で止まる</li>
+            <li><code>cargo check</code> が通ったら、利用者が承認したときだけ commit する</li>
+          </ol>
+        </div>
+        <div class="lane side">
+          <p class="lane-name">副線 · molt [sub: 項目]&gt;</p>
+          <ol>
+            <li>ステップの行を示して解説する</li>
+            <li>同じ部分をプロファイルの範囲で書いたものを示す</li>
+            <li>質問に何度でも答える。質問は本線に入らない</li>
+            <li>利用者が ①〜④ から選ぶ</li>
+          </ol>
+        </div>
+      </div>
+      <div class="choices">
+        <div class="choice">
+          <h3>① 理解した</h3>
+          <p>ステップは残り、項目が <code>known</code> になり、molt は以後それを使う。</p>
+        </div>
+        <div class="choice">
+          <h3>② 使わずに書く</h3>
+          <p>molt はステップを取り消し、その部分を項目を使わずに書き直す。</p>
+        </div>
+        <div class="choice">
+          <h3>③ 自分で書く</h3>
+          <p>molt はステップを取り消し、どこに何を書くかを示す。<code>/done</code> を打つと、molt が利用者の行を確かめてレビューする。</p>
+        </div>
+        <div class="choice">
+          <h3>④ 次へ</h3>
+          <p>ステップは残る。次にその項目を使うステップでも、短い解説とともに止まる。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap" id="screens">
+      <h2>画面</h2>
+      <div class="gallery">
+        <figure>
+          <a href="../assets/gallery-1.png"><img src="../assets/gallery-1.png" alt="Rust のカテゴリごとのタブがある molt init が、借用をどのくらい知っているか、どこで使ったかを尋ねている" width="1920" height="1280" loading="lazy"></a>
+          <figcaption><code>molt init</code> は、書いたことのある書き方をカテゴリごとのタブで尋ねる。</figcaption>
+        </figure>
+        <figure>
+          <a href="../assets/gallery-2.png"><img src="../assets/gallery-2.png" alt="判定したプロファイル。各項目が known か unknown かと理由、項目を直すためのプロンプト" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>判定したプロファイル。保存の前にどの項目も直せる。</figcaption>
+        </figure>
+        <figure>
+          <a href="../assets/gallery-3.png"><img src="../assets/gallery-3.png" alt="副線が .sum() を解説し、for ループで書いた同じ関数と 4 つの選択肢を示している" width="1920" height="1280" loading="lazy"></a>
+          <figcaption><code>.sum()</code> の境界。解説、同じ部分をプロファイルの範囲で書いたもの、4 つの選択肢。</figcaption>
+        </figure>
+        <figure>
+          <a href="../assets/gallery-4.png"><img src="../assets/gallery-4.png" alt="map・collect・クロージャを使うステップの副線と、プロファイルの範囲で書いた版" width="1920" height="1280" loading="lazy"></a>
+          <figcaption><code>map</code>・<code>collect</code>・クロージャを 1 つのステップで。</figcaption>
+        </figure>
+        <figure>
+          <a href="../assets/gallery-5.png"><img src="../assets/gallery-5.png" alt="ステップの差分、提案された commit メッセージ、2 回の承認のあとの commit" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>① のあと。差分、提案されたメッセージ、承認したときだけの commit。</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="wrap" id="models">
+      <h2>Nebius Token Factory の Nemotron</h2>
+      <p>molt はリクエストを 3 つの役割のどれかに送り、要る大きさのモデルに届ける。既定は <a href="https://tokenfactory.nebius.com/">Nebius Token Factory</a> の NVIDIA Nemotron 3 のモデルで、molt が頼る前に <code>molt doctor</code> がそれぞれの対応を確かめる。</p>
+      <div class="roles">
+        <div class="role">
+          <h3>light</h3>
+          <p><code>molt init</code> の答えを判定してプロファイルにし、② のあとの 1 行の方針を書く。</p>
+        </div>
+        <div class="role">
+          <h3>generate</h3>
+          <p>ツールを通してコードを書き、② の書き直し、③ のレビュー、commit メッセージを書く。</p>
+        </div>
+        <div class="role">
+          <h3>reason</h3>
+          <p>ステップを解説し、同じ部分をプロファイルの範囲で書き、③ を案内し、副線で答える。</p>
+        </div>
+      </div>
+      <p class="note">既定のモデルと変え方: <a href="https://github.com/sumiredc/molt/blob/main/README.ja.md#nebius-token-factory-の-nemotron">README</a></p>
+    </section>
+
+    <section class="wrap" id="hackathon">
+      <h2>ハッカソン</h2>
+      <p>molt は <a href="https://nebiusglobalaihackathon.devpost.com/">Nebius x NVIDIA Global AI Hackathon</a> の Coding and Agentic Engineering トラックへの提出作。</p>
+    </section>
+
+    <section class="wrap" id="install">
+      <h2>インストール</h2>
+      <p>molt は利用者のプロジェクトで <code>cargo check</code> を実行するため、Rust の toolchain（<a href="https://rustup.rs/">rustup</a>）が要る。ビルド済みのバイナリは macOS（Apple silicon）と Linux（x86_64）の分が <a href="https://github.com/sumiredc/molt/releases/latest">Release</a> にある。<a href="https://github.com/sumiredc/molt/blob/main/README.ja.md#インストール">README</a> のとおりに <code>molt</code> を <code>PATH</code> に置き、<a href="https://github.com/sumiredc/molt/blob/main/README.ja.md#api-キー">API キー</a>を <code>NEBIUS_API_KEY</code> に設定してから:</p>
+<pre><code>molt doctor
+molt init</code></pre>
+      <p class="note">README には、落とすコマンド、macOS の Gatekeeper が <code>molt</code> を止めたときの対処、ソースからのビルドもある。</p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p><a href="https://github.com/sumiredc/molt/blob/main/LICENSE-APACHE">Apache License 2.0</a> か <a href="https://github.com/sumiredc/molt/blob/main/LICENSE-MIT">MIT License</a> の、どちらかを選んで使える（<code>Apache-2.0 OR MIT</code>）。</p>
+    <p><a href="https://github.com/sumiredc/molt">github.com/sumiredc/molt</a></p>
+  </footer>
+</body>
+</html>

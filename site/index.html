@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>molt — a Rust coding agent that grows with you</title>
+  <meta name="description" content="A Rust coding agent that writes what its user already knows in bulk, and what they have not written yet one explained step at a time.">
+  <link rel="canonical" href="https://sumiredc.github.io/molt/">
+  <link rel="alternate" hreflang="en" href="https://sumiredc.github.io/molt/">
+  <link rel="alternate" hreflang="ja" href="https://sumiredc.github.io/molt/ja/">
+  <link rel="icon" href="assets/molt-mark.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="style.css">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="molt — Grow your Rust, one shell at a time.">
+  <meta property="og:description" content="A Rust coding agent that writes what its user already knows in bulk, and what they have not written yet one explained step at a time.">
+  <meta property="og:url" content="https://sumiredc.github.io/molt/">
+  <meta property="og:image" content="https://sumiredc.github.io/molt/assets/molt-thumbnail.png">
+  <meta name="twitter:card" content="summary_large_image">
+</head>
+<body>
+  <header class="wrap top">
+    <a class="top-mark" href="./"><img src="assets/molt-mark.svg" alt="" width="28" height="28">molt</a>
+    <nav>
+      <a href="https://github.com/sumiredc/molt">GitHub</a>
+      <a href="ja/" hreflang="ja" lang="ja">日本語</a>
+    </nav>
+  </header>
+
+  <main>
+    <div class="wrap hero">
+      <h1>
+        <picture>
+          <source srcset="assets/molt-logo-dark-bg.png" media="(prefers-color-scheme: dark)">
+          <img src="assets/molt-logo-light-bg.png" alt="molt" width="896" height="300">
+        </picture>
+      </h1>
+      <p class="lead">A Rust coding agent that writes what you already know in bulk, and what you have not written yet one explained step at a time.</p>
+      <p class="tagline">Grow your Rust, one shell at a time.</p>
+      <div class="buttons">
+        <a class="button primary" href="https://github.com/sumiredc/molt/releases/latest">Download a release</a>
+        <a class="button" href="https://github.com/sumiredc/molt">View on GitHub</a>
+      </div>
+    </div>
+
+    <section class="wrap" id="name">
+      <h2>Why “molt”</h2>
+      <p>Crabs grow by shedding their shell, which is called molting. Rust’s mascot is a crab, and in molt the range of what you understand is your shell: it widens the more you use molt.</p>
+    </section>
+
+    <section class="wrap" id="start">
+      <h2>Getting started</h2>
+      <ol class="flow">
+        <li><code>molt doctor</code><p>Checks what the endpoint and each model support, and records it.</p></li>
+        <li><code>molt init</code><p>Asks about the Rust you have written, and saves your profile after you confirm it.</p></li>
+        <li><code>molt</code><p>In a cargo project, type a request at <code>molt&gt;</code>.</p></li>
+      </ol>
+    </section>
+
+    <section class="wrap" id="how">
+      <h2>How it works</h2>
+      <p>molt works on two lines. The main line writes the code. When a write needs an item your profile does not have as <code>known</code>, molt writes it as a small step (at most 3 such items and 30 changed lines), stops right after it, and opens a side line.</p>
+      <div class="lanes">
+        <div class="lane">
+          <p class="lane-name">Main line · molt&gt;</p>
+          <ol>
+            <li>You type a request</li>
+            <li>What you know is written in bulk, without stopping</li>
+            <li>An item you have not written becomes a small step, and molt stops at the boundary</li>
+            <li>After <code>cargo check</code> passes, molt commits only when you approve</li>
+          </ol>
+        </div>
+        <div class="lane side">
+          <p class="lane-name">Side line · molt [sub: items]&gt;</p>
+          <ol>
+            <li>Shows the lines of the step and explains them</li>
+            <li>Shows the same part written within your profile</li>
+            <li>Answers as many questions as you like; they never enter the main line</li>
+            <li>You choose one of ① to ④</li>
+          </ol>
+        </div>
+      </div>
+      <div class="choices">
+        <div class="choice">
+          <h3>① Understood</h3>
+          <p>The step stays, the items become <code>known</code>, and molt uses them from now on.</p>
+        </div>
+        <div class="choice">
+          <h3>② Write it without them</h3>
+          <p>molt takes the step back and writes that part without the items.</p>
+        </div>
+        <div class="choice">
+          <h3>③ Write it myself</h3>
+          <p>molt takes the step back and shows where to write what. Type <code>/done</code>, and molt checks and reviews your lines.</p>
+        </div>
+        <div class="choice">
+          <h3>④ Next</h3>
+          <p>The step stays. The next step that uses the items stops again, with a shorter explanation.</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="wrap" id="screens">
+      <h2>Screens</h2>
+      <div class="gallery">
+        <figure>
+          <a href="assets/gallery-1.png"><img src="assets/gallery-1.png" alt="molt init with a tab for each category of Rust, asking how well you know borrowing and where you have used it" width="1920" height="1280" loading="lazy"></a>
+          <figcaption><code>molt init</code> asks what you have written, one category per tab.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/gallery-2.png"><img src="assets/gallery-2.png" alt="The judged profile, each item known or unknown with the reason, and a prompt to correct an item" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>The judged profile. Correct any item before it is saved.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/gallery-3.png"><img src="assets/gallery-3.png" alt="The side line explaining .sum(), the same function written with a for loop, and the four choices" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>A boundary at <code>.sum()</code>: the explanation, the same part within your profile, and the four choices.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/gallery-4.png"><img src="assets/gallery-4.png" alt="The side line for a step with map, collect and a closure, with the version written within the profile" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>One step with <code>map</code>, <code>collect</code> and a closure.</figcaption>
+        </figure>
+        <figure>
+          <a href="assets/gallery-5.png"><img src="assets/gallery-5.png" alt="The diff of the step, the proposed commit message, and the commit after two approvals" width="1920" height="1280" loading="lazy"></a>
+          <figcaption>After ①: the diff, the proposed message, and a commit only after you approve.</figcaption>
+        </figure>
+      </div>
+    </section>
+
+    <section class="wrap" id="models">
+      <h2>Nemotron on Nebius Token Factory</h2>
+      <p>molt sends each request to one of three roles, so that a request goes to a model of the size it needs. The defaults are NVIDIA Nemotron 3 models on <a href="https://tokenfactory.nebius.com/">Nebius Token Factory</a>, and <code>molt doctor</code> checks what each of them supports before molt relies on it.</p>
+      <div class="roles">
+        <div class="role">
+          <h3>light</h3>
+          <p>Judges the answers of <code>molt init</code> into your profile, and writes the one-line policy after ②.</p>
+        </div>
+        <div class="role">
+          <h3>generate</h3>
+          <p>Writes the code through tools, the rewrite of ②, the review of ③, and the commit message.</p>
+        </div>
+        <div class="role">
+          <h3>reason</h3>
+          <p>Explains a step, writes the same part within your profile, guides ③, and answers on the side line.</p>
+        </div>
+      </div>
+      <p class="note">The default models and how to change them: <a href="https://github.com/sumiredc/molt#nemotron-on-nebius-token-factory">README</a>.</p>
+    </section>
+
+    <section class="wrap" id="hackathon">
+      <h2>Hackathon</h2>
+      <p>molt is a submission to the <a href="https://nebiusglobalaihackathon.devpost.com/">Nebius x NVIDIA Global AI Hackathon</a>, in the Coding and Agentic Engineering track.</p>
+    </section>
+
+    <section class="wrap" id="install">
+      <h2>Install</h2>
+      <p>molt runs <code>cargo check</code> in your project, so it needs the Rust toolchain (<a href="https://rustup.rs/">rustup</a>). Built binaries for macOS (Apple silicon) and Linux (x86_64) are on the <a href="https://github.com/sumiredc/molt/releases/latest">release</a> page. Following the <a href="https://github.com/sumiredc/molt#install">README</a>, put <code>molt</code> on your <code>PATH</code> and set the <a href="https://github.com/sumiredc/molt#api-key">API key</a> in <code>NEBIUS_API_KEY</code>, then:</p>
+<pre><code>molt doctor
+molt init</code></pre>
+      <p class="note">The README also has the download commands, what to do when macOS Gatekeeper stops <code>molt</code>, and how to build from source.</p>
+    </section>
+  </main>
+
+  <footer class="wrap">
+    <p>Licensed under <a href="https://github.com/sumiredc/molt/blob/main/LICENSE-APACHE">Apache License 2.0</a> or <a href="https://github.com/sumiredc/molt/blob/main/LICENSE-MIT">MIT License</a> at your option (<code>Apache-2.0 OR MIT</code>).</p>
+    <p><a href="https://github.com/sumiredc/molt">github.com/sumiredc/molt</a></p>
+  </footer>
+</body>
+</html>
