@@ -210,6 +210,18 @@ h3 {
   font-size: 0.95rem;
 }
 
+/* デモ */
+
+.video {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border: 0;
+  border-radius: var(--radius);
+  background: var(--panel);
+}
+
 /* 流れの図 */
 
 .flow {
