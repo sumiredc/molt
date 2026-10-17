@@ -136,6 +136,11 @@ fn session_logs_are_created_readable_by_the_user_only_in_a_directory_only_the_us
     assert_eq!(mode(log.path().unwrap()), 0o600);
     assert_eq!(mode(log.requests_path().unwrap()), 0o600);
     fs::create_dir(dir.path().join("other")).unwrap();
+    // Under a umask of 077 the modes come out the same without molt setting them, and the test
+    // would pass without the fix; CI must not be such an environment.
+    if std::env::var_os("CI").is_some() {
+        assert_ne!(mode(&dir.path().join("other")), 0o700);
+    }
     assert_eq!(
         mode(&dir.path().join("profile")),
         mode(&dir.path().join("other"))

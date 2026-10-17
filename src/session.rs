@@ -284,6 +284,7 @@ fn create_dir(dir: &Path) -> io::Result<()> {
     if let Some(parent) = dir.parent() {
         fs::create_dir_all(parent)?;
     }
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut builder = DirBuilder::new();
     #[cfg(unix)]
     std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
