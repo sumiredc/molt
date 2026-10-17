@@ -41,7 +41,7 @@ impl TerminalUi {
         choices: &[(usize, &str)],
         line_prompt: &str,
     ) -> Result<Picked, UiError> {
-        self.screen.print(prompt);
+        self.screen.print(&super::printable(prompt));
         for (at, (number, label)) in choices.iter().enumerate() {
             self.screen.print(&choices::line(*number, label, at == 0));
         }

@@ -389,3 +389,23 @@ fn a_missing_path_is_reported_on_stderr_with_exit_2() {
     assert_eq!(output.status.code(), Some(2));
     assert!(stderr(&output).contains("nope.rs"), "{}", stderr(&output));
 }
+
+#[test]
+fn control_characters_in_file_names_are_not_printed() {
+    let dir = project(&[
+        ("a\u{1b}[31mplanted.rs", USES_DBG),
+        ("b\u{1b}[31mplanted.rs", "fn main( {\n"),
+    ]);
+    fs::write(dir.path().join("c\u{1b}[31mplanted.rs"), [0xff]).unwrap();
+    let profile = profile(&dir, "");
+    let output = check(dir.path(), &profile, &[]);
+    let (stdout, stderr) = (stdout(&output), stderr(&output));
+    assert!(
+        stdout.contains("a[31mplanted.rs:2: dbg_macro"),
+        "{stdout:?}"
+    );
+    assert!(stderr.contains("b[31mplanted.rs:"), "{stderr:?}");
+    assert!(stderr.contains("c[31mplanted.rs: "), "{stderr:?}");
+    assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
+    assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
+}

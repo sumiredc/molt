@@ -12,6 +12,7 @@ use std::process::ExitCode;
 
 use crate::checker::{self, CheckContext, CheckReport, Finding};
 use crate::profile::store::{Profile, StoreError};
+use crate::ui::printable;
 use crate::workspace::modules::ModuleScope;
 
 /// The exit code when a path, the profile or a file could not be checked.
@@ -46,7 +47,7 @@ pub(super) fn run(profile_flag: Option<&Path>, paths: &[PathBuf]) -> ExitCode {
         let content = match fs::read_to_string(file) {
             Ok(content) => content,
             Err(error) => {
-                eprintln!("{}: {error}", file.display());
+                eprintln!("{}", printable(&format!("{}: {error}", file.display())));
                 failed = true;
                 continue;
             }
@@ -63,11 +64,11 @@ pub(super) fn run(profile_flag: Option<&Path>, paths: &[PathBuf]) -> ExitCode {
                 found = true;
                 for finding in &findings {
                     // A closed pipe (`molt check | head`) is not an error.
-                    let _ = writeln!(out, "{}", line(file, finding));
+                    let _ = writeln!(out, "{}", printable(&line(file, finding)));
                 }
             }
             CheckReport::ParseError(error) => {
-                eprintln!("{}:{error}", file.display());
+                eprintln!("{}", printable(&format!("{}:{error}", file.display())));
                 failed = true;
             }
         }
@@ -125,7 +126,7 @@ fn load_profile(profile_flag: Option<&Path>) -> Result<Profile, String> {
 /// collected. Returns whether every path could be read.
 fn collect(path: &Path, files: &mut Vec<PathBuf>) -> bool {
     let report = |error: io::Error| {
-        eprintln!("{}: {error}", path.display());
+        eprintln!("{}", printable(&format!("{}: {error}", path.display())));
         false
     };
     match fs::metadata(path) {
@@ -156,7 +157,7 @@ fn collect(path: &Path, files: &mut Vec<PathBuf>) -> bool {
         let file_type = match fs::symlink_metadata(&entry) {
             Ok(metadata) => metadata.file_type(),
             Err(error) => {
-                eprintln!("{}: {error}", entry.display());
+                eprintln!("{}", printable(&format!("{}: {error}", entry.display())));
                 ok = false;
                 continue;
             }
@@ -171,7 +172,7 @@ fn collect(path: &Path, files: &mut Vec<PathBuf>) -> bool {
                 Ok(metadata) if metadata.is_dir() => {}
                 Ok(_) => files.push(entry),
                 Err(error) => {
-                    eprintln!("{}: {error}", entry.display());
+                    eprintln!("{}", printable(&format!("{}: {error}", entry.display())));
                     ok = false;
                 }
             }

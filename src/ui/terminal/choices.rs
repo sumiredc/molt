@@ -12,7 +12,7 @@ use crossterm::queue;
 use crossterm::style::Stylize;
 use crossterm::terminal::{self, Clear, ClearType, disable_raw_mode, enable_raw_mode};
 
-use crate::ui::{Picked, circled};
+use crate::ui::{Picked, circled, printable};
 
 /// What molt says under the choices.
 const GUIDE: &str =
@@ -65,10 +65,11 @@ pub(super) fn number(c: char) -> Option<usize> {
     }
 }
 
-/// The line of the choice `label` numbered `number`, `❯` before it when in focus.
+/// The line of the choice `label` numbered `number`, `❯` before it when in focus. A label may
+/// hold a crate name the model wrote, so it is written as text, not as escapes.
 pub(super) fn line(number: usize, label: &str, focused: bool) -> String {
     let mark = if focused { '❯' } else { ' ' };
-    format!("{mark} {} {label}", circled(number))
+    format!("{mark} {} {}", circled(number), printable(label))
 }
 
 /// What the user did at the choices, as keys: picked, or started a line, which the caller reads
@@ -111,8 +112,7 @@ pub(super) fn read(prompt: &str, choices: &[(usize, &str)], styled: bool) -> io:
     let _raw = Raw::enter()?;
     let mut events = Terminal;
     drop_pending(&mut events)?;
-    write!(out, "{prompt}\r\n")?;
-    let rows = draw(&mut out, choices, 0, styled, width, 0)?;
+    let rows = list(&mut out, prompt, choices, styled, width)?;
     keys(&mut events, choices, |focus| {
         draw(&mut out, choices, focus, styled, width, rows).map(|_| ())
     })
@@ -218,6 +218,19 @@ fn typed_after(first: char, typed: impl IntoIterator<Item = Event>) -> Keys {
     }
 }
 
+/// Writes `prompt` and draws the choices under it with the first in focus. Returns the rows the
+/// choices take, as [`draw`] does.
+fn list(
+    out: &mut impl Write,
+    prompt: &str,
+    choices: &[(usize, &str)],
+    styled: bool,
+    width: usize,
+) -> io::Result<u16> {
+    write!(out, "{}\r\n", printable(prompt))?;
+    draw(out, choices, 0, styled, width, 0)
+}
+
 /// Draws the choices and the guide from where the cursor is, after moving up `above` rows to
 /// where they were drawn before. Returns the rows they take, the lines wider than the terminal
 /// wrapped. Each character is taken as 1 column: molt's words are English, and the item names
@@ -279,6 +292,18 @@ impl Drop for Raw {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn control_characters_in_the_prompt_and_the_labels_are_not_drawn() {
+        let mut out = Vec::new();
+        let choices = [(1, "add \u{1b}[31mplanted"), (2, "skip")];
+        list(&mut out, "Which \u{1b}[31mplanted?", &choices, true, 80).unwrap();
+        draw(&mut out, &choices, 1, true, 80, 2).unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("Which [31mplanted?"), "{out:?}");
+        assert!(out.contains("add [31mplanted"), "{out:?}");
+        assert!(!out.contains("\u{1b}[31mplanted"), "{out:?}");
+    }
 
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)

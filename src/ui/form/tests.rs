@@ -349,6 +349,27 @@ fn the_question_names_the_checked_items_with_the_material_under_it() {
 }
 
 #[test]
+fn control_characters_in_the_material_are_not_drawn() {
+    let mut form = form();
+    form.tabs[0].material = vec![vec!["x at src/\u{1b}[31mplanted.rs:3".to_owned()]];
+    let mut state = FormState::new(&form, None);
+    press(
+        &mut state,
+        &[Key::Space, Key::Down, Key::Down, Key::Down, Key::Space],
+    );
+    let screen = render(&state, 80);
+    assert!(
+        screen
+            .lines
+            .iter()
+            .any(|line| line == "  x at src/[31mplanted.rs:3"),
+        "{:?}",
+        screen.lines
+    );
+    assert!(!screen.lines.iter().any(|line| line.contains('\u{1b}')));
+}
+
+#[test]
 fn the_row_of_tabs_brackets_the_open_tab_and_wraps() {
     let form = form();
     let mut state = FormState::new(&form, None);

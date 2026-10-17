@@ -18,6 +18,8 @@ use std::collections::BTreeSet;
 
 use unicode_width::UnicodeWidthChar;
 
+use crate::ui::printable;
+
 /// Where a tab's question takes the names of the checked items.
 pub const ITEMS: &str = "{items}";
 
@@ -450,7 +452,8 @@ pub(crate) fn render(state: &FormState<'_>, width: usize) -> Screen {
                 lines.extend(wrap(&form.question(state.tab, values), width));
                 for &item in &values.checked {
                     for line in tab.material.get(item).into_iter().flatten() {
-                        lines.extend(wrap(&format!("  {line}"), width));
+                        // The material names files of the user's repository.
+                        lines.extend(wrap(&format!("  {}", printable(line)), width));
                     }
                 }
                 lines.push(String::new());

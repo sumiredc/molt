@@ -10,6 +10,7 @@ use crate::config;
 use crate::profile::element::{Category, Element};
 use crate::profile::status::{ItemKey, Provenance, parse_setting};
 use crate::profile::store::{Profile, StoreError, Timestamp};
+use crate::ui::printable;
 
 /// The name of the profile file in the molt directory.
 const PROFILE_FILE_NAME: &str = "profile.toml";
@@ -92,7 +93,9 @@ fn moved_note(path: &Path, profile: &Profile) -> Option<String> {
 
 fn show(path: &Path) -> Result<(), String> {
     let profile = load(path)?;
-    print(&render(&profile))
+    // A crate key may have come from a Cargo.toml molt did not write, before
+    // molt checked crate names.
+    print(&printable(&render(&profile)))
 }
 
 /// Sets `key` to `status` by hand. An invalid key or status is rejected before
