@@ -122,6 +122,42 @@ fn session_logs_get_a_file_each_in_a_directory_created_for_them() {
     assert_eq!(files_in(&sessions).len(), 4);
 }
 
+#[cfg(unix)]
+#[test]
+fn session_logs_are_created_readable_by_the_user_only_in_a_directory_only_the_user_can_enter() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("profile").join("sessions");
+    let log = SessionLog::create(&sessions, true).unwrap();
+
+    let mode = |path: &Path| fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(&sessions), 0o700);
+    assert_eq!(mode(log.path().unwrap()), 0o600);
+    assert_eq!(mode(log.requests_path().unwrap()), 0o600);
+    fs::create_dir(dir.path().join("other")).unwrap();
+    assert_eq!(
+        mode(&dir.path().join("profile")),
+        mode(&dir.path().join("other"))
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn an_existing_sessions_directory_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let sessions = dir.path().join("sessions");
+    fs::create_dir(&sessions).unwrap();
+    fs::set_permissions(&sessions, fs::Permissions::from_mode(0o750)).unwrap();
+
+    SessionLog::create(&sessions, false).unwrap();
+
+    let mode = fs::metadata(&sessions).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode, 0o750);
+}
+
 #[test]
 fn a_disabled_session_log_writes_nothing() {
     let log = SessionLog::disabled();

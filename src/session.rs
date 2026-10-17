@@ -7,7 +7,7 @@
 
 use std::cell::RefCell;
 use std::ffi::OsString;
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, DirBuilder, File, OpenOptions};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
@@ -203,7 +203,7 @@ impl SessionLog {
     /// `<time>-<pid>.jsonl`, and `<time>-<pid>.requests.jsonl` for the request bodies when
     /// `request_bodies` is true. `<time>` is UTC, such as `20261010T123456Z`.
     pub fn create(dir: &Path, request_bodies: bool) -> io::Result<Self> {
-        fs::create_dir_all(dir)?;
+        create_dir(dir)?;
         let time = Timestamp::now().to_string().replace([':', '-'], "");
         let pid = std::process::id();
         // A session never writes into another one's file: the name of a later session in the
@@ -277,12 +277,32 @@ impl SessionLog {
     }
 }
 
+/// Creates `dir` for the logs unless it exists, with mode 0700 on Unix (PRD §8.8). Only `dir`
+/// gets the mode: its parents, such as `~/.config`, are not molt's alone and are created as
+/// `create_dir_all` does. An existing `dir` keeps the mode the user gave it.
+fn create_dir(dir: &Path) -> io::Result<()> {
+    if let Some(parent) = dir.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut builder = DirBuilder::new();
+    #[cfg(unix)]
+    std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+    match builder.create(dir) {
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists && dir.is_dir() => Ok(()),
+        result => result,
+    }
+}
+
 impl Sink {
+    /// Creates the file at `path`, with mode 0600 on Unix (PRD §8.8): a log holds the contents
+    /// of files the agent read, and a mode set after creation would leave them readable until
+    /// then.
     fn create(path: PathBuf) -> io::Result<Self> {
-        let file = OpenOptions::new()
-            .create_new(true)
-            .append(true)
-            .open(&path)?;
+        let mut options = OpenOptions::new();
+        options.create_new(true).append(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&path)?;
         Ok(Self {
             path,
             file: RefCell::new(Some(file)),
