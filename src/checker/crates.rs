@@ -35,10 +35,31 @@ pub fn crate_key(name: &str) -> ItemKey {
 /// pointing an existing key at another package is reported. The finding is
 /// keyed by the crate; names that differ only in `-` and `_` are the same.
 ///
-/// `new` that is not TOML is a `ParseError`. `old` that is not TOML declares
-/// nothing, so every dependency of `new` is reported.
+/// `new` that is not TOML is a `ParseError`, and so is `new` with a key or a
+/// `package` that is no crate name Cargo accepts (`is_crate_name`). `old` that
+/// is not TOML declares nothing, so every dependency of `new` is reported.
 pub fn in_manifest(old: &str, new: &str) -> Result<Vec<Finding>, ParseError> {
     let new_doc = Document::parse(new).map_err(|error| toml_parse_error(new, &error))?;
+    let new_deps = dependencies(new_doc.as_table());
+    for dep in &new_deps {
+        let names = [(dep.key.as_str(), dep.offset)].into_iter().chain(
+            dep.package
+                .as_deref()
+                .map(|package| (package, dep.package_offset)),
+        );
+        for (name, offset) in names {
+            if !is_crate_name(name) {
+                let (line, column) = line_col(new, offset);
+                // The name is left out: the message reaches the terminal, and the name may hold
+                // anything a quoted TOML key can.
+                return Err(ParseError {
+                    line,
+                    column,
+                    message: "not a crate name Cargo accepts".to_owned(),
+                });
+            }
+        }
+    }
     let old_deps: BTreeSet<(ItemKey, ItemKey)> = Document::parse(old)
         .map(|doc| {
             dependencies(doc.as_table())
@@ -47,7 +68,7 @@ pub fn in_manifest(old: &str, new: &str) -> Result<Vec<Finding>, ParseError> {
                 .collect()
         })
         .unwrap_or_default();
-    let mut findings: Vec<Finding> = dependencies(new_doc.as_table())
+    let mut findings: Vec<Finding> = new_deps
         .into_iter()
         .filter(|dep| !old_deps.contains(&dep.identity()))
         .map(|dep| Finding {
@@ -83,6 +104,8 @@ struct Dependency {
     package: Option<String>,
     /// Byte offset of the key.
     offset: usize,
+    /// Byte offset of the `package` value, or of the key when there is none.
+    package_offset: usize,
 }
 
 impl Dependency {
@@ -128,17 +151,32 @@ fn dependencies(root: &dyn TableLike) -> Vec<Dependency> {
     for table in tables {
         for (name, item) in table.iter() {
             let span = table.get_key_value(name).and_then(|(key, _)| key.span());
+            let offset = span.map_or(0, |span| span.start);
+            let package = item.get("package");
             found.push(Dependency {
                 key: name.to_owned(),
-                package: item
-                    .get("package")
+                package: package
                     .and_then(|package| package.as_str())
                     .map(str::to_owned),
-                offset: span.map_or(0, |span| span.start),
+                offset,
+                package_offset: package
+                    .and_then(|package| package.span())
+                    .map_or(offset, |span| span.start),
             });
         }
     }
     found
+}
+
+/// Whether Cargo accepts `name` as a crate name: a Unicode XID start character
+/// or `_`, then XID continue characters and `-` (PRD §9). Control characters
+/// are none of these.
+fn is_crate_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|first| unicode_ident::is_xid_start(first) || first == '_')
+        && chars.all(|c| unicode_ident::is_xid_continue(c) || c == '-')
 }
 
 fn toml_parse_error(source: &str, error: &toml_edit::TomlError) -> ParseError {
@@ -767,6 +805,42 @@ all = \"warn\"
         let new = "[dependencies]\ntokio = \n";
         let error = in_manifest("", new).unwrap_err();
         assert_eq!((error.line, error.column), (2, 9));
+    }
+
+    #[test]
+    fn a_dependency_name_cargo_does_not_accept_is_a_parse_error_without_the_name() {
+        for name in [
+            "a\\u001b[31mplanted",
+            ".planted",
+            "1planted",
+            "plan ted",
+            "",
+        ] {
+            for new in [
+                format!("[dependencies]\n\"{name}\" = \"1\"\n"),
+                format!("[dependencies]\nx = {{ version = \"1\", package = \"{name}\" }}\n"),
+            ] {
+                let error = in_manifest("", &new).unwrap_err();
+                assert_eq!(error.line, 2, "{new}");
+                assert!(!error.message.contains("planted"), "{}", error.message);
+            }
+        }
+    }
+
+    #[test]
+    fn crate_names_cargo_accepts_are_read_as_before() {
+        let new = "[dependencies]\nserde_json = \"1\"\ntokio-util = \"1\"\n_private = \"1\"\n\
+                   \"日本語\" = { path = \"../ja\" }\nx = { version = \"1\", package = \"café\" }\n";
+        assert_eq!(
+            manifest("", new),
+            [
+                (2, krate("serde_json")),
+                (3, krate("tokio_util")),
+                (4, krate("_private")),
+                (5, krate("日本語")),
+                (6, krate("café")),
+            ]
+        );
     }
 
     #[test]

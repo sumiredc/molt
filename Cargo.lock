@@ -800,6 +800,7 @@ dependencies = [
  "tempfile",
  "toml",
  "toml_edit",
+ "unicode-ident",
  "unicode-width",
 ]
 
