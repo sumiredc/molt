@@ -80,7 +80,7 @@ impl Git {
         let mut argv = argv(&["diff", "--no-color", "--no-ext-diff", "HEAD", "--"]);
         for path in paths {
             let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
-            argv.push(resolved.into_os_string());
+            argv.push(literal(&resolved));
         }
         self.execute(argv)
     }
@@ -92,7 +92,7 @@ impl Git {
         let mut argv = argv(&["add", "--"]);
         for path in paths {
             let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
-            argv.push(resolved.into_os_string());
+            argv.push(literal(&resolved));
         }
         self.execute(argv)
     }
@@ -120,7 +120,7 @@ impl Git {
         let mut argv = vec![OsString::from("commit"), message_arg, OsString::from("--")];
         for path in paths {
             let resolved = self.root.resolve_read(path).map_err(GitError::Path)?;
-            argv.push(resolved.into_os_string());
+            argv.push(literal(&resolved));
         }
         self.execute(argv)
     }
@@ -156,6 +156,16 @@ impl Git {
 
 fn argv(args: &[&str]) -> Vec<OsString> {
     args.iter().map(OsString::from).collect()
+}
+
+/// `path` as a pathspec git matches by its exact name. Without the `:(literal)` magic, git reads
+/// `*`, `?` and `[` in a file name as a glob, and `add` or `commit` would take in other files the
+/// glob matches, which the user did not approve (PRD §3). The magic is per path, unlike
+/// `--literal-pathspecs`, so the user's git hooks still see git's usual pathspecs.
+fn literal(path: &Path) -> OsString {
+    let mut pathspec = OsString::from(":(literal)");
+    pathspec.push(path);
+    pathspec
 }
 
 impl fmt::Display for GitError {
@@ -445,6 +455,41 @@ mod tests {
     }
 
     #[test]
+    fn a_path_with_glob_characters_adds_and_commits_only_that_file() {
+        let (dir, git) = repository_with_a_commit();
+        fs::write(dir.path().join("[ab].rs"), "").unwrap();
+        fs::write(dir.path().join("a.rs"), "").unwrap();
+        fs::write(dir.path().join("b.rs"), "").unwrap();
+
+        let added = git.add(&["[ab].rs"]).unwrap();
+        let committed = git.commit("Add [ab].rs", &["[ab].rs"], approve()).unwrap();
+
+        assert!(added.success, "{}", added.stderr);
+        assert!(committed.success, "{}", committed.stderr);
+        assert_eq!(last_commit_files(dir.path()), ["[ab].rs"]);
+        assert_eq!(git.status().unwrap().stdout, "?? a.rs\n?? b.rs\n");
+    }
+
+    #[test]
+    fn diff_head_with_glob_characters_shows_only_that_file() {
+        let (dir, git) = repository_with_a_commit();
+        fs::write(dir.path().join("t*.txt"), "").unwrap();
+        for argv in [
+            &["add", "--", ":(literal)t*.txt"][..],
+            &["commit", "--quiet", "--message=second"],
+        ] {
+            let status = git_in(dir.path(), argv).status().unwrap();
+            assert!(status.success());
+        }
+        fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
+
+        let output = git.diff_head(&["t*.txt"]).unwrap();
+
+        assert!(output.success, "{}", output.stderr);
+        assert_eq!(output.stdout, "");
+    }
+
+    #[test]
     fn commit_of_an_unchanged_path_fails_without_a_new_commit() {
         let (dir, git) = repository_with_a_commit();
 
@@ -500,9 +545,9 @@ mod tests {
 
         let a_txt = dir.path().canonicalize().unwrap().join("a.txt");
         let mut add = argv(&["add", "--"]);
-        add.push(a_txt.clone().into_os_string());
+        add.push(literal(&a_txt));
         let mut commit = argv(&["commit", "--message=Add a.txt", "--"]);
-        commit.push(a_txt.into_os_string());
+        commit.push(literal(&a_txt));
         let invocations = git.invocations();
         assert_eq!(
             invocations,
