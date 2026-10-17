@@ -293,3 +293,19 @@ fn show_without_the_profile_flag_reads_profile_toml_in_the_molt_directory() {
         ["seen", "manual", "2026-10-10T12:34:56Z"]
     );
 }
+
+#[test]
+fn show_does_not_print_control_characters_in_a_crate_key() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("profile.toml");
+    fs::write(
+        &path,
+        "[items.\"crate:a\\u001b[31mplanted\"]\nstatus = \"seen\"\nprovenance = \"manual\"\nat = 2026-10-10T12:34:56Z\n",
+    )
+    .unwrap();
+    let output = molt_with_profile(&path, &["profile", "show"]);
+    let show = stdout(&output);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(show.contains("crate:a[31mplanted"), "{show:?}");
+    assert!(!show.contains('\u{1b}'), "{show:?}");
+}
