@@ -197,8 +197,9 @@ pub(crate) mod testing {
 
     /// Keeps the developer's own git config out of the tests, and gives commits an author by
     /// environment instead of by config, so `Git` itself never sets one. Removes the variables
-    /// that point git at another repository, which a git hook running the tests would set.
-    const TEST_ENV: [(&str, Option<&str>); 11] = [
+    /// that point git at another repository, which a git hook running the tests would set, and
+    /// those that change how git reads a pathspec.
+    const TEST_ENV: [(&str, Option<&str>); 15] = [
         ("GIT_CONFIG_GLOBAL", Some("/dev/null")),
         ("GIT_CONFIG_NOSYSTEM", Some("1")),
         ("GIT_AUTHOR_NAME", Some("molt test")),
@@ -210,6 +211,10 @@ pub(crate) mod testing {
         ("GIT_INDEX_FILE", None),
         ("GIT_OBJECT_DIRECTORY", None),
         ("GIT_COMMON_DIR", None),
+        ("GIT_LITERAL_PATHSPECS", None),
+        ("GIT_GLOB_PATHSPECS", None),
+        ("GIT_NOGLOB_PATHSPECS", None),
+        ("GIT_ICASE_PATHSPECS", None),
     ];
 
     /// `git <args>` in `dir`, with [`TEST_ENV`].
@@ -454,12 +459,21 @@ mod tests {
         );
     }
 
+    /// `a.rs` is tracked and changed, so a glob in `commit` would take it in, not only in `add`.
     #[test]
     fn a_path_with_glob_characters_adds_and_commits_only_that_file() {
         let (dir, git) = repository_with_a_commit();
-        fs::write(dir.path().join("[ab].rs"), "").unwrap();
         fs::write(dir.path().join("a.rs"), "").unwrap();
+        for argv in [
+            &["add", "a.rs"][..],
+            &["commit", "--quiet", "--message=second"],
+        ] {
+            let status = git_in(dir.path(), argv).status().unwrap();
+            assert!(status.success());
+        }
+        fs::write(dir.path().join("a.rs"), "changed\n").unwrap();
         fs::write(dir.path().join("b.rs"), "").unwrap();
+        fs::write(dir.path().join("[ab].rs"), "").unwrap();
 
         let added = git.add(&["[ab].rs"]).unwrap();
         let committed = git.commit("Add [ab].rs", &["[ab].rs"], approve()).unwrap();
@@ -467,7 +481,7 @@ mod tests {
         assert!(added.success, "{}", added.stderr);
         assert!(committed.success, "{}", committed.stderr);
         assert_eq!(last_commit_files(dir.path()), ["[ab].rs"]);
-        assert_eq!(git.status().unwrap().stdout, "?? a.rs\n?? b.rs\n");
+        assert_eq!(git.status().unwrap().stdout, " M a.rs\n?? b.rs\n");
     }
 
     #[test]
@@ -481,12 +495,14 @@ mod tests {
             let status = git_in(dir.path(), argv).status().unwrap();
             assert!(status.success());
         }
+        fs::write(dir.path().join("t*.txt"), "changed\n").unwrap();
         fs::write(dir.path().join("tracked.txt"), "new\n").unwrap();
 
         let output = git.diff_head(&["t*.txt"]).unwrap();
 
         assert!(output.success, "{}", output.stderr);
-        assert_eq!(output.stdout, "");
+        assert!(output.stdout.contains("t*.txt"), "{}", output.stdout);
+        assert!(!output.stdout.contains("tracked.txt"), "{}", output.stdout);
     }
 
     #[test]
@@ -545,9 +561,9 @@ mod tests {
 
         let a_txt = dir.path().canonicalize().unwrap().join("a.txt");
         let mut add = argv(&["add", "--"]);
-        add.push(literal(&a_txt));
+        add.push(format!(":(literal){}", a_txt.display()).into());
         let mut commit = argv(&["commit", "--message=Add a.txt", "--"]);
-        commit.push(literal(&a_txt));
+        commit.push(format!(":(literal){}", a_txt.display()).into());
         let invocations = git.invocations();
         assert_eq!(
             invocations,
