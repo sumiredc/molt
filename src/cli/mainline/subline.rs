@@ -10,7 +10,7 @@ use crate::agent::subline::{Choice, Resolution, SubLine};
 use crate::llm::ChatError;
 use crate::profile::status::ItemKey;
 use crate::ui::markdown::HoldFirstCode;
-use crate::ui::{Picked, Tone, Ui};
+use crate::ui::{Picked, Tone, Ui, printable};
 
 /// The width of the banners, in characters.
 const BANNER_WIDTH: usize = 60;
@@ -245,8 +245,10 @@ pub(super) fn step_lines(boundary: &Boundary) -> Vec<(Tone, String)> {
 }
 
 /// The side-line prompt (PRD §8.6), e.g. `molt [sub: arc, mutex]> `.
+/// The line prompt, which names the crates of the boundary as the model wrote them in
+/// `Cargo.toml`, so it is made text before the terminal draws it.
 fn prompt(items: &[ItemKey]) -> String {
-    format!("molt [sub: {}]> ", names(items))
+    printable(&format!("molt [sub: {}]> ", names(items))).into_owned()
 }
 
 fn names(items: &[ItemKey]) -> String {
@@ -969,5 +971,16 @@ mod open {
             assert_eq!(snapshot(dir.path()), before);
             assert!(cargo.calls().is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod prompt_tests {
+    use super::*;
+
+    #[test]
+    fn control_characters_in_a_crate_name_are_not_in_the_line_prompt() {
+        let items = [ItemKey::Crate("a\u{1b}[31mplanted".to_owned())];
+        assert_eq!(prompt(&items), "molt [sub: crate:a[31mplanted]> ");
     }
 }

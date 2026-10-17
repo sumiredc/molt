@@ -813,6 +813,7 @@ all = \"warn\"
             "a\\u001b[31mplanted",
             ".planted",
             "1planted",
+            "-planted",
             "plan ted",
             "",
         ] {
@@ -825,6 +826,13 @@ all = \"warn\"
                 assert!(!error.message.contains("planted"), "{}", error.message);
             }
         }
+    }
+
+    #[test]
+    fn a_package_cargo_does_not_accept_is_an_error_at_the_package() {
+        let new = "[dependencies.x]\nversion = \"1\"\npackage = \"-planted\"\n";
+        let error = in_manifest("", new).unwrap_err();
+        assert_eq!((error.line, error.column), (3, 11));
     }
 
     #[test]

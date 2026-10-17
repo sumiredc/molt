@@ -396,6 +396,7 @@ fn control_characters_in_file_names_are_not_printed() {
         ("a\u{1b}[31mplanted.rs", USES_DBG),
         ("b\u{1b}[31mplanted.rs", "fn main( {\n"),
     ]);
+    fs::write(dir.path().join("c\u{1b}[31mplanted.rs"), [0xff]).unwrap();
     let profile = profile(&dir, "");
     let output = check(dir.path(), &profile, &[]);
     let (stdout, stderr) = (stdout(&output), stderr(&output));
@@ -404,6 +405,7 @@ fn control_characters_in_file_names_are_not_printed() {
         "{stdout:?}"
     );
     assert!(stderr.contains("b[31mplanted.rs:"), "{stderr:?}");
+    assert!(stderr.contains("c[31mplanted.rs: "), "{stderr:?}");
     assert!(!stdout.contains('\u{1b}'), "{stdout:?}");
     assert!(!stderr.contains('\u{1b}'), "{stderr:?}");
 }

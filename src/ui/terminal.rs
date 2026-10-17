@@ -142,8 +142,6 @@ impl Ui for TerminalUi {
         choices: &[(usize, &str)],
         line_prompt: &str,
     ) -> Result<Picked, UiError> {
-        // The line prompt may name crates the model wrote.
-        let line_prompt = &*super::printable(line_prompt);
         self.screen.status(None);
         if !io::stdin().is_terminal() || !self.screen.styled() {
             return self.choose_by_line(prompt, choices, line_prompt);
