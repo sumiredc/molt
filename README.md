@@ -8,6 +8,8 @@ molt keeps a profile of the Rust constructs you have written. Code made of them,
 
 molt is named after what crabs do to grow: they shed their shell, which is called molting. Rust's mascot is a crab, and in molt the range of what you understand is your shell, and it widens the more you use molt. Grow your Rust, one shell at a time.
 
+Product page: <https://sumiredc.github.io/molt/>
+
 ## Prerequisites
 
 - [rustup](https://rustup.rs/). The toolchain version is pinned in `rust-toolchain.toml`, and rustup installs it on the first `cargo` command

@@ -8,6 +8,8 @@ molt は、利用者が書いたことのある Rust の書き方をプロファ
 
 molt（モルト）という名前は、カニが大きくなるために殻を脱ぎ捨てること（脱皮＝molt）から取った。Rust のマスコットはカニで、molt では理解の範囲が殻にあたり、使うほど広がる。Grow your Rust, one shell at a time.
 
+紹介ページ: <https://sumiredc.github.io/molt/ja/>
+
 ## 前提
 
 - [rustup](https://rustup.rs/)。toolchain の版は `rust-toolchain.toml` で固定していて、最初の `cargo` コマンドで rustup が入れる
